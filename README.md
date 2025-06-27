@@ -10,6 +10,8 @@ Hybrid is a programming language compiler/interpreter that combines elements fro
 - **Expression evaluation** with binary operators and precedence
 - **External function declarations** for linking with external libraries
 - **REPL (Read-Eval-Print Loop)** for interactive development
+- **Foreach loops** with syntax `for type var in collection { ... }`
+- **Variable declarations** with C-style syntax and optional initialization
 
 ## Language Syntax
 
@@ -46,6 +48,35 @@ External functions can be declared for linking:
 ```c
 extern int printf(char format, int value)
 extern int getchar()
+```
+
+### Variable Declarations
+
+Variables can be declared with C-style syntax:
+
+```c
+int x = 10
+float pi = 3.14
+double value
+char ch = 'A'
+```
+
+### Foreach Loops
+
+Iterate over collections with typed loop variables:
+
+```c
+// Simple foreach
+for int num in nums {
+    num * 2
+}
+
+// Nested foreach loops
+for int i in list1 {
+    for int j in list2 {
+        i + j
+    }
+}
 ```
 
 ### Expressions
@@ -131,8 +162,8 @@ The compiler follows a traditional multi-pass design:
 
 ### 1. Lexer (`src/lexer.cpp/h`)
 - Tokenizes input into tokens (identifiers, numbers, keywords, operators)
-- Handles comments starting with `#`
-- Recognizes keywords: `extern`, `return`
+- Handles comments starting with `//` (C-style line comments)
+- Recognizes keywords: `extern`, `return`, `for`, `in`, type keywords
 - Uses newlines as statement terminators (semicolons optional)
 
 ### 2. Parser (`src/parser.cpp/h`) 
@@ -140,6 +171,8 @@ The compiler follows a traditional multi-pass design:
 - Parses C-style function declarations with typed parameters
 - Handles curly bracket blocks and return statements
 - Supports both single-line and multi-line function definitions
+- Parses foreach loops with typed iteration variables
+- Handles variable declarations with optional initialization
 
 ### 3. AST (`src/ast.cpp/h`)
 - Defines Abstract Syntax Tree nodes:
@@ -153,6 +186,9 @@ The compiler follows a traditional multi-pass design:
   - `StmtAST`: Base statement class
   - `ReturnStmtAST`: Return statements
   - `BlockStmtAST`: Statement blocks
+  - `VariableDeclarationStmtAST`: Variable declarations
+  - `ExpressionStmtAST`: Expression statements
+  - `ForEachStmtAST`: Foreach loops
 
 ### 4. Top-level Parser (`src/toplevel.cpp/h`)
 - Handles the REPL loop
@@ -182,34 +218,52 @@ The compiler follows a traditional multi-pass design:
 ### Comments
 - Line comments start with `//` and continue to end of line
 
+### Control Flow
+- Foreach loops: `for type var in collection { body }`
+- Supports nested loops and can be used within functions
+
 ## Example Programs
 
 ```c
-# Simple arithmetic function
+// Simple arithmetic function
 int calculate(int a, int b) { return a * b + 10 }
 
-# External library function
+// Variable declarations
+int count = 0
+float rate = 0.05
+
+// External library function
 extern int puts(char message)
 
-# Multi-line function with Allman style
+// Multi-line function with Allman style
 int fibonacci(int n)
 {
     return n + 1  // Simplified for demo
 }
 
-# Expression evaluation
+// Foreach loop example
+for int num in numbers {
+    num * num
+}
+
+// Expression evaluation
 2 + 3 * (4 + 5)
 ```
 
 ## Current Status
 
-This is a frontend-only implementation focusing on lexical analysis, parsing, and AST construction. The compiler successfully parses C-style function syntax but does not yet include:
+This is a frontend-only implementation focusing on lexical analysis, parsing, and AST construction. The compiler successfully parses:
 
+- C-style function syntax with typed parameters
+- Variable declarations with optional initialization
+- Foreach loops with typed iteration variables
+- Expression statements and return statements
+
+Not yet implemented:
 - Code generation (LLVM backend)
 - Type checking and validation
-- Variable declarations and assignments
-- Control flow statements (if/else, loops)
-- Multiple statements per function body
+- Variable assignments (only declarations)
+- Traditional control flow statements (if/else, while, for)
 - Advanced type system features
 
 ## Development

@@ -24,6 +24,10 @@ int gettok() {
       return tok_extern;
     if (IdentifierStr == "return")
       return tok_return;
+    if (IdentifierStr == "for")
+      return tok_for;
+    if (IdentifierStr == "in")
+      return tok_in;
     if (IdentifierStr == "int")
       return tok_int;
     if (IdentifierStr == "float")
