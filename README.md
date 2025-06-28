@@ -2,6 +2,8 @@
 
 Hybrid is a programming language compiler/interpreter that combines elements from multiple language paradigms. The project implements a traditional compiler architecture with lexing, parsing, and AST representation.
 
+> **📝 Branch Note**: This README describes the `codegen` branch which includes complete LLVM code generation. The `main` branch contains only the frontend parser. To use the full compiler with code generation, switch to the `codegen` branch: `git checkout codegen`
+
 ## Features
 
 - **C-style function syntax** with typed parameters and return types
