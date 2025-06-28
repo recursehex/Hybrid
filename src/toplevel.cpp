@@ -1,20 +1,38 @@
 #include "toplevel.h"
 #include "parser.h"
 #include "lexer.h"
+#include "ast.h"
 #include <cstdio>
 
+// LLVM includes for module and context management
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/raw_ostream.h"
+
 void HandleDefinition() {
-  if (ParseDefinition()) {
-    fprintf(stderr, "Parsed a function definition.\n");
+  if (auto FnAST = ParseDefinition()) {
+    fprintf(stderr, "Parsed function successfully, generating code...\n");
+    if (auto FnIR = FnAST->codegen()) {
+      fprintf(stderr, "Generated function IR:\n");
+      FnIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    } else {
+      fprintf(stderr, "Error: Failed to generate IR for function\n");
+    }
   } else {
+    fprintf(stderr, "Error: Failed to parse function definition\n");
     // Skip token for error recovery.
     getNextToken();
   }
 }
 
 void HandleExtern() {
-  if (ParseExtern()) {
-    fprintf(stderr, "Parsed an extern\n");
+  if (auto ProtoAST = ParseExtern()) {
+    if (auto FnIR = ProtoAST->codegen()) {
+      fprintf(stderr, "Generated extern IR:\n");
+      FnIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    }
   } else {
     // Skip token for error recovery.
     getNextToken();
@@ -23,8 +41,12 @@ void HandleExtern() {
 
 void HandleTopLevelExpression() {
   // Evaluate a top-level expression into an anonymous function.
-  if (ParseTopLevelExpr()) {
-    fprintf(stderr, "Parsed a top-level expr\n");
+  if (auto FnAST = ParseTopLevelExpr()) {
+    if (auto FnIR = FnAST->codegen()) {
+      fprintf(stderr, "Generated top-level expression IR:\n");
+      FnIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    }
   } else {
     // Skip token for error recovery.
     getNextToken();
@@ -32,8 +54,12 @@ void HandleTopLevelExpression() {
 }
 
 void HandleVariableDeclaration() {
-  if (ParseVariableDeclaration()) {
-    fprintf(stderr, "Parsed a variable declaration.\n");
+  if (auto VarAST = ParseVariableDeclaration()) {
+    if (auto VarIR = VarAST->codegen()) {
+      fprintf(stderr, "Generated variable declaration IR:\n");
+      VarIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    }
   } else {
     // Skip token for error recovery.
     getNextToken();

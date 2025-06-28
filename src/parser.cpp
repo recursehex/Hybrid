@@ -1,6 +1,8 @@
 #include "parser.h"
 #include "lexer.h"
 #include <cstdio>
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/IR/Function.h"
 
 /// CurTok/getNextToken - Provide a simple token buffer.  CurTok is the current
 /// token the parser is looking at.  getNextToken reads another token from the
@@ -542,7 +544,14 @@ void ParseTypeIdentifier() {
     }
     
     auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-    fprintf(stderr, "Parsed a function definition.\n");
+    fprintf(stderr, "Parsed function successfully, generating code...\n");
+    if (auto FnIR = Fn->codegen()) {
+      fprintf(stderr, "Generated function IR:\n");
+      FnIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    } else {
+      fprintf(stderr, "Error: Failed to generate IR for function\n");
+    }
     
   } else {
     // It's a variable declaration
@@ -559,6 +568,13 @@ void ParseTypeIdentifier() {
     }
     
     auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer));
-    fprintf(stderr, "Parsed a variable declaration.\n");
+    fprintf(stderr, "Parsed variable declaration, generating code...\n");
+    if (auto VarIR = VarDecl->codegen()) {
+      fprintf(stderr, "Generated variable declaration IR:\n");
+      VarIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    } else {
+      fprintf(stderr, "Error: Failed to generate IR for variable declaration\n");
+    }
   }
 }

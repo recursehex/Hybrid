@@ -5,11 +5,13 @@ Hybrid is a programming language compiler/interpreter that combines elements fro
 ## Features
 
 - **C-style function syntax** with typed parameters and return types
+- **LLVM code generation** - generates optimized machine code via LLVM IR
+- **Automatic type system** with smart type inference and casting
 - **Curly bracket blocks** for function implementations  
 - **Multiple bracket styles** including single-line and Allman style
 - **Expression evaluation** with binary operators and precedence
 - **External function declarations** for linking with external libraries
-- **REPL (Read-Eval-Print Loop)** for interactive development
+- **REPL (Read-Eval-Print Loop)** with live IR generation for interactive development
 - **Foreach loops** with syntax `for type var in collection { ... }`
 - **Variable declarations** with C-style syntax and mandatory initialization
 
@@ -99,64 +101,106 @@ x < y + 1    // Comparison with arithmetic
 
 ## Building
 
-The project uses a Makefile for building:
+The project uses a Makefile with automatic LLVM integration:
 
 ```bash
-# Build the compiler
+# Build the compiler (automatically links with LLVM)
 make
 
 # Clean build artifacts
 make clean
 
-# Manual compilation (if needed)
-clang++ -std=c++17 -o hybrid src/driver.cpp src/lexer.cpp src/parser.cpp src/ast.cpp src/toplevel.cpp
+# The Makefile automatically detects LLVM installation:
+# - Checks for llvm-config in PATH first
+# - Falls back to Homebrew location on macOS (/opt/homebrew/opt/llvm/bin/llvm-config)
+# - Links with LLVM core libraries for code generation
 ```
+
+### Prerequisites
+
+- **LLVM 20+** installed on your system
+- **clang++** with C++17 support
+- On macOS: `brew install llvm`
+- On Linux: Install llvm-dev package for your distribution
 
 ## Usage
 
 ### Interactive Mode (REPL)
 
-Run the compiler without arguments to start the interactive REPL:
+Run the compiler without arguments to start the interactive REPL with live LLVM IR generation:
 
 ```bash
 ./hybrid
 ready> int add(int x, int y) { return x + y }
-Parsed a function definition.
-ready> extern int printf(char msg)
-Parsed an extern
-ready> 2 + 3 * 4
-Parsed a top-level expr
+Parsed function successfully, generating code...
+Generated function IR:
+define i32 @add(i32 %a, i32 %b) {
+entry:
+  %a1 = alloca i32, align 4
+  store i32 %a, ptr %a1, align 4
+  %b2 = alloca i32, align 4
+  store i32 %b, ptr %b2, align 4
+  %a3 = load i32, ptr %a1, align 4
+  %b4 = load i32, ptr %b2, align 4
+  %addtmp = add i32 %a3, %b4
+  ret i32 %addtmp
+}
+
+ready> 2 + 3 * 5
+Generated top-level expression IR:
+define void @__anon_expr() {
+entry:
+  ret i32 17
+}
+
 ready>
 ```
 
 ### File Input
 
-You can pipe source code files to the compiler:
+You can pipe source code files to the compiler to see generated LLVM IR:
 
 ```bash
-cat program.hy | ./hybrid
+# Test with code generation examples
+./hybrid < test/codegen_test.txt
+./hybrid < test/single_function.txt
 
-# Test with provided examples
-cat test/test.txt | ./hybrid
-cat test/test_allman.txt | ./hybrid
+# Test arithmetic and expressions
+./hybrid < test/expr_test.txt
+./hybrid < test/bool_test.txt
+
+# Legacy parsing tests (older format)
+./hybrid < test/test_clean_comprehensive.txt
 ```
 
 ## Testing
 
 The `test/` directory contains various test files demonstrating different language features:
 
-- `test.txt` - Complete examples of all syntax forms
-- `test_brackets.txt` - Various bracket placement styles
+### Code Generation Tests
+- `codegen_test.txt` - Complete functions with LLVM IR generation
+- `single_function.txt` - Simple function for testing codegen
+- `expr_test.txt` - Arithmetic expressions and operations
+- `bool_test.txt` - Boolean literals and expressions
+
+### Legacy Parser Tests
+- `test_clean_comprehensive.txt` - Comprehensive syntax examples
+- `test_brackets.txt` - Various bracket placement styles  
 - `test_typed_params.txt` - C-style typed parameter examples
-- `test_examples.txt` - Basic function definition examples
 
 Run tests with:
 ```bash
-# Test all features
-cat test/test.txt | ./hybrid
+# Test code generation
+./hybrid < test/codegen_test.txt
 
-# Test specific syntax styles
-cat test/test_brackets.txt | ./hybrid
+# Test arithmetic expressions  
+./hybrid < test/expr_test.txt
+
+# Test function definitions
+./hybrid < test/single_function.txt
+
+# Test boolean expressions
+./hybrid < test/bool_test.txt
 ```
 
 ## Architecture
@@ -259,19 +303,29 @@ for int num in numbers {
 
 ## Current Status
 
-This is a frontend-only implementation focusing on lexical analysis, parsing, and AST construction. The compiler successfully parses:
+This is a **complete compiler implementation** with both frontend and backend. The compiler successfully handles:
 
-- C-style function syntax with typed parameters
-- Variable declarations with mandatory initialization
-- Foreach loops with typed iteration variables
-- Expression statements and return statements
+### ✅ Fully Implemented
+- **LLVM code generation** - Complete IR generation for all language constructs
+- **Type system** - Automatic type inference, promotion, and casting
+- **Function compilation** - Full function definitions with typed parameters
+- **Expression evaluation** - Arithmetic, comparisons, and function calls
+- **Variable management** - Declarations with proper memory allocation
+- **Cross-platform build** - Automatic LLVM detection and linking
 
-Not yet implemented:
-- Code generation (LLVM backend)
-- Type checking and validation
-- Variable assignments (only declarations)
+### ✅ Code Generation Features
+- **Smart type handling** - `i32` for integers, `double` for floats, `i1` for booleans
+- **Automatic casting** - Seamless conversion between compatible types
+- **Memory management** - Proper alloca/load/store for variables
+- **Function calls** - Type-safe parameter passing and return values
+- **Live IR display** - Interactive REPL shows generated LLVM IR
+
+### 🚧 Not Yet Implemented
+- Variable assignments (only declarations supported)
 - Traditional control flow statements (if/else, while, for)
-- Advanced type system features
+- Advanced type system features (structs, arrays, pointers)
+- Module system and imports
+- Standard library integration
 
 ## Development
 

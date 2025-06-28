@@ -5,16 +5,26 @@
 #include <string>
 #include <vector>
 
+// LLVM forward declarations
+namespace llvm {
+  class Value;
+  class Function;
+}
+
+#include "llvm/IR/Value.h"
+
 /// ExprAST - Base class for all expression nodes.
 class ExprAST {
 public:
   virtual ~ExprAST() = default;
+  virtual llvm::Value *codegen() = 0;
 };
 
 /// StmtAST - Base class for all statement nodes.
 class StmtAST {
 public:
   virtual ~StmtAST() = default;
+  virtual llvm::Value *codegen() = 0;
 };
 
 /// ReturnStmtAST - Statement class for return statements.
@@ -24,6 +34,9 @@ class ReturnStmtAST : public StmtAST {
 public:
   ReturnStmtAST(std::unique_ptr<ExprAST> ReturnValue)
       : ReturnValue(std::move(ReturnValue)) {}
+  
+  llvm::Value *codegen() override;
+  ExprAST *getReturnValue() const { return ReturnValue.get(); }
 };
 
 /// BlockStmtAST - Statement class for statement blocks.
@@ -33,6 +46,9 @@ class BlockStmtAST : public StmtAST {
 public:
   BlockStmtAST(std::vector<std::unique_ptr<StmtAST>> Statements)
       : Statements(std::move(Statements)) {}
+  
+  llvm::Value *codegen() override;
+  const std::vector<std::unique_ptr<StmtAST>> &getStatements() const { return Statements; }
 };
 
 /// VariableDeclarationStmtAST - Statement class for variable declarations.
@@ -45,6 +61,11 @@ public:
   VariableDeclarationStmtAST(const std::string &Type, const std::string &Name,
                              std::unique_ptr<ExprAST> Initializer)
       : Type(Type), Name(Name), Initializer(std::move(Initializer)) {}
+  
+  llvm::Value *codegen() override;
+  const std::string &getType() const { return Type; }
+  const std::string &getName() const { return Name; }
+  ExprAST *getInitializer() const { return Initializer.get(); }
 };
 
 /// ExpressionStmtAST - Statement class for expression statements.
@@ -54,6 +75,9 @@ class ExpressionStmtAST : public StmtAST {
 public:
   ExpressionStmtAST(std::unique_ptr<ExprAST> Expression)
       : Expression(std::move(Expression)) {}
+  
+  llvm::Value *codegen() override;
+  ExprAST *getExpression() const { return Expression.get(); }
 };
 
 /// ForEachStmtAST - Statement class for foreach loops.
@@ -71,6 +95,7 @@ public:
         Body(std::move(Body)) {}
   
   void print() const;
+  llvm::Value *codegen() override;
 };
 
 /// UseStmtAST - Statement class for use (import) statements.
@@ -81,6 +106,7 @@ public:
   UseStmtAST(const std::string &Module) : Module(Module) {}
   
   const std::string &getModule() const { return Module; }
+  llvm::Value *codegen() override;
 };
 
 /// NumberExprAST - Expression class for numeric literals like "1.0".
@@ -89,6 +115,9 @@ class NumberExprAST : public ExprAST {
 
 public:
   NumberExprAST(double Val) : Val(Val) {}
+  
+  llvm::Value *codegen() override;
+  double getValue() const { return Val; }
 };
 
 /// BoolExprAST - Expression class for boolean literals (true/false).
@@ -97,6 +126,9 @@ class BoolExprAST : public ExprAST {
 
 public:
   BoolExprAST(bool Val) : Val(Val) {}
+  
+  llvm::Value *codegen() override;
+  bool getValue() const { return Val; }
 };
 
 /// StringExprAST - Expression class for string literals like "hello".
@@ -105,6 +137,9 @@ class StringExprAST : public ExprAST {
 
 public:
   StringExprAST(const std::string &Val) : Val(Val) {}
+  
+  llvm::Value *codegen() override;
+  const std::string &getValue() const { return Val; }
 };
 
 /// CharExprAST - Expression class for character literals like 'a'.
@@ -113,6 +148,9 @@ class CharExprAST : public ExprAST {
 
 public:
   CharExprAST(char Val) : Val(Val) {}
+  
+  llvm::Value *codegen() override;
+  char getValue() const { return Val; }
 };
 
 /// VariableExprAST - Expression class for referencing a variable, like "a".
@@ -121,6 +159,9 @@ class VariableExprAST : public ExprAST {
 
 public:
   VariableExprAST(const std::string &Name) : Name(Name) {}
+  
+  llvm::Value *codegen() override;
+  const std::string &getName() const { return Name; }
 };
 
 /// BinaryExprAST - Expression class for a binary operator.
@@ -132,6 +173,11 @@ public:
   BinaryExprAST(char Op, std::unique_ptr<ExprAST> LHS,
                 std::unique_ptr<ExprAST> RHS)
       : Op(Op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
+  
+  llvm::Value *codegen() override;
+  char getOp() const { return Op; }
+  ExprAST *getLHS() const { return LHS.get(); }
+  ExprAST *getRHS() const { return RHS.get(); }
 };
 
 /// CallExprAST - Expression class for function calls.
@@ -143,6 +189,10 @@ public:
   CallExprAST(const std::string &Callee,
               std::vector<std::unique_ptr<ExprAST>> Args)
       : Callee(Callee), Args(std::move(Args)) {}
+  
+  llvm::Value *codegen() override;
+  const std::string &getCallee() const { return Callee; }
+  const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
 };
 
 /// Parameter - Represents a function parameter with type and name
@@ -169,6 +219,8 @@ public:
   const std::string &getReturnType() const { return ReturnType; }
   const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
+  
+  llvm::Function *codegen();
 };
 
 /// FunctionAST - This class represents a function definition itself.
@@ -180,6 +232,17 @@ public:
   FunctionAST(std::unique_ptr<PrototypeAST> Proto,
               std::unique_ptr<BlockStmtAST> Body)
       : Proto(std::move(Proto)), Body(std::move(Body)) {}
+  
+  llvm::Function *codegen();
+  
+  PrototypeAST *getProto() const { return Proto.get(); }
+  BlockStmtAST *getBody() const { return Body.get(); }
 };
+
+// Initialize LLVM module
+void InitializeModule();
+
+// Get the LLVM module for printing
+llvm::Module *getModule();
 
 #endif // AST_H
