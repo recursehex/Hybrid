@@ -24,10 +24,13 @@ enum Token {
   tok_char = -11,
   tok_void = -12,
   tok_bool = -15,
+  tok_string = -18,
 
   // primary
   tok_identifier = -5,
   tok_number = -6,
+  tok_string_literal = -19,
+  tok_char_literal = -20,
   
   // boolean literals
   tok_true = -16,
@@ -39,6 +42,8 @@ enum Token {
 
 extern std::string IdentifierStr; // Filled in if tok_identifier
 extern double NumVal;             // Filled in if tok_number
+extern std::string StringVal;     // Filled in if tok_string_literal
+extern char CharVal;              // Filled in if tok_char_literal
 
 // gettok - Return the next token from standard input.
 int gettok();

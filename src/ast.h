@@ -99,6 +99,22 @@ public:
   BoolExprAST(bool Val) : Val(Val) {}
 };
 
+/// StringExprAST - Expression class for string literals like "hello".
+class StringExprAST : public ExprAST {
+  std::string Val;
+
+public:
+  StringExprAST(const std::string &Val) : Val(Val) {}
+};
+
+/// CharExprAST - Expression class for character literals like 'a'.
+class CharExprAST : public ExprAST {
+  char Val;
+
+public:
+  CharExprAST(char Val) : Val(Val) {}
+};
+
 /// VariableExprAST - Expression class for referencing a variable, like "a".
 class VariableExprAST : public ExprAST {
   std::string Name;

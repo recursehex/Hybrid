@@ -99,6 +99,8 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 ///   ::= numberexpr
 ///   ::= parenexpr
 ///   ::= boolexpr
+///   ::= stringexpr
+///   ::= charexpr
 std::unique_ptr<ExprAST> ParsePrimary() {
   switch (CurTok) {
   default:
@@ -113,6 +115,18 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case tok_false:
     getNextToken(); // consume 'false'
     return std::make_unique<BoolExprAST>(false);
+  case tok_string_literal:
+    {
+      auto Result = std::make_unique<StringExprAST>(StringVal);
+      getNextToken(); // consume the string literal
+      return std::move(Result);
+    }
+  case tok_char_literal:
+    {
+      auto Result = std::make_unique<CharExprAST>(CharVal);
+      getNextToken(); // consume the character literal
+      return std::move(Result);
+    }
   case '(':
     return ParseParenExpr();
   }
@@ -171,7 +185,7 @@ std::unique_ptr<ExprAST> ParseExpression() {
 std::unique_ptr<PrototypeAST> ParsePrototype() {
   // Parse return type
   if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-      CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool)
+      CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string)
     return LogErrorP("Expected return type in prototype");
 
   std::string ReturnType = IdentifierStr;
@@ -198,7 +212,7 @@ std::unique_ptr<PrototypeAST> ParsePrototype() {
   // Parse first parameter
   while (true) {
     if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-        CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool)
+        CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string)
       return LogErrorP("Expected parameter type");
     
     std::string ParamType = IdentifierStr;
@@ -283,7 +297,7 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
 /// variabledecl ::= type identifier '=' expression
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration() {
   if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double && 
-      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool)
+      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string)
     return nullptr;
     
   std::string Type = IdentifierStr;
@@ -318,7 +332,7 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   
   // Parse type
   if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double &&
-      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool) {
+      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string) {
     LogError("Expected type after 'for'");
     return nullptr;
   }
@@ -394,6 +408,7 @@ std::unique_ptr<StmtAST> ParseStatement() {
   case tok_char:
   case tok_void:
   case tok_bool:
+  case tok_string:
     return ParseVariableDeclaration();
   case '}':
     // End of block - not a statement, but not an error either
@@ -482,7 +497,7 @@ void ParseTypeIdentifier() {
     if (CurTok != ')') {
       while (true) {
         if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-            CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool) {
+            CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string) {
           fprintf(stderr, "Error: Expected parameter type\n");
           return;
         }

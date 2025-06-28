@@ -4,6 +4,8 @@
 
 std::string IdentifierStr; // Filled in if tok_identifier
 double NumVal;             // Filled in if tok_number
+std::string StringVal;     // Filled in if tok_string_literal
+char CharVal;              // Filled in if tok_char_literal
 
 /// gettok - Return the next token from standard input.
 int gettok() {
@@ -40,6 +42,8 @@ int gettok() {
       return tok_void;
     if (IdentifierStr == "bool")
       return tok_bool;
+    if (IdentifierStr == "string")
+      return tok_string;
     if (IdentifierStr == "true")
       return tok_true;
     if (IdentifierStr == "false")
@@ -56,6 +60,62 @@ int gettok() {
 
     NumVal = strtod(NumStr.c_str(), nullptr);
     return tok_number;
+  }
+
+  if (LastChar == '"') { // String literal: "..."
+    StringVal = "";
+    LastChar = getchar();
+    while (LastChar != '"' && LastChar != EOF) {
+      if (LastChar == '\\') {
+        // Handle escape sequences
+        LastChar = getchar();
+        switch (LastChar) {
+          case 'n': StringVal += '\n'; break;
+          case 't': StringVal += '\t'; break;
+          case 'r': StringVal += '\r'; break;
+          case '\\': StringVal += '\\'; break;
+          case '"': StringVal += '"'; break;
+          default: StringVal += LastChar; break;
+        }
+      } else {
+        StringVal += LastChar;
+      }
+      LastChar = getchar();
+    }
+    if (LastChar == '"') {
+      LastChar = getchar(); // eat closing "
+      return tok_string_literal;
+    }
+  }
+
+  if (LastChar == '\'') { // Character literal: '.'
+    LastChar = getchar();
+    if (LastChar == EOF) {
+      return LastChar; // Error case - EOF in character literal
+    }
+    
+    if (LastChar == '\\') {
+      // Handle escape sequences
+      LastChar = getchar();
+      switch (LastChar) {
+        case 'n': CharVal = '\n'; break;
+        case 't': CharVal = '\t'; break;
+        case 'r': CharVal = '\r'; break;
+        case '\\': CharVal = '\\'; break;
+        case '\'': CharVal = '\''; break;
+        case '0': CharVal = '\0'; break;
+        default: CharVal = LastChar; break;
+      }
+    } else {
+      CharVal = LastChar;
+    }
+    
+    LastChar = getchar();
+    if (LastChar == '\'') {
+      LastChar = getchar(); // eat closing '
+      return tok_char_literal;
+    }
+    // Error case - missing closing quote, but continue parsing
   }
 
   // Check for start of comment.
