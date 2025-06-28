@@ -1,0 +1,12 @@
+// Simple bool test
+bool x = true
+bool y = false
+
+// Test in expression
+true
+false
+
+// Test bool return type
+bool check() {
+    return true
+}

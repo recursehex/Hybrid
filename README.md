@@ -11,7 +11,7 @@ Hybrid is a programming language compiler/interpreter that combines elements fro
 - **External function declarations** for linking with external libraries
 - **REPL (Read-Eval-Print Loop)** for interactive development
 - **Foreach loops** with syntax `for type var in collection { ... }`
-- **Variable declarations** with C-style syntax and optional initialization
+- **Variable declarations** with C-style syntax and mandatory initialization
 
 ## Language Syntax
 
@@ -52,13 +52,15 @@ extern int getchar()
 
 ### Variable Declarations
 
-Variables can be declared with C-style syntax:
+Variables must be declared with C-style syntax and initialized:
 
 ```c
 int x = 10
 float pi = 3.14
-double value
+double value = 0.0
 char ch = 'A'
+bool flag = true
+bool active = false
 ```
 
 ### Foreach Loops
@@ -91,7 +93,8 @@ x < y + 1    // Comparison with arithmetic
 ### Supported Operators
 
 - Arithmetic: `+`, `-`, `*`
-- Comparison: `<`
+- Comparison: `<`, `>`
+- Assignment: `=`
 - Function calls: `functionName(args)`
 
 ## Building
@@ -163,7 +166,7 @@ The compiler follows a traditional multi-pass design:
 ### 1. Lexer (`src/lexer.cpp/h`)
 - Tokenizes input into tokens (identifiers, numbers, keywords, operators)
 - Handles comments starting with `//` (C-style line comments)
-- Recognizes keywords: `extern`, `return`, `for`, `in`, type keywords
+- Recognizes keywords: `extern`, `return`, `for`, `in`, type keywords, `true`, `false`
 - Uses newlines as statement terminators (semicolons optional)
 
 ### 2. Parser (`src/parser.cpp/h`) 
@@ -172,12 +175,13 @@ The compiler follows a traditional multi-pass design:
 - Handles curly bracket blocks and return statements
 - Supports both single-line and multi-line function definitions
 - Parses foreach loops with typed iteration variables
-- Handles variable declarations with optional initialization
+- Handles variable declarations with mandatory initialization
 
 ### 3. AST (`src/ast.cpp/h`)
 - Defines Abstract Syntax Tree nodes:
   - `ExprAST`: Base expression class
-  - `NumberExprAST`: Numeric literals  
+  - `NumberExprAST`: Numeric literals
+  - `BoolExprAST`: Boolean literals (true/false)
   - `VariableExprAST`: Variable references
   - `BinaryExprAST`: Binary operations
   - `CallExprAST`: Function calls
@@ -202,8 +206,10 @@ The compiler follows a traditional multi-pass design:
 
 ### Type System
 - Explicit typing for function return values and parameters
-- Built-in types: `int`, `float`, `char`, `void`, and any identifier as a type
+- Built-in types: `int`, `float`, `double`, `char`, `void`, `bool`
 - Parameters require both type and name: `int add(int x, int y)`
+- All variables must be initialized at declaration (no default values)
+- Boolean type with `true` and `false` literals
 
 ### Function Declaration Styles
 - **Single-line**: `int func(int x) { return x }`
@@ -228,9 +234,10 @@ The compiler follows a traditional multi-pass design:
 // Simple arithmetic function
 int calculate(int a, int b) { return a * b + 10 }
 
-// Variable declarations
+// Variable declarations (all must be initialized)
 int count = 0
 float rate = 0.05
+bool isActive = true
 
 // External library function
 extern int puts(char message)
@@ -255,7 +262,7 @@ for int num in numbers {
 This is a frontend-only implementation focusing on lexical analysis, parsing, and AST construction. The compiler successfully parses:
 
 - C-style function syntax with typed parameters
-- Variable declarations with optional initialization
+- Variable declarations with mandatory initialization
 - Foreach loops with typed iteration variables
 - Expression statements and return statements
 

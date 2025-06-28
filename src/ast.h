@@ -91,6 +91,14 @@ public:
   NumberExprAST(double Val) : Val(Val) {}
 };
 
+/// BoolExprAST - Expression class for boolean literals (true/false).
+class BoolExprAST : public ExprAST {
+  bool Val;
+
+public:
+  BoolExprAST(bool Val) : Val(Val) {}
+};
+
 /// VariableExprAST - Expression class for referencing a variable, like "a".
 class VariableExprAST : public ExprAST {
   std::string Name;

@@ -86,6 +86,7 @@ void MainLoop() {
     case tok_double:
     case tok_char:
     case tok_void:
+    case tok_bool:
       // Use the new unified handler
       ParseTypeIdentifier();
       break;

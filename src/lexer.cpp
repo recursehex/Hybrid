@@ -38,6 +38,12 @@ int gettok() {
       return tok_char;
     if (IdentifierStr == "void")
       return tok_void;
+    if (IdentifierStr == "bool")
+      return tok_bool;
+    if (IdentifierStr == "true")
+      return tok_true;
+    if (IdentifierStr == "false")
+      return tok_false;
     return tok_identifier;
   }
 

@@ -23,10 +23,15 @@ enum Token {
   tok_double = -10,
   tok_char = -11,
   tok_void = -12,
+  tok_bool = -15,
 
   // primary
   tok_identifier = -5,
   tok_number = -6,
+  
+  // boolean literals
+  tok_true = -16,
+  tok_false = -17,
   
   // delimiters
   tok_newline = -7
