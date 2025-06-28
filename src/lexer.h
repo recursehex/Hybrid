@@ -9,7 +9,7 @@ enum Token {
   tok_eof = -1,
 
   // commands
-  tok_def = -2,
+  tok_use = -2,
   tok_extern = -3,
   tok_return = -4,
   

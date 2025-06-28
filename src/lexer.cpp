@@ -18,8 +18,8 @@ int gettok() {
     while (isalnum((LastChar = getchar())) || LastChar == '_')
       IdentifierStr += LastChar;
 
-    if (IdentifierStr == "def")
-      return tok_def;
+    if (IdentifierStr == "use")
+      return tok_use;
     if (IdentifierStr == "extern")
       return tok_extern;
     if (IdentifierStr == "return")

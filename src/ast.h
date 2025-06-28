@@ -73,6 +73,16 @@ public:
   void print() const;
 };
 
+/// UseStmtAST - Statement class for use (import) statements.
+class UseStmtAST : public StmtAST {
+  std::string Module;
+
+public:
+  UseStmtAST(const std::string &Module) : Module(Module) {}
+  
+  const std::string &getModule() const { return Module; }
+};
+
 /// NumberExprAST - Expression class for numeric literals like "1.0".
 class NumberExprAST : public ExprAST {
   double Val;

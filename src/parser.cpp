@@ -351,13 +351,35 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   return std::make_unique<ForEachStmtAST>(Type, VarName, std::move(Collection), std::move(Body));
 }
 
-/// statement ::= returnstmt | variabledecl | foreachstmt | expressionstmt
+/// usestmt ::= 'use' identifier
+std::unique_ptr<UseStmtAST> ParseUseStatement() {
+  getNextToken(); // eat 'use'
+  
+  // Skip newlines after 'use'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse module name
+  if (CurTok != tok_identifier) {
+    LogError("Expected module name after 'use'");
+    return nullptr;
+  }
+  
+  std::string Module = IdentifierStr;
+  getNextToken(); // eat module name
+  
+  return std::make_unique<UseStmtAST>(Module);
+}
+
+/// statement ::= returnstmt | variabledecl | foreachstmt | usestmt | expressionstmt
 std::unique_ptr<StmtAST> ParseStatement() {
   switch (CurTok) {
   case tok_return:
     return ParseReturnStatement();
   case tok_for:
     return ParseForEachStatement();
+  case tok_use:
+    return ParseUseStatement();
   case tok_int:
   case tok_float:
   case tok_double:

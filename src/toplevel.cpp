@@ -50,8 +50,18 @@ void HandleForEachStatement() {
   }
 }
 
+void HandleUseStatement() {
+  auto Use = ParseUseStatement();
+  if (Use) {
+    fprintf(stderr, "Parsed a use statement: %s\n", Use->getModule().c_str());
+  } else {
+    // Skip token for error recovery.
+    getNextToken();
+  }
+}
 
-/// top ::= definition | external | expression | variabledecl | foreachstmt | ';' | '\n'
+
+/// top ::= definition | external | expression | variabledecl | foreachstmt | usestmt | ';' | '\n'
 void MainLoop() {
   while (true) {
     fprintf(stderr, "ready> ");
@@ -64,6 +74,9 @@ void MainLoop() {
       break;
     case tok_extern:
       HandleExtern();
+      break;
+    case tok_use:
+      HandleUseStatement();
       break;
     case tok_for:
       HandleForEachStatement();
