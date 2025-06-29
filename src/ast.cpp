@@ -234,6 +234,36 @@ llvm::Value *BinaryExprAST::codegen() {
       return Builder->CreateFCmpOGE(L, R, "getmp");
     else
       return Builder->CreateICmpSGE(L, R, "getmp");
+  } else if (Op == "&&") {
+    // Convert operands to booleans if needed
+    if (!L->getType()->isIntegerTy(1)) {
+      if (L->getType()->isFloatingPointTy())
+        L = Builder->CreateFCmpONE(L, llvm::ConstantFP::get(L->getType(), 0.0), "tobool");
+      else if (L->getType()->isIntegerTy())
+        L = Builder->CreateICmpNE(L, llvm::ConstantInt::get(L->getType(), 0), "tobool");
+    }
+    if (!R->getType()->isIntegerTy(1)) {
+      if (R->getType()->isFloatingPointTy())
+        R = Builder->CreateFCmpONE(R, llvm::ConstantFP::get(R->getType(), 0.0), "tobool");
+      else if (R->getType()->isIntegerTy())
+        R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
+    }
+    return Builder->CreateAnd(L, R, "andtmp");
+  } else if (Op == "||") {
+    // Convert operands to booleans if needed
+    if (!L->getType()->isIntegerTy(1)) {
+      if (L->getType()->isFloatingPointTy())
+        L = Builder->CreateFCmpONE(L, llvm::ConstantFP::get(L->getType(), 0.0), "tobool");
+      else if (L->getType()->isIntegerTy())
+        L = Builder->CreateICmpNE(L, llvm::ConstantInt::get(L->getType(), 0), "tobool");
+    }
+    if (!R->getType()->isIntegerTy(1)) {
+      if (R->getType()->isFloatingPointTy())
+        R = Builder->CreateFCmpONE(R, llvm::ConstantFP::get(R->getType(), 0.0), "tobool");
+      else if (R->getType()->isIntegerTy())
+        R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
+    }
+    return Builder->CreateOr(L, R, "ortmp");
   }
   
   return LogErrorV("invalid binary operator");

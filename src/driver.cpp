@@ -10,16 +10,18 @@ int main() {
   InitializeModule();
   // Install standard binary operators.
   // 1 is lowest precedence.
-  BinopPrecedence["="] = 2;  // assignment (lowest)
-  BinopPrecedence["<"] = 10;
+  BinopPrecedence["="] = 2;   // assignment (lowest)
+  BinopPrecedence["||"] = 5;  // logical OR
+  BinopPrecedence["&&"] = 6;  // logical AND
+  BinopPrecedence["<"] = 10;  // comparisons
   BinopPrecedence[">"] = 10;
   BinopPrecedence["<="] = 10;
   BinopPrecedence[">="] = 10;
   BinopPrecedence["=="] = 10;
   BinopPrecedence["!="] = 10;
-  BinopPrecedence["+"] = 20;
+  BinopPrecedence["+"] = 20;  // arithmetic
   BinopPrecedence["-"] = 20;
-  BinopPrecedence["*"] = 40; // highest.
+  BinopPrecedence["*"] = 40;  // highest.
 
   // Prime the first token.
   fprintf(stderr, "ready> ");

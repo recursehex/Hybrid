@@ -159,8 +159,10 @@ int gettok() {
       LastChar = getchar();
       return tok_ne;  // !=
     } else {
-      // Not !=, put the character back
+      // Not !=, put the character back and return ! token
       ungetc(NextChar, stdin);
+      LastChar = getchar();
+      return tok_not;  // !
     }
   }
   
@@ -187,6 +189,28 @@ int gettok() {
       ungetc(NextChar, stdin);
       LastChar = getchar();
       return tok_gt;  // >
+    }
+  }
+  
+  if (LastChar == '&') {
+    int NextChar = getchar();
+    if (NextChar == '&') {
+      LastChar = getchar();
+      return tok_and;  // &&
+    } else {
+      // Not &&, put the character back
+      ungetc(NextChar, stdin);
+    }
+  }
+  
+  if (LastChar == '|') {
+    int NextChar = getchar();
+    if (NextChar == '|') {
+      LastChar = getchar();
+      return tok_or;  // ||
+    } else {
+      // Not ||, put the character back
+      ungetc(NextChar, stdin);
     }
   }
 

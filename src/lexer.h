@@ -48,7 +48,12 @@ enum Token {
   tok_le = -26,        // <=
   tok_ge = -27,        // >=
   tok_lt = -28,        // <
-  tok_gt = -29         // >
+  tok_gt = -29,        // >
+  
+  // boolean operators
+  tok_and = -30,       // &&
+  tok_or = -31,        // ||
+  tok_not = -32        // !
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

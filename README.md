@@ -16,6 +16,9 @@ Hybrid is a programming language compiler/interpreter that combines elements fro
 - **REPL** with live IR generation for interactive development
 - **Foreach loops** with syntax `for type var in collection { ... }`
 - **Variable declarations** with C-style syntax and mandatory initialization
+- **If-else statements** with C-style syntax and full comparison operators
+- **Boolean operators** for logical operations (&&, ||, !)
+- **Unary expressions** including negative numbers and logical NOT
 
 ## Language Syntax
 
@@ -69,7 +72,55 @@ string text = "hello"
 string nothing = null
 ```
 
-### Foreach Loops
+### Control Flow
+
+#### If-Else Statements
+
+C-style conditional statements with full comparison operator support:
+
+```c
+// Simple if-else
+if x == 0 {
+    return 1
+} else {
+    return 2
+}
+
+// Boolean operators in conditions
+if num == 0 && ch == 'a' {
+    return true
+}
+
+if flag || count > 10 {
+    return active
+}
+
+// Logical NOT
+if !finished {
+    return continue
+}
+
+// If-else-if chains
+if score >= 90 {
+    return 4  // A grade
+} else if score >= 80 {
+    return 3  // B grade
+} else if score >= 70 {
+    return 2  // C grade
+} else {
+    return 1  // F grade
+}
+
+// Consecutive if statements (with early returns)
+int compare(int a, int b) {
+    if a == b { return 0 }
+    if a < b { return -1 }
+    if a > b { return 1 }
+    return 0
+}
+```
+
+#### Foreach Loops
 
 Iterate over collections with typed loop variables:
 
@@ -94,12 +145,18 @@ The language supports binary expressions with operator precedence:
 ```c
 2 + 3 * 4    // Evaluates to 14
 x < y + 1    // Comparison with arithmetic
+-5 + 10      // Unary minus with arithmetic
+!flag        // Logical NOT
+a == b && c != d  // Boolean AND with comparisons
+x > 0 || y < 0    // Boolean OR with comparisons
 ```
 
 ### Supported Operators
 
 - Arithmetic: `+`, `-`, `*`
-- Comparison: `<`, `>`
+- Comparison: `<`, `>`, `<=`, `>=`, `==`, `!=`
+- Boolean: `&&` (AND), `||` (OR), `!` (NOT)
+- Unary: `-` (negation), `!` (logical NOT)
 - Assignment: `=`
 - Function calls: `functionName(args)`
 
@@ -257,6 +314,8 @@ The `test/` directory contains various test files demonstrating different langua
 - `test_expr.txt` - Arithmetic expressions and operations
 - `test_bool.txt` - Boolean literals and expressions
 - `test_null.txt` - String variables and null initialization
+- `test_if_else.txt` - If-else statements and comparison operators
+- `test_boolean_ops.txt` - Boolean operators (&&, ||, !) and logical expressions
 
 ### Legacy Parser Tests
 - `test_clean_comprehensive.txt` - Comprehensive syntax examples
@@ -282,6 +341,12 @@ To run individual test files manually:
 
 # Test string and null features
 ./hybrid < test/test_null.txt
+
+# Test if-else statements and comparisons
+./hybrid < test/test_if_else.txt
+
+# Test boolean operators
+./hybrid < test/test_boolean_ops.txt
 ```
 
 ### Automated Test Suite
@@ -355,6 +420,8 @@ The compiler follows a traditional multi-pass design:
 - Supports both single-line and multi-line function definitions
 - Parses foreach loops with typed iteration variables
 - Handles variable declarations with mandatory initialization
+- Parses if-else statements with conditional branching
+- Supports unary expressions including negative numbers
 
 ### 3. AST (`src/ast.cpp/h`)
 - Defines Abstract Syntax Tree nodes:
@@ -375,6 +442,7 @@ The compiler follows a traditional multi-pass design:
   - `VariableDeclarationStmtAST`: Variable declarations
   - `ExpressionStmtAST`: Expression statements
   - `ForEachStmtAST`: Foreach loops
+  - `IfStmtAST`: If-else statements
 
 ### 4. Top-level Parser (`src/toplevel.cpp/h`)
 - Handles the REPL loop
@@ -408,6 +476,12 @@ The compiler follows a traditional multi-pass design:
 - Line comments start with `//` and continue to end of line
 
 ### Control Flow
+- If-else statements: `if condition { body } else { body }`
+  - Supports if-else-if chains
+  - Supports consecutive if statements with early returns
+  - All comparison operators available: `==`, `!=`, `<`, `>`, `<=`, `>=`
+  - Boolean operators for complex conditions: `&&`, `||`, `!`
+  - Operator precedence: `||` (lowest) < `&&` < comparisons (highest)
 - Foreach loops: `for type var in collection { body }`
 - Supports nested loops and can be used within functions
 
@@ -424,6 +498,38 @@ bool isActive = true
 string message = "Hello, World!"
 string empty = null
 
+// If-else conditional logic
+int grade(int score) {
+    if score >= 90 {
+        return 4  // A
+    } else if score >= 80 {
+        return 3  // B
+    } else if score >= 70 {
+        return 2  // C
+    } else {
+        return 1  // F
+    }
+}
+
+// Boolean operators in conditions
+int checkStatus(int value, bool flag) {
+    if value > 0 && flag {
+        return 1
+    }
+    if value < 0 || !flag {
+        return -1
+    }
+    return 0
+}
+
+// Consecutive if statements with comparisons
+int compare(int a, int b) {
+    if a == b { return 0 }
+    if a < b { return -1 }
+    if a > b { return 1 }
+    return 0
+}
+
 // External library function
 extern int puts(char message)
 
@@ -438,8 +544,8 @@ for int num in numbers {
     num * num
 }
 
-// Expression evaluation
-2 + 3 * (4 + 5)
+// Expression evaluation with unary minus
+-5 + 2 + 3 * (4 + 5)
 ```
 
 ## Current Status
@@ -464,7 +570,7 @@ This is a **complete compiler implementation** with both frontend and backend. T
 
 ### Not Yet Implemented
 - Variable assignments (only declarations supported)
-- Traditional control flow statements (if/else, while, for)
+- Loop control flow statements (while, traditional for loops)
 - Advanced type system features (structs, arrays, pointers)
 - Module system and imports
 - Standard library integration

@@ -29,6 +29,10 @@ int GetTokPrecedence() {
     return BinopPrecedence["<"];
   } else if (CurTok == tok_gt) {
     return BinopPrecedence[">"];
+  } else if (CurTok == tok_and) {
+    return BinopPrecedence["&&"];
+  } else if (CurTok == tok_or) {
+    return BinopPrecedence["||"];
   }
   
   // Handle single character operators
@@ -112,17 +116,26 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
-/// unaryexpr ::= '-' primary
+/// unaryexpr ::= ('-' | '!') primary
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
-  getNextToken(); // eat the '-'
+  int UnaryOp = CurTok;
+  getNextToken(); // eat the unary operator
   
   auto Operand = ParsePrimary();
   if (!Operand)
     return nullptr;
     
-  // Create a binary expression: 0 - operand
-  auto Zero = std::make_unique<NumberExprAST>(0.0);
-  return std::make_unique<BinaryExprAST>("-", std::move(Zero), std::move(Operand));
+  if (UnaryOp == '-') {
+    // Create a binary expression: 0 - operand
+    auto Zero = std::make_unique<NumberExprAST>(0.0);
+    return std::make_unique<BinaryExprAST>("-", std::move(Zero), std::move(Operand));
+  } else if (UnaryOp == tok_not) {
+    // Create a binary expression: operand == false (logical NOT)
+    auto False = std::make_unique<BoolExprAST>(false);
+    return std::make_unique<BinaryExprAST>("==", std::move(Operand), std::move(False));
+  }
+  
+  return LogError("Unknown unary operator");
 }
 
 /// primary
@@ -164,6 +177,7 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case '(':
     return ParseParenExpr();
   case '-':
+  case tok_not:
     return ParseUnaryExpr();
   }
 }
@@ -197,6 +211,10 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       BinOp = "<";
     } else if (CurTok == tok_gt) {
       BinOp = ">";
+    } else if (CurTok == tok_and) {
+      BinOp = "&&";
+    } else if (CurTok == tok_or) {
+      BinOp = "||";
     } else if (isascii(CurTok)) {
       BinOp = std::string(1, (char)CurTok);
     } else {
