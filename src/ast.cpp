@@ -93,6 +93,12 @@ llvm::Value *BoolExprAST::codegen() {
   return llvm::ConstantInt::get(*TheContext, llvm::APInt(1, getValue() ? 1 : 0));
 }
 
+llvm::Value *NullExprAST::codegen() {
+  // Create a null pointer for string type (char*)
+  llvm::Type *StringType = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(StringType));
+}
+
 llvm::Value *StringExprAST::codegen() {
   // Create a global string constant
   return Builder->CreateGlobalString(getValue(), "str");

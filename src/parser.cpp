@@ -117,6 +117,9 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case tok_false:
     getNextToken(); // consume 'false'
     return std::make_unique<BoolExprAST>(false);
+  case tok_null:
+    getNextToken(); // consume 'null'
+    return std::make_unique<NullExprAST>();
   case tok_string_literal:
     {
       auto Result = std::make_unique<StringExprAST>(StringVal);
@@ -569,9 +572,17 @@ void ParseTypeIdentifier() {
     
     auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer));
     fprintf(stderr, "Parsed variable declaration, generating code...\n");
-    if (auto VarIR = VarDecl->codegen()) {
+    
+    // Wrap the variable declaration in an anonymous function like top-level expressions
+    auto Proto = std::make_unique<PrototypeAST>("void", "__anon_var_decl", std::vector<Parameter>());
+    std::vector<std::unique_ptr<StmtAST>> Statements;
+    Statements.push_back(std::move(VarDecl));
+    auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
+    auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
+    
+    if (auto FnIR = Fn->codegen()) {
       fprintf(stderr, "Generated variable declaration IR:\n");
-      VarIR->print(llvm::errs());
+      FnIR->print(llvm::errs());
       fprintf(stderr, "\n");
     } else {
       fprintf(stderr, "Error: Failed to generate IR for variable declaration\n");

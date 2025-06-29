@@ -48,6 +48,8 @@ int gettok() {
       return tok_true;
     if (IdentifierStr == "false")
       return tok_false;
+    if (IdentifierStr == "null")
+      return tok_null;
     return tok_identifier;
   }
 

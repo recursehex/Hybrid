@@ -131,6 +131,14 @@ public:
   bool getValue() const { return Val; }
 };
 
+/// NullExprAST - Expression class for null literal.
+class NullExprAST : public ExprAST {
+public:
+  NullExprAST() {}
+  
+  llvm::Value *codegen() override;
+};
+
 /// StringExprAST - Expression class for string literals like "hello".
 class StringExprAST : public ExprAST {
   std::string Val;

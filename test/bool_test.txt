@@ -1,7 +1,0 @@
-// Test boolean literals
-true
-
-false
-
-// Test with numbers
-42

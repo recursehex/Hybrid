@@ -35,6 +35,7 @@ enum Token {
   // boolean literals
   tok_true = -16,
   tok_false = -17,
+  tok_null = -21,
   
   // delimiters
   tok_newline = -7
