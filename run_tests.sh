@@ -27,7 +27,7 @@ if [ ! -f "./hybrid" ]; then
 fi
 
 # Find all test files in test/ directory
-TEST_FILES=$(find test/ -name "*.txt" -type f | sort)
+TEST_FILES=$(find test/ -name "*.hy" -type f | sort)
 
 if [ -z "$TEST_FILES" ]; then
     echo -e "${RED}No test files found in test/ directory${NC}"
@@ -43,7 +43,7 @@ echo
 # Function to run a single test
 run_test() {
     local test_file="$1"
-    local test_name=$(basename "$test_file" .txt)
+    local test_name=$(basename "$test_file" .hy)
     
     echo -e "${YELLOW}Running test: $test_name${NC}"
     echo "----------------------------------------"
@@ -64,7 +64,7 @@ run_test() {
 # Function to run a test with visible output (for debugging)
 run_test_verbose() {
     local test_file="$1"
-    local test_name=$(basename "$test_file" .txt)
+    local test_name=$(basename "$test_file" .hy)
     
     echo -e "${BLUE}=== Test: $test_name ===${NC}"
     echo "File: $test_file"
@@ -94,14 +94,14 @@ elif [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "Usage: $0 [OPTIONS] [TEST_PATTERN]"
     echo
     echo "Options:"
-    echo "  -v, --verbose    Show detailed output for each test"
-    echo "  -h, --help       Show this help message"
+    echo "  -v, --verbose       Show detailed output for each test"
+    echo "  -h, --help          Show this help message"
     echo
     echo "Examples:"
-    echo "  $0                    # Run all tests"
-    echo "  $0 -v                 # Run all tests with verbose output"
-    echo "  $0 null               # Run only tests matching 'null'"
-    echo "  $0 test_expr.txt      # Run specific test file"
+    echo "  $0                  # Run all tests"
+    echo "  $0 -v               # Run all tests with verbose output"
+    echo "  $0 null             # Run only tests matching 'null'"
+    echo "  $0 test_expr.hy     # Run specific test file"
     exit 0
 elif [ -n "$1" ]; then
     # Filter tests by pattern
@@ -110,7 +110,7 @@ elif [ -n "$1" ]; then
         TEST_FILES="test/$1"
     else
         # Pattern matching
-        TEST_FILES=$(find test/ -name "*$1*.txt" -type f | sort)
+        TEST_FILES=$(find test/ -name "*$1*.hy" -type f | sort)
         if [ -z "$TEST_FILES" ]; then
             echo -e "${RED}No test files found matching pattern: $1${NC}"
             exit 1

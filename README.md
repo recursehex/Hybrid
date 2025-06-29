@@ -247,12 +247,12 @@ echo "int square(int x) { return x * x }" | ./hybrid
 
 #### Running a Program File
 ```bash
-./hybrid < myprogram.txt
+./hybrid < myprogram.hy
 ```
 
 #### Debugging with Verbose Output
 ```bash
-./hybrid < myprogram.txt 2>&1 | less
+./hybrid < myprogram.hy 2>&1 | less
 ```
 
 #### Quick Expression Evaluation
@@ -266,18 +266,14 @@ You can pipe source code files to the compiler to see generated LLVM IR:
 
 ```bash
 # Test with code generation examples
-./hybrid < test/test_codegen.txt
-./hybrid < test/single_function.txt
+./hybrid < test/test_codegen.hy
 
 # Test arithmetic and expressions
-./hybrid < test/test_expr.txt
-./hybrid < test/test_bool.txt
+./hybrid < test/test_expr.hy
+./hybrid < test/test_bool.hy
 
 # Test string and null features
-./hybrid < test/test_null.txt
-
-# Legacy parsing tests (older format)
-./hybrid < test/test_clean_comprehensive.txt
+./hybrid < test/test_null.hy
 ```
 
 ### Running Tests
@@ -293,34 +289,28 @@ Use the automated test runner to execute all tests:
 
 # Run tests matching a pattern
 ./run_tests.sh null        # Runs all tests with 'null' in the name
-./run_tests.sh test_expr   # Runs test_expr.txt
+./run_tests.sh test_expr   # Runs test_expr.hy
 
 # Run a specific test file
-./run_tests.sh test_codegen.txt
+./run_tests.sh test_codegen.hy
 
 # Show help
 ./run_tests.sh -h
 ```
 
-The test runner automatically discovers all `.txt` files in the `test/` directory and provides colored output (green = pass, red = fail).
+The test runner automatically discovers all `.hy` files in the `test/` directory and provides colored output (green = pass, red = fail).
 
 ## Testing
 
 The `test/` directory contains various test files demonstrating different language features:
 
 ### Code Generation Tests
-- `test_codegen.txt` - Complete functions with LLVM IR generation
-- `single_function.txt` - Simple function for testing codegen
-- `test_expr.txt` - Arithmetic expressions and operations
-- `test_bool.txt` - Boolean literals and expressions
-- `test_null.txt` - String variables and null initialization
-- `test_if_else.txt` - If-else statements and comparison operators
-- `test_boolean_ops.txt` - Boolean operators (&&, ||, !) and logical expressions
-
-### Legacy Parser Tests
-- `test_clean_comprehensive.txt` - Comprehensive syntax examples
-- `test_brackets.txt` - Various bracket placement styles  
-- `test_typed_params.txt` - C-style typed parameter examples
+- `test_codegen.hy` - Complete functions with LLVM IR generation
+- `test_expr.hy` - Arithmetic expressions and operations
+- `test_bool.hy` - Boolean literals and expressions
+- `test_null.hy` - String variables and null initialization
+- `test_if_else.hy` - If-else statements and comparison operators
+- `test_boolean_ops.hy` - Boolean operators (&&, ||, !) and logical expressions
 
 ### Running Individual Tests
 
@@ -328,25 +318,25 @@ To run individual test files manually:
 
 ```bash
 # Test code generation
-./hybrid < test/test_codegen.txt
+./hybrid < test/test_codegen.hy
 
 # Test arithmetic expressions  
-./hybrid < test/test_expr.txt
+./hybrid < test/test_expr.hy
 
 # Test function definitions
-./hybrid < test/single_function.txt
+./hybrid < test/single_function.hy
 
 # Test boolean expressions
-./hybrid < test/test_bool.txt
+./hybrid < test/test_bool.hy
 
 # Test string and null features
-./hybrid < test/test_null.txt
+./hybrid < test/test_null.hy
 
 # Test if-else statements and comparisons
-./hybrid < test/test_if_else.txt
+./hybrid < test/test_if_else.hy
 
 # Test boolean operators
-./hybrid < test/test_boolean_ops.txt
+./hybrid < test/test_boolean_ops.hy
 ```
 
 ### Automated Test Suite
@@ -361,8 +351,8 @@ For comprehensive testing, use the test runner script:
 # Hybrid Compiler Test Suite
 # ===============================
 # Found test files:
-#   - test/test_bool.txt
-#   - test/test_codegen.txt
+#   - test/test_bool.hy
+#   - test/test_codegen.hy
 #   ...
 # 
 # Running test: test_bool
@@ -387,11 +377,11 @@ The test runner supports:
 
 To add a new test:
 
-1. Create a `.txt` file in the `test/` directory
+1. Create a `.hy` file in the `test/` directory
 2. Write Hybrid code in the file
 3. Run `./run_tests.sh` - your test will be automatically discovered
 
-Example test file (`test/my_feature.txt`):
+Example test file (`test/my_feature.hy`):
 ```c
 // Test for my new feature
 int myFunction(int x) {
