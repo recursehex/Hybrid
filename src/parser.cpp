@@ -12,18 +12,34 @@ int getNextToken() { return CurTok = gettok(); }
 
 /// BinopPrecedence - This holds the precedence for each binary operator that is
 /// defined.
-std::map<char, int> BinopPrecedence;
+std::map<std::string, int> BinopPrecedence;
 
 /// GetTokPrecedence - Get the precedence of the pending binary operator token.
 int GetTokPrecedence() {
-  if (!isascii(CurTok))
-    return -1;
-
-  // Make sure it's a declared binop.
-  int TokPrec = BinopPrecedence[CurTok];
-  if (TokPrec <= 0)
-    return -1;
-  return TokPrec;
+  // Handle comparison operator tokens
+  if (CurTok == tok_eq) {
+    return BinopPrecedence["=="];
+  } else if (CurTok == tok_ne) {
+    return BinopPrecedence["!="];
+  } else if (CurTok == tok_le) {
+    return BinopPrecedence["<="];
+  } else if (CurTok == tok_ge) {
+    return BinopPrecedence[">="];
+  } else if (CurTok == tok_lt) {
+    return BinopPrecedence["<"];
+  } else if (CurTok == tok_gt) {
+    return BinopPrecedence[">"];
+  }
+  
+  // Handle single character operators
+  if (isascii(CurTok)) {
+    std::string Op(1, (char)CurTok);
+    int TokPrec = BinopPrecedence[Op];
+    if (TokPrec > 0)
+      return TokPrec;
+  }
+  
+  return -1;
 }
 
 /// LogError* - These are little helper functions for error handling.
@@ -96,6 +112,19 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+/// unaryexpr ::= '-' primary
+std::unique_ptr<ExprAST> ParseUnaryExpr() {
+  getNextToken(); // eat the '-'
+  
+  auto Operand = ParsePrimary();
+  if (!Operand)
+    return nullptr;
+    
+  // Create a binary expression: 0 - operand
+  auto Zero = std::make_unique<NumberExprAST>(0.0);
+  return std::make_unique<BinaryExprAST>("-", std::move(Zero), std::move(Operand));
+}
+
 /// primary
 ///   ::= identifierexpr
 ///   ::= numberexpr
@@ -134,6 +163,8 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     }
   case '(':
     return ParseParenExpr();
+  case '-':
+    return ParseUnaryExpr();
   }
 }
 
@@ -151,7 +182,27 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       return LHS;
 
     // Okay, we know this is a binop.
-    int BinOp = CurTok;
+    std::string BinOp;
+    
+    // Convert token to operator string
+    if (CurTok == tok_eq) {
+      BinOp = "==";
+    } else if (CurTok == tok_ne) {
+      BinOp = "!=";
+    } else if (CurTok == tok_le) {
+      BinOp = "<=";
+    } else if (CurTok == tok_ge) {
+      BinOp = ">=";
+    } else if (CurTok == tok_lt) {
+      BinOp = "<";
+    } else if (CurTok == tok_gt) {
+      BinOp = ">";
+    } else if (isascii(CurTok)) {
+      BinOp = std::string(1, (char)CurTok);
+    } else {
+      return LogError("Unknown binary operator");
+    }
+    
     getNextToken(); // eat binop
 
     // Parse the primary expression after the binary operator.
@@ -398,7 +449,67 @@ std::unique_ptr<UseStmtAST> ParseUseStatement() {
   return std::make_unique<UseStmtAST>(Module);
 }
 
-/// statement ::= returnstmt | variabledecl | foreachstmt | usestmt | expressionstmt
+/// ifstmt ::= 'if' expression block ('else' (ifstmt | block))?
+std::unique_ptr<IfStmtAST> ParseIfStatement() {
+  getNextToken(); // eat 'if'
+  
+  // Skip newlines after 'if'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse condition expression
+  auto Condition = ParseExpression();
+  if (!Condition) {
+    LogError("Expected condition after 'if'");
+    return nullptr;
+  }
+  
+  // Skip newlines before '{'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse then block
+  if (CurTok != '{') {
+    LogError("Expected '{' after if condition");
+    return nullptr;
+  }
+  
+  auto ThenBranch = ParseBlock();
+  if (!ThenBranch)
+    return nullptr;
+  
+  // Skip newlines after then block
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Check for else branch
+  std::unique_ptr<StmtAST> ElseBranch = nullptr;
+  if (CurTok == tok_else) {
+    getNextToken(); // eat 'else'
+    
+    // Skip newlines after 'else'
+    while (CurTok == tok_newline)
+      getNextToken();
+    
+    if (CurTok == tok_if) {
+      // else if case
+      ElseBranch = ParseIfStatement();
+    } else if (CurTok == '{') {
+      // else block case
+      ElseBranch = ParseBlock();
+    } else {
+      LogError("Expected '{' or 'if' after 'else'");
+      return nullptr;
+    }
+    
+    if (!ElseBranch)
+      return nullptr;
+  }
+  
+  return std::make_unique<IfStmtAST>(std::move(Condition), std::move(ThenBranch), std::move(ElseBranch));
+}
+
+/// statement ::= returnstmt | variabledecl | foreachstmt | usestmt | ifstmt | expressionstmt
 std::unique_ptr<StmtAST> ParseStatement() {
   switch (CurTok) {
   case tok_return:
@@ -407,6 +518,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseForEachStatement();
   case tok_use:
     return ParseUseStatement();
+  case tok_if:
+    return ParseIfStatement();
   case tok_int:
   case tok_float:
   case tok_double:

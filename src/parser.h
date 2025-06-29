@@ -7,7 +7,7 @@
 
 // Parser variables
 extern int CurTok;
-extern std::map<char, int> BinopPrecedence;
+extern std::map<std::string, int> BinopPrecedence;
 
 // Helper functions
 int getNextToken();
@@ -22,6 +22,7 @@ std::unique_ptr<StmtAST> LogErrorS(const char *Str);
 std::unique_ptr<ExprAST> ParseNumberExpr();
 std::unique_ptr<ExprAST> ParseParenExpr();
 std::unique_ptr<ExprAST> ParseIdentifierExpr();
+std::unique_ptr<ExprAST> ParseUnaryExpr();
 std::unique_ptr<ExprAST> ParsePrimary();
 std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS);
 std::unique_ptr<ExprAST> ParseExpression();
@@ -37,6 +38,7 @@ std::unique_ptr<BlockStmtAST> ParseBlock();
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration();
 std::unique_ptr<ForEachStmtAST> ParseForEachStatement();
 std::unique_ptr<UseStmtAST> ParseUseStatement();
+std::unique_ptr<IfStmtAST> ParseIfStatement();
 
 // Top-level parsing that can handle both variable declarations and function definitions
 void ParseTypeIdentifier();

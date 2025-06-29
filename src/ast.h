@@ -98,6 +98,25 @@ public:
   llvm::Value *codegen() override;
 };
 
+/// IfStmtAST - Statement class for if-else statements.
+class IfStmtAST : public StmtAST {
+  std::unique_ptr<ExprAST> Condition;
+  std::unique_ptr<StmtAST> ThenBranch;
+  std::unique_ptr<StmtAST> ElseBranch;
+
+public:
+  IfStmtAST(std::unique_ptr<ExprAST> Condition,
+            std::unique_ptr<StmtAST> ThenBranch,
+            std::unique_ptr<StmtAST> ElseBranch = nullptr)
+      : Condition(std::move(Condition)), ThenBranch(std::move(ThenBranch)),
+        ElseBranch(std::move(ElseBranch)) {}
+  
+  llvm::Value *codegen() override;
+  ExprAST *getCondition() const { return Condition.get(); }
+  StmtAST *getThenBranch() const { return ThenBranch.get(); }
+  StmtAST *getElseBranch() const { return ElseBranch.get(); }
+};
+
 /// UseStmtAST - Statement class for use (import) statements.
 class UseStmtAST : public StmtAST {
   std::string Module;
@@ -174,16 +193,16 @@ public:
 
 /// BinaryExprAST - Expression class for a binary operator.
 class BinaryExprAST : public ExprAST {
-  char Op;
+  std::string Op;  // Changed from char to string to support multi-char operators
   std::unique_ptr<ExprAST> LHS, RHS;
 
 public:
-  BinaryExprAST(char Op, std::unique_ptr<ExprAST> LHS,
+  BinaryExprAST(const std::string &Op, std::unique_ptr<ExprAST> LHS,
                 std::unique_ptr<ExprAST> RHS)
       : Op(Op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
   
   llvm::Value *codegen() override;
-  char getOp() const { return Op; }
+  const std::string &getOp() const { return Op; }
   ExprAST *getLHS() const { return LHS.get(); }
   ExprAST *getRHS() const { return RHS.get(); }
 };

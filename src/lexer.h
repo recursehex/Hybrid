@@ -16,6 +16,8 @@ enum Token {
   // control flow
   tok_for = -13,
   tok_in = -14,
+  tok_if = -22,
+  tok_else = -23,
 
   // types
   tok_int = -8,
@@ -38,7 +40,15 @@ enum Token {
   tok_null = -21,
   
   // delimiters
-  tok_newline = -7
+  tok_newline = -7,
+  
+  // comparison operators
+  tok_eq = -24,        // ==
+  tok_ne = -25,        // !=
+  tok_le = -26,        // <=
+  tok_ge = -27,        // >=
+  tok_lt = -28,        // <
+  tok_gt = -29         // >
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

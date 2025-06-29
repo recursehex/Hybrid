@@ -176,41 +176,67 @@ llvm::Value *BinaryExprAST::codegen() {
   // Check if we're working with floating point or integer types
   bool isFloat = L->getType()->isFloatingPointTy();
 
-  switch (getOp()) {
-  case '+':
-    if (isFloat)
-      return Builder->CreateFAdd(L, R, "addtmp");
-    else
-      return Builder->CreateAdd(L, R, "addtmp");
-  case '-':
-    if (isFloat)
-      return Builder->CreateFSub(L, R, "subtmp");
-    else
-      return Builder->CreateSub(L, R, "subtmp");
-  case '*':
-    if (isFloat)
-      return Builder->CreateFMul(L, R, "multmp");
-    else
-      return Builder->CreateMul(L, R, "multmp");
-  case '<':
-    if (isFloat) {
-      L = Builder->CreateFCmpULT(L, R, "cmptmp");
-    } else {
-      L = Builder->CreateICmpSLT(L, R, "cmptmp");
+  // Handle single-character operators
+  if (Op.length() == 1) {
+    switch (Op[0]) {
+    case '+':
+      if (isFloat)
+        return Builder->CreateFAdd(L, R, "addtmp");
+      else
+        return Builder->CreateAdd(L, R, "addtmp");
+    case '-':
+      if (isFloat)
+        return Builder->CreateFSub(L, R, "subtmp");
+      else
+        return Builder->CreateSub(L, R, "subtmp");
+    case '*':
+      if (isFloat)
+        return Builder->CreateFMul(L, R, "multmp");
+      else
+        return Builder->CreateMul(L, R, "multmp");
+    case '<':
+      if (isFloat) {
+        L = Builder->CreateFCmpULT(L, R, "cmptmp");
+      } else {
+        L = Builder->CreateICmpSLT(L, R, "cmptmp");
+      }
+      // Return the boolean result as i1
+      return L;
+    case '>':
+      if (isFloat) {
+        L = Builder->CreateFCmpUGT(L, R, "cmptmp");
+      } else {
+        L = Builder->CreateICmpSGT(L, R, "cmptmp");
+      }
+      // Return the boolean result as i1
+      return L;
     }
-    // Return the boolean result as i1
-    return L;
-  case '>':
-    if (isFloat) {
-      L = Builder->CreateFCmpUGT(L, R, "cmptmp");
-    } else {
-      L = Builder->CreateICmpSGT(L, R, "cmptmp");
-    }
-    // Return the boolean result as i1
-    return L;
-  default:
-    return LogErrorV("invalid binary operator");
   }
+  
+  // Handle multi-character operators
+  if (Op == "==") {
+    if (isFloat)
+      return Builder->CreateFCmpOEQ(L, R, "eqtmp");
+    else
+      return Builder->CreateICmpEQ(L, R, "eqtmp");
+  } else if (Op == "!=") {
+    if (isFloat)
+      return Builder->CreateFCmpONE(L, R, "netmp");
+    else
+      return Builder->CreateICmpNE(L, R, "netmp");
+  } else if (Op == "<=") {
+    if (isFloat)
+      return Builder->CreateFCmpOLE(L, R, "letmp");
+    else
+      return Builder->CreateICmpSLE(L, R, "letmp");
+  } else if (Op == ">=") {
+    if (isFloat)
+      return Builder->CreateFCmpOGE(L, R, "getmp");
+    else
+      return Builder->CreateICmpSGE(L, R, "getmp");
+  }
+  
+  return LogErrorV("invalid binary operator");
 }
 
 // Helper function to cast a value to a target type
@@ -349,6 +375,76 @@ llvm::Value *ForEachStmtAST::codegen() {
   // TODO: Implement foreach loop code generation
   // This is complex and would require runtime support for collections
   return LogErrorV("foreach loops not yet implemented in code generation");
+}
+
+llvm::Value *IfStmtAST::codegen() {
+  llvm::Value *CondV = getCondition()->codegen();
+  if (!CondV)
+    return nullptr;
+  
+  // Convert condition to a bool
+  if (!CondV->getType()->isIntegerTy(1)) {
+    if (CondV->getType()->isFloatingPointTy()) {
+      // For floating point, compare with 0.0
+      CondV = Builder->CreateFCmpONE(CondV, 
+        llvm::ConstantFP::get(CondV->getType(), 0.0), "ifcond");
+    } else if (CondV->getType()->isIntegerTy()) {
+      // For integers, compare with 0
+      CondV = Builder->CreateICmpNE(CondV, 
+        llvm::ConstantInt::get(CondV->getType(), 0), "ifcond");
+    } else {
+      return LogErrorV("Condition must be a numeric type");
+    }
+  }
+  
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  
+  // Create blocks for the then and else cases. Insert the 'then' block at the
+  // end of the function.
+  llvm::BasicBlock *ThenBB = llvm::BasicBlock::Create(*TheContext, "then", TheFunction);
+  llvm::BasicBlock *ElseBB = llvm::BasicBlock::Create(*TheContext, "else");
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "ifcont");
+  
+  Builder->CreateCondBr(CondV, ThenBB, ElseBB);
+  
+  // Emit then value.
+  Builder->SetInsertPoint(ThenBB);
+  
+  llvm::Value *ThenV = getThenBranch()->codegen();
+  if (!ThenV)
+    return nullptr;
+  
+  // Check if the block already has a terminator (e.g., return statement)
+  if (!Builder->GetInsertBlock()->getTerminator())
+    Builder->CreateBr(MergeBB);
+  
+  // Codegen of 'Then' can change the current block, update ThenBB for the PHI.
+  ThenBB = Builder->GetInsertBlock();
+  
+  // Emit else block.
+  ElseBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(ElseBB);
+  
+  llvm::Value *ElseV = nullptr;
+  if (getElseBranch()) {
+    ElseV = getElseBranch()->codegen();
+    if (!ElseV)
+      return nullptr;
+  }
+  
+  // Check if the block already has a terminator
+  if (!Builder->GetInsertBlock()->getTerminator())
+    Builder->CreateBr(MergeBB);
+  
+  // Codegen of 'Else' can change the current block, update ElseBB for the PHI.
+  ElseBB = Builder->GetInsertBlock();
+  
+  // Emit merge block.
+  MergeBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(MergeBB);
+  
+  // Return the last value (this is somewhat arbitrary for statements)
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
 llvm::Value *UseStmtAST::codegen() {

@@ -50,6 +50,10 @@ int gettok() {
       return tok_false;
     if (IdentifierStr == "null")
       return tok_null;
+    if (IdentifierStr == "if")
+      return tok_if;
+    if (IdentifierStr == "else")
+      return tok_else;
     return tok_identifier;
   }
 
@@ -121,14 +125,69 @@ int gettok() {
   }
 
   // Check for start of comment.
-  if (LastChar == '/' && getchar() == '/') {
-    // Comment until end of line.
-    do
-      LastChar = getchar();
-    while (LastChar != EOF && LastChar != '\n' && LastChar != '\r');
+  if (LastChar == '/') {
+    int NextChar = getchar();
+    if (NextChar == '/') {
+      // Comment until end of line.
+      do
+        LastChar = getchar();
+      while (LastChar != EOF && LastChar != '\n' && LastChar != '\r');
 
-    if (LastChar != EOF)
-      return gettok();
+      if (LastChar != EOF)
+        return gettok();
+    } else {
+      // Not a comment, put the character back
+      ungetc(NextChar, stdin);
+    }
+  }
+
+  // Check for comparison operators
+  if (LastChar == '=') {
+    int NextChar = getchar();
+    if (NextChar == '=') {
+      LastChar = getchar();
+      return tok_eq;  // ==
+    } else {
+      // Not ==, put the character back
+      ungetc(NextChar, stdin);
+    }
+  }
+  
+  if (LastChar == '!') {
+    int NextChar = getchar();
+    if (NextChar == '=') {
+      LastChar = getchar();
+      return tok_ne;  // !=
+    } else {
+      // Not !=, put the character back
+      ungetc(NextChar, stdin);
+    }
+  }
+  
+  if (LastChar == '<') {
+    int NextChar = getchar();
+    if (NextChar == '=') {
+      LastChar = getchar();
+      return tok_le;  // <=
+    } else {
+      // Not <=, put the character back and return < token
+      ungetc(NextChar, stdin);
+      LastChar = getchar();
+      return tok_lt;  // <
+    }
+  }
+  
+  if (LastChar == '>') {
+    int NextChar = getchar();
+    if (NextChar == '=') {
+      LastChar = getchar();
+      return tok_ge;  // >=
+    } else {
+      // Not >=, put the character back and return > token
+      ungetc(NextChar, stdin);
+      LastChar = getchar();
+      return tok_gt;  // >
+    }
   }
 
   // Check for newline.
