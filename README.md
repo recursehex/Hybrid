@@ -17,8 +17,10 @@ Hybrid is a programming language compiler/interpreter that combines elements fro
 - **Foreach loops** with syntax `for type var in collection { ... }`
 - **Variable declarations** with C-style syntax and mandatory initialization
 - **If-else statements** with C-style syntax and full comparison operators
+- **While loops** with syntax `while condition { ... }`
 - **Boolean operators** for logical operations (&&, ||, !)
 - **Unary expressions** including negative numbers and logical NOT
+- **Variable assignment** with `=` operator for mutable variables
 
 ## Language Syntax
 
@@ -117,6 +119,34 @@ int compare(int a, int b) {
     if a < b { return -1 }
     if a > b { return 1 }
     return 0
+}
+```
+
+#### While Loops
+
+Repeat statements while a condition is true:
+
+```c
+// Simple while loop
+while x > 0 {
+    x = x - 1
+}
+
+// While loop with complex condition
+while running && count < 10 {
+    count = count + 1
+    if count == 5 {
+        running = false
+    }
+}
+
+// Nested while loops
+while i < 3 {
+    int j = 0
+    while j < 2 {
+        j = j + 1
+    }
+    i = i + 1
 }
 ```
 
@@ -300,6 +330,28 @@ Use the automated test runner to execute all tests:
 
 The test runner automatically discovers all `.hy` files in the `test/` directory and provides colored output (green = pass, red = fail).
 
+### Test Suite Features
+
+The automated test suite includes intelligent error detection:
+
+- **Error Pattern Detection**: Checks compilation output for actual errors, not just exit codes
+- **Smart Classification**: Tests with "fail" in the name are expected to fail
+- **Detailed Reporting**: Shows specific error messages when tests fail
+- **Verbose Mode**: Use `-v` flag to see full compilation output
+- **Pattern Matching**: Run specific tests or groups with pattern matching
+
+#### Error Detection
+
+The test suite detects these error patterns:
+- `"Error:"` - General compilation errors
+- `"Failed to generate"` - Code generation failures
+- `"Unknown function"` - Undefined function references
+- `"Unknown variable"` - Undefined variable references
+- `"invalid binary operator"` - Unsupported operations
+- `"Expected.*after"` - Syntax errors
+
+This ensures tests accurately reflect the compiler's actual behavior rather than just exit codes.
+
 ## Testing
 
 The `test/` directory contains various test files demonstrating different language features:
@@ -311,6 +363,7 @@ The `test/` directory contains various test files demonstrating different langua
 - `test_null.hy` - String variables and null initialization
 - `test_if_else.hy` - If-else statements and comparison operators
 - `test_boolean_ops.hy` - Boolean operators (&&, ||, !) and logical expressions
+- `test_while.hy` - While loops with various conditions and nesting
 
 ### Running Individual Tests
 
@@ -337,6 +390,9 @@ To run individual test files manually:
 
 # Test boolean operators
 ./hybrid < test/test_boolean_ops.hy
+
+# Test while loops
+./hybrid < test/test_while.hy
 ```
 
 ### Automated Test Suite
@@ -472,6 +528,10 @@ The compiler follows a traditional multi-pass design:
   - All comparison operators available: `==`, `!=`, `<`, `>`, `<=`, `>=`
   - Boolean operators for complex conditions: `&&`, `||`, `!`
   - Operator precedence: `||` (lowest) < `&&` < comparisons (highest)
+- While loops: `while condition { body }`
+  - Repeats body while condition is true
+  - Supports complex boolean conditions and nested loops
+  - Variable assignment enables loop counters and state changes
 - Foreach loops: `for type var in collection { body }`
 - Supports nested loops and can be used within functions
 
@@ -529,6 +589,14 @@ int fibonacci(int n)
     return n + 1  // Simplified for demo
 }
 
+// While loop examples
+int countdown(int n) {
+    while n > 0 {
+        n = n - 1
+    }
+    return n
+}
+
 // Foreach loop example
 for int num in numbers {
     num * num
@@ -559,11 +627,11 @@ This is a **complete compiler implementation** with both frontend and backend. T
 - **Live IR display** - Interactive REPL shows generated LLVM IR
 
 ### Not Yet Implemented
-- Variable assignments (only declarations supported)
-- Loop control flow statements (while, traditional for loops)
+- Foreach loop code generation (parser complete, codegen pending)
 - Advanced type system features (structs, arrays, pointers)
 - Module system and imports
 - Standard library integration
+- Traditional for loops `for int x = 0 to limit by + 1`
 
 ## Development
 

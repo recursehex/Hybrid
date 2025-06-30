@@ -527,7 +527,39 @@ std::unique_ptr<IfStmtAST> ParseIfStatement() {
   return std::make_unique<IfStmtAST>(std::move(Condition), std::move(ThenBranch), std::move(ElseBranch));
 }
 
-/// statement ::= returnstmt | variabledecl | foreachstmt | usestmt | ifstmt | expressionstmt
+/// whilestmt ::= 'while' expression block
+std::unique_ptr<WhileStmtAST> ParseWhileStatement() {
+  getNextToken(); // eat 'while'
+  
+  // Skip newlines after 'while'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse condition expression
+  auto Condition = ParseExpression();
+  if (!Condition) {
+    LogError("Expected condition after 'while'");
+    return nullptr;
+  }
+  
+  // Skip newlines before '{'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse body block
+  if (CurTok != '{') {
+    LogError("Expected '{' after while condition");
+    return nullptr;
+  }
+  
+  auto Body = ParseBlock();
+  if (!Body)
+    return nullptr;
+  
+  return std::make_unique<WhileStmtAST>(std::move(Condition), std::move(Body));
+}
+
+/// statement ::= returnstmt | variabledecl | foreachstmt | usestmt | ifstmt | whilestmt | expressionstmt
 std::unique_ptr<StmtAST> ParseStatement() {
   switch (CurTok) {
   case tok_return:
@@ -538,6 +570,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseUseStatement();
   case tok_if:
     return ParseIfStatement();
+  case tok_while:
+    return ParseWhileStatement();
   case tok_int:
   case tok_float:
   case tok_double:

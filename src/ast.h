@@ -117,6 +117,21 @@ public:
   StmtAST *getElseBranch() const { return ElseBranch.get(); }
 };
 
+/// WhileStmtAST - Statement class for while loops.
+class WhileStmtAST : public StmtAST {
+  std::unique_ptr<ExprAST> Condition;
+  std::unique_ptr<StmtAST> Body;
+
+public:
+  WhileStmtAST(std::unique_ptr<ExprAST> Condition,
+               std::unique_ptr<StmtAST> Body)
+      : Condition(std::move(Condition)), Body(std::move(Body)) {}
+  
+  llvm::Value *codegen() override;
+  ExprAST *getCondition() const { return Condition.get(); }
+  StmtAST *getBody() const { return Body.get(); }
+};
+
 /// UseStmtAST - Statement class for use (import) statements.
 class UseStmtAST : public StmtAST {
   std::string Module;
@@ -180,7 +195,7 @@ public:
   char getValue() const { return Val; }
 };
 
-/// VariableExprAST - Expression class for referencing a variable, like "a".
+/// VariableExprAST - Expression class for referencing a variable, like "var".
 class VariableExprAST : public ExprAST {
   std::string Name;
 
@@ -193,7 +208,7 @@ public:
 
 /// BinaryExprAST - Expression class for a binary operator.
 class BinaryExprAST : public ExprAST {
-  std::string Op;  // Changed from char to string to support multi-char operators
+  std::string Op;  // Supports multi-char operators
   std::unique_ptr<ExprAST> LHS, RHS;
 
 public:
@@ -231,7 +246,7 @@ struct Parameter {
       : Type(Type), Name(Name) {}
 };
 
-/// PrototypeAST - This class represents the "prototype" for a function,
+/// PrototypeAST - Represents the "prototype" for a function,
 /// which captures its name, and its argument names and types.
 class PrototypeAST {
   std::string ReturnType;
@@ -250,7 +265,7 @@ public:
   llvm::Function *codegen();
 };
 
-/// FunctionAST - This class represents a function definition itself.
+/// FunctionAST - Represents a function definition itself.
 class FunctionAST {
   std::unique_ptr<PrototypeAST> Proto;
   std::unique_ptr<BlockStmtAST> Body;

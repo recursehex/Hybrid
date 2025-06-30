@@ -29,6 +29,13 @@ void InitializeModule() {
   TheContext = std::make_unique<llvm::LLVMContext>();
   TheModule = std::make_unique<llvm::Module>("Hybrid JIT", *TheContext);
   Builder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+  
+  // Add a simple print function that takes an int
+  std::vector<llvm::Type*> PrintArgs = {llvm::Type::getInt32Ty(*TheContext)};
+  llvm::FunctionType *PrintType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), PrintArgs, false);
+  llvm::Function::Create(PrintType, llvm::Function::ExternalLinkage,
+                        "print", TheModule.get());
 }
 
 // Get the LLVM module for printing
@@ -116,6 +123,48 @@ llvm::Value *VariableExprAST::codegen() {
   // Load the value - V is an AllocaInst*, we need to get the allocated type
   llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
   return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
+}
+
+// Helper function to cast a value to a target type
+llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
+  llvm::Type* sourceType = value->getType();
+  
+  if (sourceType == targetType)
+    return value;
+  
+  // Integer to float
+  if (sourceType->isIntegerTy() && targetType->isFloatingPointTy()) {
+    if (sourceType->isIntegerTy(1)) // bool
+      return Builder->CreateUIToFP(value, targetType, "casttmp");
+    else
+      return Builder->CreateSIToFP(value, targetType, "casttmp");
+  }
+  
+  // Float to integer
+  if (sourceType->isFloatingPointTy() && targetType->isIntegerTy()) {
+    if (targetType->isIntegerTy(1)) // bool
+      return Builder->CreateFPToUI(value, targetType, "casttmp");
+    else
+      return Builder->CreateFPToSI(value, targetType, "casttmp");
+  }
+  
+  // Integer to integer (different sizes)
+  if (sourceType->isIntegerTy() && targetType->isIntegerTy()) {
+    unsigned sourceBits = sourceType->getIntegerBitWidth();
+    unsigned targetBits = targetType->getIntegerBitWidth();
+    
+    if (sourceBits < targetBits) {
+      if (sourceType->isIntegerTy(1)) // bool
+        return Builder->CreateZExt(value, targetType, "casttmp");
+      else
+        return Builder->CreateSExt(value, targetType, "casttmp");
+    } else if (sourceBits > targetBits) {
+      return Builder->CreateTrunc(value, targetType, "casttmp");
+    }
+  }
+  
+  // If we can't cast, return the original value (shouldn't happen in well-typed programs)
+  return value;
 }
 
 // Helper function to promote types for binary operations
@@ -210,6 +259,25 @@ llvm::Value *BinaryExprAST::codegen() {
       }
       // Return the boolean result as i1
       return L;
+    case '=':
+      // Assignment operator - LHS must be a variable
+      VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS());
+      if (!LHSE)
+        return LogErrorV("destination of '=' must be a variable");
+      
+      // Look up the variable in the symbol table
+      llvm::Value *Variable = NamedValues[LHSE->getName()];
+      if (!Variable)
+        return LogErrorV("Unknown variable name");
+      
+      // Cast RHS to the variable's type
+      llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
+      llvm::Type *VarType = Alloca->getAllocatedType();
+      R = castToType(R, VarType);
+      
+      // Store the value
+      Builder->CreateStore(R, Variable);
+      return R;
     }
   }
   
@@ -267,48 +335,6 @@ llvm::Value *BinaryExprAST::codegen() {
   }
   
   return LogErrorV("invalid binary operator");
-}
-
-// Helper function to cast a value to a target type
-llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
-  llvm::Type* sourceType = value->getType();
-  
-  if (sourceType == targetType)
-    return value;
-  
-  // Integer to float
-  if (sourceType->isIntegerTy() && targetType->isFloatingPointTy()) {
-    if (sourceType->isIntegerTy(1)) // bool
-      return Builder->CreateUIToFP(value, targetType, "casttmp");
-    else
-      return Builder->CreateSIToFP(value, targetType, "casttmp");
-  }
-  
-  // Float to integer
-  if (sourceType->isFloatingPointTy() && targetType->isIntegerTy()) {
-    if (targetType->isIntegerTy(1)) // bool
-      return Builder->CreateFPToUI(value, targetType, "casttmp");
-    else
-      return Builder->CreateFPToSI(value, targetType, "casttmp");
-  }
-  
-  // Integer to integer (different sizes)
-  if (sourceType->isIntegerTy() && targetType->isIntegerTy()) {
-    unsigned sourceBits = sourceType->getIntegerBitWidth();
-    unsigned targetBits = targetType->getIntegerBitWidth();
-    
-    if (sourceBits < targetBits) {
-      if (sourceType->isIntegerTy(1)) // bool
-        return Builder->CreateZExt(value, targetType, "casttmp");
-      else
-        return Builder->CreateSExt(value, targetType, "casttmp");
-    } else if (sourceBits > targetBits) {
-      return Builder->CreateTrunc(value, targetType, "casttmp");
-    }
-  }
-  
-  // If we can't cast, return the original value (shouldn't happen in well-typed programs)
-  return value;
 }
 
 llvm::Value *CallExprAST::codegen() {
@@ -474,6 +500,65 @@ llvm::Value *IfStmtAST::codegen() {
   Builder->SetInsertPoint(MergeBB);
   
   // Return the last value (this is somewhat arbitrary for statements)
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
+llvm::Value *WhileStmtAST::codegen() {
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  
+  // Create blocks for the loop condition, body, and exit
+  llvm::BasicBlock *CondBB = llvm::BasicBlock::Create(*TheContext, "whilecond", TheFunction);
+  llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(*TheContext, "whilebody");
+  llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(*TheContext, "whilecont");
+  
+  // Jump to the condition block
+  Builder->CreateBr(CondBB);
+  
+  // Emit the condition block
+  Builder->SetInsertPoint(CondBB);
+  
+  // Evaluate the condition
+  llvm::Value *CondV = getCondition()->codegen();
+  if (!CondV)
+    return nullptr;
+  
+  // Convert condition to a bool
+  if (!CondV->getType()->isIntegerTy(1)) {
+    if (CondV->getType()->isFloatingPointTy()) {
+      // For floating point, compare with 0.0
+      CondV = Builder->CreateFCmpONE(CondV, 
+        llvm::ConstantFP::get(CondV->getType(), 0.0), "whilecond");
+    } else if (CondV->getType()->isIntegerTy()) {
+      // For integers, compare with 0
+      CondV = Builder->CreateICmpNE(CondV, 
+        llvm::ConstantInt::get(CondV->getType(), 0), "whilecond");
+    } else {
+      return LogErrorV("Condition must be a numeric type");
+    }
+  }
+  
+  // Create the conditional branch
+  Builder->CreateCondBr(CondV, LoopBB, AfterBB);
+  
+  // Emit the loop body
+  LoopBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(LoopBB);
+  
+  // Generate code for the body
+  llvm::Value *BodyV = getBody()->codegen();
+  if (!BodyV)
+    return nullptr;
+  
+  // After the body, branch back to the condition check
+  // (unless the body contains a break/return)
+  if (!Builder->GetInsertBlock()->getTerminator())
+    Builder->CreateBr(CondBB);
+  
+  // Emit the after-loop block
+  AfterBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(AfterBB);
+  
+  // Return a dummy value
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 

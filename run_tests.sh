@@ -48,14 +48,53 @@ run_test() {
     echo -e "${YELLOW}Running test: $test_name${NC}"
     echo "----------------------------------------"
     
-    # Run the test and capture output
-    if ./hybrid < "$test_file" > /dev/null 2>&1; then
-        echo -e "${GREEN}✓ PASSED: $test_name${NC}"
-        ((PASSED_TESTS++))
+    # Run the test and capture both output and exit code
+    local output
+    local exit_code
+    output=$(./hybrid < "$test_file" 2>&1)
+    exit_code=$?
+    
+    # Check for error patterns in output
+    local has_errors=0
+    if echo "$output" | grep -q "Error:"; then
+        has_errors=1
+    elif echo "$output" | grep -q "Failed to generate"; then
+        has_errors=1
+    elif echo "$output" | grep -q "Unknown function"; then
+        has_errors=1
+    elif echo "$output" | grep -q "Unknown variable"; then
+        has_errors=1
+    elif echo "$output" | grep -q "invalid binary operator"; then
+        has_errors=1
+    elif echo "$output" | grep -q "Expected.*after"; then
+        has_errors=1
+    fi
+    
+    # Special case: tests that should fail (have "fail" in name)
+    if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+        if [ $has_errors -eq 1 ] || [ $exit_code -ne 0 ]; then
+            echo -e "${GREEN}✓ PASSED: $test_name (correctly failed as expected)${NC}"
+            ((PASSED_TESTS++))
+        else
+            echo -e "${RED}✗ FAILED: $test_name (should have failed but didn't)${NC}"
+            ((FAILED_TESTS++))
+        fi
     else
-        local exit_code=$?
-        echo -e "${RED}✗ FAILED: $test_name (exit code: $exit_code)${NC}"
-        ((FAILED_TESTS++))
+        # Normal tests should not have errors
+        if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
+            echo -e "${GREEN}✓ PASSED: $test_name${NC}"
+            ((PASSED_TESTS++))
+        else
+            echo -e "${RED}✗ FAILED: $test_name${NC}"
+            if [ $exit_code -ne 0 ]; then
+                echo -e "${RED}  Exit code: $exit_code${NC}"
+            fi
+            if [ $has_errors -eq 1 ]; then
+                echo -e "${RED}  Errors found in output:${NC}"
+                echo "$output" | grep -E "(Error:|Failed to generate|Unknown function|Unknown variable|invalid binary operator|Expected.*after)" | head -3
+            fi
+            ((FAILED_TESTS++))
+        fi
     fi
     ((TOTAL_TESTS++))
     echo

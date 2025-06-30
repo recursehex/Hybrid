@@ -54,6 +54,8 @@ int gettok() {
       return tok_if;
     if (IdentifierStr == "else")
       return tok_else;
+    if (IdentifierStr == "while")
+      return tok_while;
     return tok_identifier;
   }
 

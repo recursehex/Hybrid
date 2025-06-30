@@ -15,17 +15,24 @@ char toUpper(char c) {
   return c
 }
 
-// Function with char parameters
-void printChar(char c) {
-  print(c)
-  return
+// Function that works with chars
+int processChar(char c) {
+  // Convert char to int for testing
+  int value = c
+  return value
 }
 
-// Character in foreach loop
-for char ch in text {
-  print(ch)
+// Test character operations
+int testCharOps() {
+  char local_letter = 'A'
+  char result = toUpper('a')
+  bool isLetter = local_letter == 'A'
+  
+  int char_value = processChar(local_letter)
+  return char_value
 }
 
-// Character expressions
-char result = toUpper('a')
-bool isLetter = letter == 'A'
+int main() {
+  int result = testCharOps()
+  return result
+}

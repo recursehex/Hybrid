@@ -14,46 +14,47 @@ enum Token {
   tok_return = -4,
   
   // control flow
-  tok_for = -13,
-  tok_in = -14,
-  tok_if = -22,
-  tok_else = -23,
+  tok_for = -5,
+  tok_in = -6,
+  tok_if = -7,
+  tok_else = -8,
+  tok_while = -9,
 
   // types
-  tok_int = -8,
-  tok_float = -9,
-  tok_double = -10,
-  tok_char = -11,
-  tok_void = -12,
+  tok_int = -10,
+  tok_float = -11,
+  tok_double = -12,
+  tok_char = -13,
+  tok_void = -14,
   tok_bool = -15,
-  tok_string = -18,
+  tok_string = -16,
 
   // primary
-  tok_identifier = -5,
-  tok_number = -6,
+  tok_identifier = -17,
+  tok_number = -18,
   tok_string_literal = -19,
   tok_char_literal = -20,
   
   // boolean literals
-  tok_true = -16,
-  tok_false = -17,
-  tok_null = -21,
+  tok_true = -21,
+  tok_false = -22,
+  tok_null = -23,
   
   // delimiters
-  tok_newline = -7,
+  tok_newline = -24,
   
   // comparison operators
-  tok_eq = -24,        // ==
-  tok_ne = -25,        // !=
-  tok_le = -26,        // <=
-  tok_ge = -27,        // >=
-  tok_lt = -28,        // <
-  tok_gt = -29,        // >
+  tok_eq = -25,        // ==
+  tok_ne = -26,        // !=
+  tok_le = -27,        // <=
+  tok_ge = -28,        // >=
+  tok_lt = -29,        // <
+  tok_gt = -30,        // >
   
   // boolean operators
-  tok_and = -30,       // &&
-  tok_or = -31,        // ||
-  tok_not = -32        // !
+  tok_and = -31,       // &&
+  tok_or = -32,        // ||
+  tok_not = -33        // !
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

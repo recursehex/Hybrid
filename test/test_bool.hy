@@ -13,12 +13,16 @@ void testBooleans() {
     bool c = a
 }
 
-// Test boolean expressions
-bool result = true
-result = false
+// Test boolean expressions in function context
+bool testBooleanOps() {
+    bool result = true
+    result = false
+    return result
+}
 
-// Test booleans in foreach loops
-// Note: flags would need to be a collection - using a placeholder expression
-for bool val in result {
-    val
+int main() {
+    bool valid = isValid(5)
+    testBooleans()
+    bool final_result = testBooleanOps()
+    return 0
 }
