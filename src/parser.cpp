@@ -855,9 +855,16 @@ void ParseTypeIdentifier() {
     fprintf(stderr, "Parsed variable declaration, generating code...\n");
     
     // Wrap the variable declaration in an anonymous function like top-level expressions
-    auto Proto = std::make_unique<PrototypeAST>("void", "__anon_var_decl", std::vector<Parameter>());
+    // Return the type of the variable being declared
+    auto Proto = std::make_unique<PrototypeAST>(Type, "__anon_var_decl", std::vector<Parameter>());
     std::vector<std::unique_ptr<StmtAST>> Statements;
     Statements.push_back(std::move(VarDecl));
+    
+    // Add a return statement that returns the variable value
+    auto VarRef = std::make_unique<VariableExprAST>(Name);
+    auto ReturnStmt = std::make_unique<ReturnStmtAST>(std::move(VarRef));
+    Statements.push_back(std::move(ReturnStmt));
+    
     auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
     auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     

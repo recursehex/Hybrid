@@ -599,7 +599,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     GlobalValues[getName()] = GV;
     GlobalTypes[getName()] = getType();
     
-    return GV;
+    // Return the value that was stored
+    return Builder->CreateLoad(VarType, GV, getName());
   } else {
     // Local variable - use alloca as before
     llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
@@ -620,7 +621,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     // Remember this local binding
     NamedValues[getName()] = Alloca;
     
-    return Alloca;
+    // Return the value that was stored
+    return Builder->CreateLoad(VarType, Alloca, getName());
   }
 }
 

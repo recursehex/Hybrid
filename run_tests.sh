@@ -122,47 +122,109 @@ run_test_verbose() {
     echo
 }
 
-# Check command line arguments
-if [ "$1" = "-v" ] || [ "$1" = "--verbose" ]; then
+# Parse command line arguments
+VERBOSE_MODE=0
+TEST_PATTERN=""
+
+# Parse flags and patterns
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose)
+            VERBOSE_MODE=1
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS] [TEST_PATTERN]"
+            echo
+            echo "Options:"
+            echo "  -v, --verbose       Show detailed output for each test"
+            echo "  -h, --help          Show this help message"
+            echo
+            echo "Examples:"
+            echo "  $0                  # Run all tests"
+            echo "  $0 -v               # Run all tests with verbose output"
+            echo "  $0 test_bool        # Run only tests matching 'test_bool'"
+            echo "  $0 -v test_bool     # Run tests matching 'test_bool' with verbose output"
+            echo "  $0 test_bool -v     # Same as above (order doesn't matter)"
+            exit 0
+            ;;
+        *)
+            TEST_PATTERN="$1"
+            shift
+            ;;
+    esac
+done
+
+# Filter tests if pattern provided
+if [ -n "$TEST_PATTERN" ]; then
+    if [ -f "test/$TEST_PATTERN" ]; then
+        # Specific file
+        TEST_FILES="test/$TEST_PATTERN"
+    else
+        # Pattern matching
+        TEST_FILES=$(find test/ -name "*$TEST_PATTERN*.hy" -type f | sort)
+        if [ -z "$TEST_FILES" ]; then
+            echo -e "${RED}No test files found matching pattern: $TEST_PATTERN${NC}"
+            exit 1
+        fi
+    fi
+    echo "Running tests matching pattern: $TEST_PATTERN"
+    if [ $VERBOSE_MODE -eq 1 ]; then
+        echo "(verbose mode enabled)"
+    fi
+    echo
+fi
+
+# Run tests
+if [ $VERBOSE_MODE -eq 1 ]; then
     echo "Running tests in verbose mode..."
     echo
     for test_file in $TEST_FILES; do
         run_test_verbose "$test_file"
-    done
-elif [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    echo "Usage: $0 [OPTIONS] [TEST_PATTERN]"
-    echo
-    echo "Options:"
-    echo "  -v, --verbose       Show detailed output for each test"
-    echo "  -h, --help          Show this help message"
-    echo
-    echo "Examples:"
-    echo "  $0                  # Run all tests"
-    echo "  $0 -v               # Run all tests with verbose output"
-    echo "  $0 null             # Run only tests matching 'null'"
-    echo "  $0 test_expr.hy     # Run specific test file"
-    exit 0
-elif [ -n "$1" ]; then
-    # Filter tests by pattern
-    if [ -f "test/$1" ]; then
-        # Specific file
-        TEST_FILES="test/$1"
-    else
-        # Pattern matching
-        TEST_FILES=$(find test/ -name "*$1*.hy" -type f | sort)
-        if [ -z "$TEST_FILES" ]; then
-            echo -e "${RED}No test files found matching pattern: $1${NC}"
-            exit 1
+        ((TOTAL_TESTS++))
+        # For verbose mode, we need to check if the test passed or failed
+        # Run it again silently to check the result
+        output=$(./hybrid < "$test_file" 2>&1)
+        exit_code=$?
+        test_name=$(basename "$test_file" .hy)
+        
+        # Check for error patterns in output
+        has_errors=0
+        if echo "$output" | grep -q "Error:"; then
+            has_errors=1
+        elif echo "$output" | grep -q "Failed to generate"; then
+            has_errors=1
+        elif echo "$output" | grep -q "Unknown function"; then
+            has_errors=1
+        elif echo "$output" | grep -q "Unknown variable"; then
+            has_errors=1
+        elif echo "$output" | grep -q "invalid binary operator"; then
+            has_errors=1
+        elif echo "$output" | grep -q "Expected.*after"; then
+            has_errors=1
         fi
-    fi
-    echo "Running tests matching pattern: $1"
-    echo
+        
+        # Special case: tests that should fail (have "fail" in name)
+        if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+            if [ $has_errors -eq 1 ] || [ $exit_code -ne 0 ]; then
+                ((PASSED_TESTS++))
+            else
+                ((FAILED_TESTS++))
+            fi
+        else
+            # Normal tests should not have errors
+            if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
+                ((PASSED_TESTS++))
+            else
+                ((FAILED_TESTS++))
+            fi
+        fi
+    done
+else
+    for test_file in $TEST_FILES; do
+        run_test "$test_file"
+    done
 fi
-
-# Run all tests
-for test_file in $TEST_FILES; do
-    run_test "$test_file"
-done
 
 # Print summary
 echo "==============================="
