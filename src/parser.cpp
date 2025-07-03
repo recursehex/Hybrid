@@ -83,10 +83,17 @@ std::unique_ptr<ExprAST> ParseParenExpr() {
 /// identifierexpr
 ///   ::= identifier
 ///   ::= identifier '(' expression* ')'
+///   ::= identifier '[' expression ']'
 std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   std::string IdName = IdentifierStr;
 
   getNextToken(); // eat identifier.
+
+  if (CurTok == '[') {
+    // Array indexing
+    auto ArrayVar = std::make_unique<VariableExprAST>(IdName);
+    return ParseArrayIndex(std::move(ArrayVar));
+  }
 
   if (CurTok != '(') // Simple variable ref.
     return std::make_unique<VariableExprAST>(IdName);
@@ -117,6 +124,61 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 }
 
 /// unaryexpr ::= ('-' | '!') primary
+/// arrayexpr ::= '[' expression* ']'
+std::unique_ptr<ExprAST> ParseArrayExpr() {
+  getNextToken(); // eat [
+  
+  std::vector<std::unique_ptr<ExprAST>> Elements;
+  
+  if (CurTok != ']') {
+    while (true) {
+      if (auto Elem = ParseExpression())
+        Elements.push_back(std::move(Elem));
+      else
+        return nullptr;
+      
+      if (CurTok == ']')
+        break;
+      
+      if (CurTok != ',')
+        return LogError("Expected ',' or ']' in array literal");
+      getNextToken(); // eat ,
+    }
+  }
+  
+  if (CurTok != ']')
+    return LogError("Expected ']' to close array literal");
+  getNextToken(); // eat ]
+  
+  // For now, we'll infer the element type from the elements
+  // In a real implementation, we might want to check all elements have compatible types
+  std::string ElementType = "int"; // Default to int, will be improved with type inference
+  
+  return std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
+}
+
+/// arrayindex ::= expr '[' expression ']'
+std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
+  getNextToken(); // eat [
+  
+  auto Index = ParseExpression();
+  if (!Index)
+    return nullptr;
+  
+  if (CurTok != ']')
+    return LogError("Expected ']' after array index");
+  getNextToken(); // eat ]
+  
+  // Check if there's another index (for multi-dimensional arrays)
+  auto Result = std::make_unique<ArrayIndexExprAST>(std::move(Array), std::move(Index));
+  
+  if (CurTok == '[') {
+    return ParseArrayIndex(std::move(Result));
+  }
+  
+  return Result;
+}
+
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
   int UnaryOp = CurTok;
   getNextToken(); // eat the unary operator
@@ -145,6 +207,7 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
 ///   ::= boolexpr
 ///   ::= stringexpr
 ///   ::= charexpr
+///   ::= arrayexpr
 std::unique_ptr<ExprAST> ParsePrimary() {
   switch (CurTok) {
   default:
@@ -176,6 +239,8 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     }
   case '(':
     return ParseParenExpr();
+  case '[':
+    return ParseArrayExpr();
   case '-':
   case tok_not:
     return ParseUnaryExpr();
@@ -250,6 +315,13 @@ std::unique_ptr<ExprAST> ParseExpression() {
   auto LHS = ParsePrimary();
   if (!LHS)
     return nullptr;
+
+  // Handle postfix operators (array indexing)
+  while (CurTok == '[') {
+    LHS = ParseArrayIndex(std::move(LHS));
+    if (!LHS)
+      return nullptr;
+  }
 
   return ParseBinOpRHS(0, std::move(LHS));
 }
@@ -377,6 +449,17 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration() {
   std::string Type = IdentifierStr;
   getNextToken(); // eat type
   
+  // Check for array type
+  if (CurTok == '[') {
+    getNextToken(); // eat [
+    if (CurTok != ']') {
+      LogError("Expected ']' after '[' in array type");
+      return nullptr;
+    }
+    getNextToken(); // eat ]
+    Type += "[]"; // Add array indicator to type
+  }
+  
   if (CurTok != tok_identifier)
     return nullptr;
     
@@ -413,6 +496,17 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   
   std::string Type = IdentifierStr;
   getNextToken(); // eat type
+  
+  // Check for array type
+  if (CurTok == '[') {
+    getNextToken(); // eat [
+    if (CurTok != ']') {
+      LogError("Expected ']' after '[' in array type");
+      return nullptr;
+    }
+    getNextToken(); // eat ]
+    Type += "[]"; // Add array indicator to type
+  }
   
   // Parse variable name
   if (CurTok != tok_identifier) {
@@ -647,6 +741,17 @@ void ParseTypeIdentifier() {
   std::string Type = IdentifierStr;
   getNextToken(); // eat type
   
+  // Check for array type
+  if (CurTok == '[') {
+    getNextToken(); // eat [
+    if (CurTok != ']') {
+      fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
+      return;
+    }
+    getNextToken(); // eat ]
+    Type += "[]"; // Add array indicator to type
+  }
+  
   if (CurTok != tok_identifier) {
     fprintf(stderr, "Error: Expected identifier after type\n");
     return;
@@ -674,6 +779,17 @@ void ParseTypeIdentifier() {
         
         std::string ParamType = IdentifierStr;
         getNextToken();
+        
+        // Check for array type
+        if (CurTok == '[') {
+          getNextToken(); // eat [
+          if (CurTok != ']') {
+            fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
+            return;
+          }
+          getNextToken(); // eat ]
+          ParamType += "[]"; // Add array indicator to type
+        }
         
         if (CurTok != tok_identifier) {
           fprintf(stderr, "Error: Expected parameter name\n");

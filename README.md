@@ -21,6 +21,9 @@ Hybrid is a programming language compiler/interpreter that combines elements fro
 - **Boolean operators** for logical operations (&&, ||, !)
 - **Unary expressions** including negative numbers and logical NOT
 - **Variable assignment** with `=` operator for mutable variables
+- **Array types** with `[]` syntax and array literals `[1, 2, 3]`
+- **Array indexing** for element access and assignment `arr[i]`
+- **Global variable storage** with proper scoping beyond function boundaries
 
 ## Language Syntax
 
@@ -48,6 +51,11 @@ int getAnswer()
 {
     return 42
 }
+
+// Function with array parameter
+int sum(int[] arr) {
+    return arr[0] + arr[1] + arr[2]
+}
 ```
 
 ### External Declarations
@@ -72,6 +80,11 @@ bool flag = true
 bool active = false
 string text = "hello"
 string nothing = null
+
+// Array declarations
+int[] numbers = [1, 2, 3, 4, 5]
+float[] temps = [98.6, 99.1, 97.5]
+char[] vowels = ['a', 'e', 'i', 'o', 'u']
 ```
 
 ### Control Flow
@@ -179,11 +192,17 @@ x < y + 1    // Comparison with arithmetic
 !flag        // Logical NOT
 a == b && c != d  // Boolean AND with comparisons
 x > 0 || y < 0    // Boolean OR with comparisons
+10.5 / 2.5   // Division (evaluates to 4.2)
+
+// Array operations
+arr[0]       // Array element access
+arr[i + 1]   // Array indexing with expression
+arr[0] = 10  // Array element assignment
 ```
 
 ### Supported Operators
 
-- Arithmetic: `+`, `-`, `*`
+- Arithmetic: `+`, `-`, `*`, `/`
 - Comparison: `<`, `>`, `<=`, `>=`, `==`, `!=`
 - Boolean: `&&` (AND), `||` (OR), `!` (NOT)
 - Unary: `-` (negation), `!` (logical NOT)
@@ -364,6 +383,7 @@ The `test/` directory contains various test files demonstrating different langua
 - `test_if_else.hy` - If-else statements and comparison operators
 - `test_boolean_ops.hy` - Boolean operators (&&, ||, !) and logical expressions
 - `test_while.hy` - While loops with various conditions and nesting
+- `test_arrays.hy` - Comprehensive array tests including all types, operations, and functions
 
 ### Running Individual Tests
 
@@ -489,6 +509,9 @@ The compiler follows a traditional multi-pass design:
   - `ExpressionStmtAST`: Expression statements
   - `ForEachStmtAST`: Foreach loops
   - `IfStmtAST`: If-else statements
+  - `WhileStmtAST`: While loops
+  - `ArrayExprAST`: Array literals [1, 2, 3]
+  - `ArrayIndexExprAST`: Array indexing arr[i]
 
 ### 4. Top-level Parser (`src/toplevel.cpp/h`)
 - Handles the REPL loop
@@ -503,10 +526,12 @@ The compiler follows a traditional multi-pass design:
 ### Type System
 - Explicit typing for function return values and parameters
 - Built-in types: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
+- Array types: `int[]`, `float[]`, `double[]`, `char[]`, `bool[]`, `string[]`
 - Parameters require both type and name: `int add(int x, int y)`
 - All variables must be initialized at declaration (no default values)
 - Boolean type with `true` and `false` literals
 - String type with string literals and `null` for initialization
+- Arrays initialized with literals: `int[] arr = [1, 2, 3]`
 
 ### Function Declaration Styles
 - **Single-line**: `int func(int x) { return x }`
@@ -547,6 +572,15 @@ float rate = 0.05
 bool isActive = true
 string message = "Hello, World!"
 string empty = null
+
+// Array declarations and operations
+int[] scores = [95, 87, 92, 88]
+float[] prices = [19.99, 24.50, 9.95]
+
+// Array element access and modification
+int first = scores[0]      // 95
+scores[1] = 90             // Update second element
+float avg = (prices[0] + prices[1] + prices[2]) / 3.0
 
 // If-else conditional logic
 int grade(int score) {
@@ -614,8 +648,10 @@ This is a **complete compiler implementation** with both frontend and backend. T
 - **LLVM code generation** - Complete IR generation for all language constructs
 - **Type system** - Automatic type inference, promotion, and casting
 - **Function compilation** - Full function definitions with typed parameters
-- **Expression evaluation** - Arithmetic, comparisons, and function calls
+- **Expression evaluation** - Arithmetic (including division), comparisons, and function calls
 - **Variable management** - Declarations with proper memory allocation
+- **Global variable storage** - Proper LLVM global variables with persistence
+- **Arrays** - Array types, literals, indexing, and element assignment
 - **Cross-platform build** - Automatic LLVM detection and linking
 
 ### Code Generation Features
@@ -628,7 +664,7 @@ This is a **complete compiler implementation** with both frontend and backend. T
 
 ### Not Yet Implemented
 - Foreach loop code generation (parser complete, codegen pending)
-- Advanced type system features (structs, arrays, pointers)
+- Advanced type system features (structs, multi-dimensional arrays, pointers)
 - Module system and imports
 - Standard library integration
 - Traditional for loops `for int x = 0 to limit by + 1`

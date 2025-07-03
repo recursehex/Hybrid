@@ -22,6 +22,8 @@ std::unique_ptr<StmtAST> LogErrorS(const char *Str);
 std::unique_ptr<ExprAST> ParseNumberExpr();
 std::unique_ptr<ExprAST> ParseParenExpr();
 std::unique_ptr<ExprAST> ParseIdentifierExpr();
+std::unique_ptr<ExprAST> ParseArrayExpr();
+std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array);
 std::unique_ptr<ExprAST> ParseUnaryExpr();
 std::unique_ptr<ExprAST> ParsePrimary();
 std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS);

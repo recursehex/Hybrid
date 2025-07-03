@@ -195,6 +195,36 @@ public:
   char getValue() const { return Val; }
 };
 
+/// ArrayExprAST - Expression class for array literals like [1, 2, 3].
+class ArrayExprAST : public ExprAST {
+  std::string ElementType;
+  std::vector<std::unique_ptr<ExprAST>> Elements;
+
+public:
+  ArrayExprAST(const std::string &ElementType,
+               std::vector<std::unique_ptr<ExprAST>> Elements)
+      : ElementType(ElementType), Elements(std::move(Elements)) {}
+  
+  llvm::Value *codegen() override;
+  const std::string &getElementType() const { return ElementType; }
+  const std::vector<std::unique_ptr<ExprAST>> &getElements() const { return Elements; }
+};
+
+/// ArrayIndexExprAST - Expression class for array indexing like arr[0].
+class ArrayIndexExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Array;
+  std::unique_ptr<ExprAST> Index;
+
+public:
+  ArrayIndexExprAST(std::unique_ptr<ExprAST> Array,
+                    std::unique_ptr<ExprAST> Index)
+      : Array(std::move(Array)), Index(std::move(Index)) {}
+  
+  llvm::Value *codegen() override;
+  ExprAST *getArray() const { return Array.get(); }
+  ExprAST *getIndex() const { return Index.get(); }
+};
+
 /// VariableExprAST - Expression class for referencing a variable, like "var".
 class VariableExprAST : public ExprAST {
   std::string Name;

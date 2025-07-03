@@ -13,6 +13,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/Casting.h"
 
 #include <map>
 #include <cmath>
@@ -23,6 +24,8 @@ static std::unique_ptr<llvm::LLVMContext> TheContext;
 static std::unique_ptr<llvm::Module> TheModule;
 static std::unique_ptr<llvm::IRBuilder<>> Builder;
 static std::map<std::string, llvm::Value *> NamedValues;
+static std::map<std::string, llvm::GlobalVariable *> GlobalValues;
+static std::map<std::string, std::string> GlobalTypes; // Track types of globals
 
 // Initialize LLVM
 void InitializeModule() {
@@ -70,6 +73,14 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     return llvm::Type::getVoidTy(*TheContext);
   else if (TypeStr == "string")
     return llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0); // Strings as char*
+  else if (TypeStr.size() > 2 && TypeStr.substr(TypeStr.size() - 2) == "[]") {
+    // Array type: extract element type and create pointer type
+    std::string ElementType = TypeStr.substr(0, TypeStr.size() - 2);
+    llvm::Type *ElemType = getTypeFromString(ElementType);
+    if (ElemType)
+      return llvm::PointerType::get(ElemType, 0); // Arrays are represented as pointers
+    return nullptr;
+  }
   return nullptr;
 }
 
@@ -115,14 +126,121 @@ llvm::Value *CharExprAST::codegen() {
   return llvm::ConstantInt::get(*TheContext, llvm::APInt(8, getValue()));
 }
 
+// Forward declaration for castToType
+llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType);
+
+llvm::Value *ArrayExprAST::codegen() {
+  // Get the element type
+  llvm::Type *ElemType = getTypeFromString(getElementType());
+  if (!ElemType)
+    return LogErrorV("Unknown element type in array literal");
+  
+  // Get the array size
+  size_t ArraySize = getElements().size();
+  
+  // Allocate space for the array on the stack
+  llvm::AllocaInst *ArrayAlloca = Builder->CreateAlloca(
+      ElemType, llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize)), "arraytmp");
+  
+  // Store each element
+  for (size_t i = 0; i < ArraySize; ++i) {
+    llvm::Value *ElemVal = getElements()[i]->codegen();
+    if (!ElemVal)
+      return nullptr;
+    
+    // Cast element to the correct type if needed
+    ElemVal = castToType(ElemVal, ElemType);
+    
+    // Calculate the address of the i-th element
+    llvm::Value *Idx = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, i));
+    llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayAlloca, Idx, "elemptr");
+    
+    // Store the element
+    Builder->CreateStore(ElemVal, ElemPtr);
+  }
+  
+  // Return the pointer to the first element
+  return ArrayAlloca;
+}
+
+llvm::Value *ArrayIndexExprAST::codegen() {
+  // Generate code for the array expression
+  llvm::Value *ArrayVal = getArray()->codegen();
+  if (!ArrayVal)
+    return nullptr;
+  
+  // Generate code for the index
+  llvm::Value *IndexVal = getIndex()->codegen();
+  if (!IndexVal)
+    return nullptr;
+  
+  // Make sure index is an integer
+  if (!IndexVal->getType()->isIntegerTy(32)) {
+    // Cast to i32 if it's not already
+    if (IndexVal->getType()->isIntegerTy()) {
+      IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
+    } else if (IndexVal->getType()->isFloatingPointTy()) {
+      IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
+    } else {
+      return LogErrorV("Array index must be an integer");
+    }
+  }
+  
+  // Determine the element type by checking if ArrayVal is a pointer
+  llvm::Type *ArrayType = ArrayVal->getType();
+  if (!ArrayType->isPointerTy())
+    return LogErrorV("Array indexing requires a pointer type");
+  
+  // For arrays, we need to infer the element type from context
+  llvm::Type *ElemType = llvm::Type::getInt32Ty(*TheContext); // default
+  
+  // If the array is from a variable, check its type
+  if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
+    std::string varName = VarExpr->getName();
+    
+    // Check if it's a global variable with known type
+    if (GlobalTypes.count(varName)) {
+      std::string typeStr = GlobalTypes[varName];
+      if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+        // It's an array type, extract the element type
+        std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+        if (elemTypeStr == "int") {
+          ElemType = llvm::Type::getInt32Ty(*TheContext);
+        } else if (elemTypeStr == "float" || elemTypeStr == "double") {
+          ElemType = llvm::Type::getDoubleTy(*TheContext);
+        } else if (elemTypeStr == "char") {
+          ElemType = llvm::Type::getInt8Ty(*TheContext);
+        } else if (elemTypeStr == "bool") {
+          ElemType = llvm::Type::getInt1Ty(*TheContext);
+        }
+      }
+    }
+  }
+  
+  // Calculate the address of the indexed element
+  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayVal, IndexVal, "elemptr");
+  
+  // Load and return the value
+  return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
+}
+
 llvm::Value *VariableExprAST::codegen() {
-  // Look this variable up in the function
+  // First look this variable up in the local function scope
   llvm::Value *V = NamedValues[getName()];
-  if (!V)
-    return LogErrorV("Unknown variable name");
-  // Load the value - V is an AllocaInst*, we need to get the allocated type
-  llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
-  return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
+  if (V) {
+    // Local variable - load from alloca
+    llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
+    return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
+  }
+  
+  // Not found locally, check global scope
+  llvm::GlobalVariable *GV = GlobalValues[getName()];
+  if (GV) {
+    // Global variable - load from global
+    return Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
+  }
+  
+  return LogErrorV("Unknown variable name");
 }
 
 // Helper function to cast a value to a target type
@@ -243,6 +361,11 @@ llvm::Value *BinaryExprAST::codegen() {
         return Builder->CreateFMul(L, R, "multmp");
       else
         return Builder->CreateMul(L, R, "multmp");
+    case '/':
+      if (isFloat)
+        return Builder->CreateFDiv(L, R, "divtmp");
+      else
+        return Builder->CreateSDiv(L, R, "divtmp");
     case '<':
       if (isFloat) {
         L = Builder->CreateFCmpULT(L, R, "cmptmp");
@@ -260,24 +383,67 @@ llvm::Value *BinaryExprAST::codegen() {
       // Return the boolean result as i1
       return L;
     case '=':
-      // Assignment operator - LHS must be a variable
-      VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS());
-      if (!LHSE)
-        return LogErrorV("destination of '=' must be a variable");
-      
-      // Look up the variable in the symbol table
-      llvm::Value *Variable = NamedValues[LHSE->getName()];
-      if (!Variable)
+      // Assignment operator - LHS must be a variable or array element
+      if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
+        // Simple variable assignment - check local first, then global
+        llvm::Value *Variable = NamedValues[LHSE->getName()];
+        if (Variable) {
+          // Local variable
+          llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
+          llvm::Type *VarType = Alloca->getAllocatedType();
+          R = castToType(R, VarType);
+          Builder->CreateStore(R, Variable);
+          return R;
+        }
+        
+        // Check global scope
+        llvm::GlobalVariable *GV = GlobalValues[LHSE->getName()];
+        if (GV) {
+          // Global variable
+          llvm::Type *VarType = GV->getValueType();
+          R = castToType(R, VarType);
+          Builder->CreateStore(R, GV);
+          return R;
+        }
+        
         return LogErrorV("Unknown variable name");
-      
-      // Cast RHS to the variable's type
-      llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
-      llvm::Type *VarType = Alloca->getAllocatedType();
-      R = castToType(R, VarType);
-      
-      // Store the value
-      Builder->CreateStore(R, Variable);
-      return R;
+      } else if (ArrayIndexExprAST *LHSAI = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
+        // Array element assignment
+        llvm::Value *ArrayVal = LHSAI->getArray()->codegen();
+        if (!ArrayVal)
+          return nullptr;
+        
+        llvm::Value *IndexVal = LHSAI->getIndex()->codegen();
+        if (!IndexVal)
+          return nullptr;
+        
+        // Make sure index is an integer
+        if (!IndexVal->getType()->isIntegerTy(32)) {
+          if (IndexVal->getType()->isIntegerTy()) {
+            IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
+          } else if (IndexVal->getType()->isFloatingPointTy()) {
+            IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
+          } else {
+            return LogErrorV("Array index must be an integer");
+          }
+        }
+        
+        // Get element type
+        llvm::Type *ArrayType = ArrayVal->getType();
+        if (!ArrayType->isPointerTy())
+          return LogErrorV("Array indexing requires a pointer type");
+        
+        // For arrays, we need to infer the element type from context
+        // For now, we'll use the type of R
+        llvm::Type *ElemType = R->getType();
+        
+        // Calculate the address and store
+        llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayVal, IndexVal, "elemptr");
+        Builder->CreateStore(R, ElemPtr);
+        return R;
+      } else {
+        return LogErrorV("destination of '=' must be a variable or array element");
+      }
     }
   }
   
@@ -396,30 +562,66 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   if (!VarType)
     return LogErrorV("Unknown type name");
   
-  // Generate the initializer
-  llvm::Value *InitVal = nullptr;
-  if (getInitializer()) {
-    InitVal = getInitializer()->codegen();
-    if (!InitVal)
-      return nullptr;
-    
-    // Cast the initializer to the variable type if needed
-    InitVal = castToType(InitVal, VarType);
-  }
-  
-  // Create an alloca for this variable
+  // Check if we're at global scope (in __anon_var_decl function)
   llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
-  llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
+  bool isGlobal = (TheFunction->getName() == "__anon_var_decl");
   
-  // Store the initial value
-  if (InitVal) {
-    Builder->CreateStore(InitVal, Alloca);
+  if (isGlobal) {
+    // Create a global variable
+    llvm::GlobalVariable *GV = new llvm::GlobalVariable(
+        *TheModule, VarType, false, llvm::GlobalValue::ExternalLinkage,
+        nullptr, getName());
+    
+    // Generate the initializer
+    if (getInitializer()) {
+      // For globals, we need constant initializers
+      // For now, create a zero initializer and store the actual value
+      llvm::Constant *ZeroInit = llvm::Constant::getNullValue(VarType);
+      GV->setInitializer(ZeroInit);
+      
+      // Generate code to store the actual initial value
+      llvm::Value *InitVal = getInitializer()->codegen();
+      if (!InitVal)
+        return nullptr;
+      
+      // Cast the initializer to the variable type if needed
+      InitVal = castToType(InitVal, VarType);
+      
+      // Store the initial value
+      Builder->CreateStore(InitVal, GV);
+    } else {
+      // Zero initialize
+      llvm::Constant *ZeroInit = llvm::Constant::getNullValue(VarType);
+      GV->setInitializer(ZeroInit);
+    }
+    
+    // Remember this global binding
+    GlobalValues[getName()] = GV;
+    GlobalTypes[getName()] = getType();
+    
+    return GV;
+  } else {
+    // Local variable - use alloca as before
+    llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
+    
+    // Generate and store the initial value
+    if (getInitializer()) {
+      llvm::Value *InitVal = getInitializer()->codegen();
+      if (!InitVal)
+        return nullptr;
+      
+      // Cast the initializer to the variable type if needed
+      InitVal = castToType(InitVal, VarType);
+      
+      // Store the initial value
+      Builder->CreateStore(InitVal, Alloca);
+    }
+    
+    // Remember this local binding
+    NamedValues[getName()] = Alloca;
+    
+    return Alloca;
   }
-  
-  // Remember this binding
-  NamedValues[getName()] = Alloca;
-  
-  return Alloca;
 }
 
 llvm::Value *ExpressionStmtAST::codegen() {
