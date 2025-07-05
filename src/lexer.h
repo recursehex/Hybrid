@@ -54,7 +54,14 @@ enum Token {
   // boolean operators
   tok_and = -31,       // &&
   tok_or = -32,        // ||
-  tok_not = -33        // !
+  tok_not = -33,       // !
+  
+  // compound assignment operators
+  tok_plus_eq = -34,   // +=
+  tok_minus_eq = -35,  // -=
+  tok_mult_eq = -36,   // *=
+  tok_div_eq = -37,    // /=
+  tok_mod_eq = -38     // %=
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

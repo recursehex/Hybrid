@@ -33,6 +33,16 @@ int GetTokPrecedence() {
     return BinopPrecedence["&&"];
   } else if (CurTok == tok_or) {
     return BinopPrecedence["||"];
+  } else if (CurTok == tok_plus_eq) {
+    return BinopPrecedence["+="];
+  } else if (CurTok == tok_minus_eq) {
+    return BinopPrecedence["-="];
+  } else if (CurTok == tok_mult_eq) {
+    return BinopPrecedence["*="];
+  } else if (CurTok == tok_div_eq) {
+    return BinopPrecedence["/="];
+  } else if (CurTok == tok_mod_eq) {
+    return BinopPrecedence["%="];
   }
   
   // Handle single character operators
@@ -280,6 +290,16 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       BinOp = "&&";
     } else if (CurTok == tok_or) {
       BinOp = "||";
+    } else if (CurTok == tok_plus_eq) {
+      BinOp = "+=";
+    } else if (CurTok == tok_minus_eq) {
+      BinOp = "-=";
+    } else if (CurTok == tok_mult_eq) {
+      BinOp = "*=";
+    } else if (CurTok == tok_div_eq) {
+      BinOp = "/=";
+    } else if (CurTok == tok_mod_eq) {
+      BinOp = "%=";
     } else if (isascii(CurTok)) {
       BinOp = std::string(1, (char)CurTok);
     } else {

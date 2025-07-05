@@ -126,10 +126,13 @@ int gettok() {
     // Error case - missing closing quote, but continue parsing
   }
 
-  // Check for start of comment.
-  if (LastChar == '/') {
+  // Check for arithmetic operators and their compound assignments
+  if (LastChar == '+' || LastChar == '-' || LastChar == '*' || LastChar == '/' || LastChar == '%') {
+    char Op = LastChar;
     int NextChar = getchar();
-    if (NextChar == '/') {
+    
+    // Handle // comment special case
+    if (Op == '/' && NextChar == '/') {
       // Comment until end of line.
       do
         LastChar = getchar();
@@ -137,8 +140,20 @@ int gettok() {
 
       if (LastChar != EOF)
         return gettok();
+    }
+    
+    // Check for compound assignment
+    if (NextChar == '=') {
+      LastChar = getchar();
+      switch (Op) {
+        case '+': return tok_plus_eq;   // +=
+        case '-': return tok_minus_eq;  // -=
+        case '*': return tok_mult_eq;   // *=
+        case '/': return tok_div_eq;    // /=
+        case '%': return tok_mod_eq;    // %=
+      }
     } else {
-      // Not a comment, put the character back
+      // Not a compound assignment, put the character back
       ungetc(NextChar, stdin);
     }
   }

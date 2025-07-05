@@ -366,6 +366,11 @@ llvm::Value *BinaryExprAST::codegen() {
         return Builder->CreateFDiv(L, R, "divtmp");
       else
         return Builder->CreateSDiv(L, R, "divtmp");
+    case '%':
+      if (isFloat)
+        return Builder->CreateFRem(L, R, "modtmp");
+      else
+        return Builder->CreateSRem(L, R, "modtmp");
     case '<':
       if (isFloat) {
         L = Builder->CreateFCmpULT(L, R, "cmptmp");
@@ -468,6 +473,163 @@ llvm::Value *BinaryExprAST::codegen() {
       return Builder->CreateFCmpOGE(L, R, "getmp");
     else
       return Builder->CreateICmpSGE(L, R, "getmp");
+  } else if (Op == "+=" || Op == "-=" || Op == "*=" || Op == "/=" || Op == "%=") {
+    // Compound assignment operators: a += b is equivalent to a = a + b
+    if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
+      // Simple variable compound assignment
+      llvm::Value *Variable = NamedValues[LHSE->getName()];
+      if (!Variable) {
+        Variable = GlobalValues[LHSE->getName()];
+        if (!Variable)
+          return LogErrorV("Unknown variable name for compound assignment");
+      }
+      
+      // Load current value
+      llvm::Value *CurrentVal;
+      if (NamedValues[LHSE->getName()]) {
+        // Local variable - alloca
+        llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
+        CurrentVal = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, LHSE->getName());
+      } else {
+        // Global variable
+        llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(Variable);
+        CurrentVal = Builder->CreateLoad(GV->getValueType(), Variable, LHSE->getName());
+      }
+      
+      // Perform the operation
+      llvm::Value *Result;
+      char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
+      
+      // Promote types for the operation
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+      
+      switch (baseOp) {
+        case '+':
+          if (isFloat)
+            Result = Builder->CreateFAdd(PromotedCurrent, PromotedR, "addtmp");
+          else
+            Result = Builder->CreateAdd(PromotedCurrent, PromotedR, "addtmp");
+          break;
+        case '-':
+          if (isFloat)
+            Result = Builder->CreateFSub(PromotedCurrent, PromotedR, "subtmp");
+          else
+            Result = Builder->CreateSub(PromotedCurrent, PromotedR, "subtmp");
+          break;
+        case '*':
+          if (isFloat)
+            Result = Builder->CreateFMul(PromotedCurrent, PromotedR, "multmp");
+          else
+            Result = Builder->CreateMul(PromotedCurrent, PromotedR, "multmp");
+          break;
+        case '/':
+          if (isFloat)
+            Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+          else
+            Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
+          break;
+        case '%':
+          if (isFloat)
+            Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+          else
+            Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
+          break;
+        default:
+          return LogErrorV("Unknown compound assignment operator");
+      }
+      
+      // Store the result back
+      Builder->CreateStore(Result, Variable);
+      return Result;
+      
+    } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
+      // Array element compound assignment: arr[i] += val
+      llvm::Value *ArrayPtr = LHSE->getArray()->codegen();
+      if (!ArrayPtr) return nullptr;
+      
+      llvm::Value *Index = LHSE->getIndex()->codegen();
+      if (!Index) return nullptr;
+      
+      // Determine element type - default to int32
+      llvm::Type *ElemType = llvm::Type::getInt32Ty(*TheContext);
+      
+      // Try to get the proper element type from the array variable
+      if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
+        std::string varName = ArrayVar->getName();
+        if (GlobalTypes.count(varName)) {
+          std::string typeStr = GlobalTypes[varName];
+          if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+            std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+            if (elemTypeStr == "int") {
+              ElemType = llvm::Type::getInt32Ty(*TheContext);
+            } else if (elemTypeStr == "float" || elemTypeStr == "double") {
+              ElemType = llvm::Type::getDoubleTy(*TheContext);
+            } else if (elemTypeStr == "char") {
+              ElemType = llvm::Type::getInt8Ty(*TheContext);
+            } else if (elemTypeStr == "bool") {
+              ElemType = llvm::Type::getInt1Ty(*TheContext);
+            }
+          }
+        }
+      }
+      
+      // Get the element pointer
+      llvm::Value *ElementPtr = Builder->CreateGEP(ElemType, ArrayPtr, Index, "arrayptr");
+      
+      // Load current value
+      llvm::Value *CurrentVal = Builder->CreateLoad(ElemType, ElementPtr, "arrayload");
+      
+      // Perform the operation
+      llvm::Value *Result;
+      char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
+      
+      // Promote types for the operation
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+      
+      switch (baseOp) {
+        case '+':
+          if (isFloat)
+            Result = Builder->CreateFAdd(PromotedCurrent, PromotedR, "addtmp");
+          else
+            Result = Builder->CreateAdd(PromotedCurrent, PromotedR, "addtmp");
+          break;
+        case '-':
+          if (isFloat)
+            Result = Builder->CreateFSub(PromotedCurrent, PromotedR, "subtmp");
+          else
+            Result = Builder->CreateSub(PromotedCurrent, PromotedR, "subtmp");
+          break;
+        case '*':
+          if (isFloat)
+            Result = Builder->CreateFMul(PromotedCurrent, PromotedR, "multmp");
+          else
+            Result = Builder->CreateMul(PromotedCurrent, PromotedR, "multmp");
+          break;
+        case '/':
+          if (isFloat)
+            Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+          else
+            Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
+          break;
+        case '%':
+          if (isFloat)
+            Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+          else
+            Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
+          break;
+        default:
+          return LogErrorV("Unknown compound assignment operator");
+      }
+      
+      // Store the result back
+      Builder->CreateStore(Result, ElementPtr);
+      return Result;
+      
+    } else {
+      return LogErrorV("destination of compound assignment must be a variable or array element");
+    }
   } else if (Op == "&&") {
     // Convert operands to booleans if needed
     if (!L->getType()->isIntegerTy(1)) {
