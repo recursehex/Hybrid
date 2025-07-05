@@ -167,6 +167,69 @@ int findFirst(int[] arr, int target) {
 }
 ```
 
+### Break Statements
+
+The `break` statement provides another way to exit loops early:
+
+```c
+// Basic break usage
+int countUntilZero(int[] values) {
+    int count = 0
+    int i = 0
+    while i < 100 {
+        if values[i] == 0 {
+            break  // Exit the loop
+        }
+        count = count + 1
+        i = i + 1
+    }
+    return count
+}
+
+// Break in infinite loop
+int readUntilDone() {
+    int sum = 0
+    while true {
+        int value = getInput()
+        if value < 0 {
+            break
+        }
+        sum = sum + value
+    }
+    return sum
+}
+```
+
+#### Break in Nested Loops
+
+Break only exits the innermost loop:
+
+```c
+int nestedBreak() {
+    int total = 0
+    int i = 0
+    while i < 10 {
+        int j = 0
+        while j < 10 {
+            if j == 5 {
+                break  // Only exits inner loop
+            }
+            total = total + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return total  // Returns 50 (10 * 5)
+}
+```
+
+#### Important Notes
+
+- `break` can only be used inside `while` or `for` loops
+- It immediately transfers control to the statement after the loop
+- In nested loops, `break` only exits the innermost enclosing loop
+- Using `break` outside of a loop results in a compilation error
+
 ## Foreach Loops
 
 Foreach loops iterate over collections with a typed loop variable.

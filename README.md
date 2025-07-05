@@ -7,7 +7,7 @@ Hybrid is a statically-typed programming language with C-style syntax that compi
 - **C-style syntax** with explicit type declarations
 - **LLVM backend** for optimized native code generation
 - **Static typing** with automatic type inference for literals
-- **Modern control flow** including if-else, while loops, and foreach
+- **Modern control flow** including if-else, while loops with break, and foreach
 - **Arrays** with literals and indexing
 - **Interactive REPL** with live code compilation
 - **Cross-platform** support (macOS, Linux)
@@ -151,7 +151,7 @@ Hybrid/
 - LLVM code generation
 - Function definitions and calls
 - All primitive types and arrays
-- If-else and while loops
+- If-else and while loops with break statements
 - Expression evaluation
 - Global and local variables
 - External function declarations

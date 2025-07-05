@@ -132,6 +132,14 @@ public:
   StmtAST *getBody() const { return Body.get(); }
 };
 
+/// BreakStmtAST - Statement class for break statements.
+class BreakStmtAST : public StmtAST {
+public:
+  BreakStmtAST() {}
+  
+  llvm::Value *codegen() override;
+};
+
 /// UseStmtAST - Statement class for use (import) statements.
 class UseStmtAST : public StmtAST {
   std::string Module;

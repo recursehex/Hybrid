@@ -19,49 +19,50 @@ enum Token {
   tok_if = -7,
   tok_else = -8,
   tok_while = -9,
+  tok_break = -10,
 
   // types
-  tok_int = -10,
-  tok_float = -11,
-  tok_double = -12,
-  tok_char = -13,
-  tok_void = -14,
-  tok_bool = -15,
-  tok_string = -16,
+  tok_int = -11,
+  tok_float = -12,
+  tok_double = -13,
+  tok_char = -14,
+  tok_void = -15,
+  tok_bool = -16,
+  tok_string = -17,
 
   // primary
-  tok_identifier = -17,
-  tok_number = -18,
-  tok_string_literal = -19,
-  tok_char_literal = -20,
+  tok_identifier = -18,
+  tok_number = -19,
+  tok_string_literal = -20,
+  tok_char_literal = -21,
   
   // boolean literals
-  tok_true = -21,
-  tok_false = -22,
-  tok_null = -23,
+  tok_true = -22,
+  tok_false = -23,
+  tok_null = -24,
   
   // delimiters
-  tok_newline = -24,
+  tok_newline = -25,
   
   // comparison operators
-  tok_eq = -25,        // ==
-  tok_ne = -26,        // !=
-  tok_le = -27,        // <=
-  tok_ge = -28,        // >=
-  tok_lt = -29,        // <
-  tok_gt = -30,        // >
+  tok_eq = -26,        // ==
+  tok_ne = -27,        // !=
+  tok_le = -28,        // <=
+  tok_ge = -29,        // >=
+  tok_lt = -30,        // <
+  tok_gt = -31,        // >
   
   // boolean operators
-  tok_and = -31,       // &&
-  tok_or = -32,        // ||
-  tok_not = -33,       // !
+  tok_and = -32,       // &&
+  tok_or = -33,        // ||
+  tok_not = -34,       // !
   
   // compound assignment operators
-  tok_plus_eq = -34,   // +=
-  tok_minus_eq = -35,  // -=
-  tok_mult_eq = -36,   // *=
-  tok_div_eq = -37,    // /=
-  tok_mod_eq = -38     // %=
+  tok_plus_eq = -35,   // +=
+  tok_minus_eq = -36,  // -=
+  tok_mult_eq = -37,   // *=
+  tok_div_eq = -38,    // /=
+  tok_mod_eq = -39     // %=
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

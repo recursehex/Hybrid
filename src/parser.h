@@ -42,6 +42,7 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement();
 std::unique_ptr<UseStmtAST> ParseUseStatement();
 std::unique_ptr<IfStmtAST> ParseIfStatement();
 std::unique_ptr<WhileStmtAST> ParseWhileStatement();
+std::unique_ptr<BreakStmtAST> ParseBreakStatement();
 
 // Top-level parsing that can handle both variable declarations and function definitions
 void ParseTypeIdentifier();

@@ -64,7 +64,7 @@ add(5, 3)
 The following keywords are reserved:
 
 - Type keywords: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
-- Control flow: `if`, `else`, `for`, `in`, `while`
+- Control flow: `if`, `else`, `for`, `in`, `while`, `break`
 - Function keywords: `return`, `extern`
 - Boolean literals: `true`, `false`
 - Null literal: `null`

@@ -673,6 +673,12 @@ std::unique_ptr<WhileStmtAST> ParseWhileStatement() {
   return std::make_unique<WhileStmtAST>(std::move(Condition), std::move(Body));
 }
 
+/// breakstmt ::= 'break'
+std::unique_ptr<BreakStmtAST> ParseBreakStatement() {
+  getNextToken(); // eat 'break'
+  return std::make_unique<BreakStmtAST>();
+}
+
 /// statement ::= returnstmt | variabledecl | foreachstmt | usestmt | ifstmt | whilestmt | expressionstmt
 std::unique_ptr<StmtAST> ParseStatement() {
   switch (CurTok) {
@@ -686,6 +692,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseIfStatement();
   case tok_while:
     return ParseWhileStatement();
+  case tok_break:
+    return ParseBreakStatement();
   case tok_int:
   case tok_float:
   case tok_double:

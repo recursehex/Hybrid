@@ -27,6 +27,9 @@ static std::map<std::string, llvm::Value *> NamedValues;
 static std::map<std::string, llvm::GlobalVariable *> GlobalValues;
 static std::map<std::string, std::string> GlobalTypes; // Track types of globals
 
+// Stack to track loop exit blocks for break statements
+static std::vector<llvm::BasicBlock *> LoopExitBlocks;
+
 // Initialize LLVM
 void InitializeModule() {
   TheContext = std::make_unique<llvm::LLVMContext>();
@@ -910,8 +913,15 @@ llvm::Value *WhileStmtAST::codegen() {
   LoopBB->insertInto(TheFunction);
   Builder->SetInsertPoint(LoopBB);
   
+  // Push the exit block for break statements
+  LoopExitBlocks.push_back(AfterBB);
+  
   // Generate code for the body
   llvm::Value *BodyV = getBody()->codegen();
+  
+  // Pop the exit block
+  LoopExitBlocks.pop_back();
+  
   if (!BodyV)
     return nullptr;
   
@@ -932,6 +942,27 @@ llvm::Value *UseStmtAST::codegen() {
   // TODO: Implement module importing
   // This would require linking external modules
   return LogErrorV("use statements not yet implemented in code generation");
+}
+
+llvm::Value *BreakStmtAST::codegen() {
+  // Check if we're inside a loop
+  if (LoopExitBlocks.empty())
+    return LogErrorV("'break' statement not within a loop");
+  
+  // Get the current loop's exit block
+  llvm::BasicBlock *ExitBlock = LoopExitBlocks.back();
+  
+  // Create an unconditional branch to the loop exit
+  Builder->CreateBr(ExitBlock);
+  
+  // Create a new dead block for any code after the break
+  // (which should be unreachable)
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *DeadBB = llvm::BasicBlock::Create(*TheContext, "afterbreak", TheFunction);
+  Builder->SetInsertPoint(DeadBB);
+  
+  // Return a dummy value
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
 //===----------------------------------------------------------------------===//
