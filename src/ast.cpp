@@ -77,14 +77,25 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   else if (TypeStr == "string")
     return llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0); // Strings as char*
   else if (TypeStr.size() > 2 && TypeStr.substr(TypeStr.size() - 2) == "[]") {
-    // Array type: extract element type and create pointer type
+    // Array type: return the array struct type {ptr, size}
     std::string ElementType = TypeStr.substr(0, TypeStr.size() - 2);
     llvm::Type *ElemType = getTypeFromString(ElementType);
-    if (ElemType)
-      return llvm::PointerType::get(ElemType, 0); // Arrays are represented as pointers
+    if (ElemType) {
+      // Create struct type for array: { element_ptr, size }
+      llvm::Type *PtrType = llvm::PointerType::get(ElemType, 0);
+      llvm::Type *SizeType = llvm::Type::getInt32Ty(*TheContext);
+      return llvm::StructType::get(*TheContext, {PtrType, SizeType});
+    }
     return nullptr;
   }
   return nullptr;
+}
+
+// Helper to get array struct type for a given element type
+llvm::StructType *getArrayStructType(llvm::Type *ElementType) {
+  llvm::Type *PtrType = llvm::PointerType::get(ElementType, 0);
+  llvm::Type *SizeType = llvm::Type::getInt32Ty(*TheContext);
+  return llvm::StructType::get(*TheContext, {PtrType, SizeType});
 }
 
 // AST implementations (currently all inline in the header)
@@ -162,8 +173,21 @@ llvm::Value *ArrayExprAST::codegen() {
     Builder->CreateStore(ElemVal, ElemPtr);
   }
   
-  // Return the pointer to the first element
-  return ArrayAlloca;
+  // Create the array struct {ptr, size}
+  llvm::StructType *ArrayStructType = getArrayStructType(ElemType);
+  llvm::AllocaInst *ArrayStruct = Builder->CreateAlloca(ArrayStructType, nullptr, "arrayStruct");
+  
+  // Store the pointer (field 0)
+  llvm::Value *PtrField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 0, "ptrField");
+  Builder->CreateStore(ArrayAlloca, PtrField);
+  
+  // Store the size (field 1)
+  llvm::Value *SizeField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 1, "sizeField");
+  llvm::Value *SizeVal = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize));
+  Builder->CreateStore(SizeVal, SizeField);
+  
+  // Return the struct
+  return Builder->CreateLoad(ArrayStructType, ArrayStruct, "arrayStructVal");
 }
 
 llvm::Value *ArrayIndexExprAST::codegen() {
@@ -189,39 +213,78 @@ llvm::Value *ArrayIndexExprAST::codegen() {
     }
   }
   
-  // Determine the element type by checking if ArrayVal is a pointer
+  // Check if ArrayVal is a struct (new array representation)
   llvm::Type *ArrayType = ArrayVal->getType();
-  if (!ArrayType->isPointerTy())
-    return LogErrorV("Array indexing requires a pointer type");
+  llvm::Value *ArrayPtr = nullptr;
+  llvm::Type *ElemType = nullptr;
   
-  // For arrays, we need to infer the element type from context
-  llvm::Type *ElemType = llvm::Type::getInt32Ty(*TheContext); // default
-  
-  // If the array is from a variable, check its type
-  if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
-    std::string varName = VarExpr->getName();
+  if (ArrayType->isStructTy()) {
+    // New array representation: extract pointer from struct
+    llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
+    if (StructType->getNumElements() == 2) {
+      // Extract the pointer (field 0)
+      ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
+      
+      // Determine element type from the context
+      // First, check if it's from a direct array literal
+      if (ArrayExprAST *ArrayExpr = dynamic_cast<ArrayExprAST*>(getArray())) {
+        ElemType = getTypeFromString(ArrayExpr->getElementType());
+      }
+      // Otherwise, check if it's from a variable
+      else if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
+        std::string varName = VarExpr->getName();
+        if (GlobalTypes.count(varName)) {
+          std::string typeStr = GlobalTypes[varName];
+          if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+            std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+            ElemType = getTypeFromString(elemTypeStr);
+          }
+        }
+      }
+      
+      // Default to int if we can't determine
+      if (!ElemType) {
+        ElemType = llvm::Type::getInt32Ty(*TheContext);
+      }
+    }
+  } else if (ArrayType->isPointerTy()) {
+    // Old array representation: direct pointer
+    ArrayPtr = ArrayVal;
     
-    // Check if it's a global variable with known type
-    if (GlobalTypes.count(varName)) {
-      std::string typeStr = GlobalTypes[varName];
-      if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-        // It's an array type, extract the element type
-        std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
-        if (elemTypeStr == "int") {
-          ElemType = llvm::Type::getInt32Ty(*TheContext);
-        } else if (elemTypeStr == "float" || elemTypeStr == "double") {
-          ElemType = llvm::Type::getDoubleTy(*TheContext);
-        } else if (elemTypeStr == "char") {
-          ElemType = llvm::Type::getInt8Ty(*TheContext);
-        } else if (elemTypeStr == "bool") {
-          ElemType = llvm::Type::getInt1Ty(*TheContext);
+    // For arrays, we need to infer the element type from context
+    ElemType = llvm::Type::getInt32Ty(*TheContext); // default
+    
+    // If the array is from a variable, check its type
+    if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
+      std::string varName = VarExpr->getName();
+      
+      // Check if it's a global variable with known type
+      if (GlobalTypes.count(varName)) {
+        std::string typeStr = GlobalTypes[varName];
+        if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+          // It's an array type, extract the element type
+          std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+          if (elemTypeStr == "int") {
+            ElemType = llvm::Type::getInt32Ty(*TheContext);
+          } else if (elemTypeStr == "float" || elemTypeStr == "double") {
+            ElemType = llvm::Type::getDoubleTy(*TheContext);
+          } else if (elemTypeStr == "char") {
+            ElemType = llvm::Type::getInt8Ty(*TheContext);
+          } else if (elemTypeStr == "bool") {
+            ElemType = llvm::Type::getInt1Ty(*TheContext);
+          }
         }
       }
     }
+  } else {
+    return LogErrorV("Array indexing requires an array type");
   }
   
+  if (!ArrayPtr || !ElemType)
+    return LogErrorV("Invalid array type for indexing");
+  
   // Calculate the address of the indexed element
-  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayVal, IndexVal, "elemptr");
+  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
   
   // Load and return the value
   return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
@@ -797,9 +860,133 @@ llvm::Value *ExpressionStmtAST::codegen() {
 }
 
 llvm::Value *ForEachStmtAST::codegen() {
-  // TODO: Implement foreach loop code generation
-  // This is complex and would require runtime support for collections
-  return LogErrorV("foreach loops not yet implemented in code generation");
+  // Get the collection (array) to iterate over
+  llvm::Value *CollectionVal = Collection->codegen();
+  if (!CollectionVal)
+    return nullptr;
+  
+  // Get the element type from the foreach declaration
+  llvm::Type *ElemType = getTypeFromString(Type);
+  if (!ElemType)
+    return LogErrorV("Unknown element type in foreach loop");
+  
+  // Extract array pointer and size from the collection value
+  llvm::Value *ArrayPtr = nullptr;
+  llvm::Value *ArraySize = nullptr;
+  
+  // Check if CollectionVal is a struct (new array representation)
+  if (CollectionVal->getType()->isStructTy()) {
+    llvm::StructType *StructType = llvm::cast<llvm::StructType>(CollectionVal->getType());
+    if (StructType->getNumElements() == 2) {
+      // Extract pointer (field 0) and size (field 1)
+      ArrayPtr = Builder->CreateExtractValue(CollectionVal, 0, "arrayPtr");
+      ArraySize = Builder->CreateExtractValue(CollectionVal, 1, "arraySize");
+    } else {
+      return LogErrorV("Invalid array struct format");
+    }
+  } else if (CollectionVal->getType()->isPointerTy()) {
+    // Old array representation: direct pointer (for backward compatibility)
+    ArrayPtr = CollectionVal;
+    
+    // Try to determine size statically
+    if (ArrayExprAST *ArrayExpr = dynamic_cast<ArrayExprAST*>(Collection.get())) {
+      size_t StaticSize = ArrayExpr->getElements().size();
+      ArraySize = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, StaticSize));
+    } else {
+      // For variables without size info, use a default
+      ArraySize = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 10));
+    }
+  } else {
+    return LogErrorV("foreach loops require array expressions");
+  }
+  
+  if (!ArrayPtr || !ArraySize)
+    return LogErrorV("Failed to extract array information for foreach loop");
+  
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  
+  // Create blocks for the loop
+  llvm::BasicBlock *InitBB = Builder->GetInsertBlock();
+  llvm::BasicBlock *CondBB = llvm::BasicBlock::Create(*TheContext, "forcond", TheFunction);
+  llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(*TheContext, "forbody");
+  llvm::BasicBlock *IncBB = llvm::BasicBlock::Create(*TheContext, "forinc");
+  llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(*TheContext, "forcont");
+  
+  // Create and initialize the loop counter
+  llvm::AllocaInst *CounterAlloca = Builder->CreateAlloca(
+      llvm::Type::getInt32Ty(*TheContext), nullptr, "loopcounter");
+  Builder->CreateStore(llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)), CounterAlloca);
+  
+  // Create an alloca for the loop variable
+  llvm::AllocaInst *VarAlloca = Builder->CreateAlloca(ElemType, nullptr, VarName);
+  
+  // Jump to the condition check
+  Builder->CreateBr(CondBB);
+  
+  // Emit the condition check
+  Builder->SetInsertPoint(CondBB);
+  llvm::Value *CounterVal = Builder->CreateLoad(
+      llvm::Type::getInt32Ty(*TheContext), CounterAlloca, "counter");
+  llvm::Value *CondV = Builder->CreateICmpSLT(CounterVal, ArraySize, "loopcond");
+  Builder->CreateCondBr(CondV, LoopBB, AfterBB);
+  
+  // Emit the loop body
+  LoopBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(LoopBB);
+  
+  // Load the current array element and store it in the loop variable
+  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, CounterVal, "elemptr");
+  llvm::Value *ElemVal = Builder->CreateLoad(ElemType, ElemPtr, "elemval");
+  Builder->CreateStore(ElemVal, VarAlloca);
+  
+  // Add the loop variable to the symbol table
+  llvm::Value *OldVal = NamedValues[VarName];
+  NamedValues[VarName] = VarAlloca;
+  
+  // Push the exit block for break statements
+  LoopExitBlocks.push_back(AfterBB);
+  
+  // Generate code for the body
+  llvm::Value *BodyV = Body->codegen();
+  
+  // Pop the exit block
+  LoopExitBlocks.pop_back();
+  
+  if (!BodyV) {
+    // Restore the old value
+    if (OldVal)
+      NamedValues[VarName] = OldVal;
+    else
+      NamedValues.erase(VarName);
+    return nullptr;
+  }
+  
+  // Branch to increment block (unless body contains break/return)
+  if (!Builder->GetInsertBlock()->getTerminator())
+    Builder->CreateBr(IncBB);
+  
+  // Emit the increment block
+  IncBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(IncBB);
+  
+  // Increment the counter
+  llvm::Value *NextCounter = Builder->CreateAdd(CounterVal, 
+      llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 1)), "nextcounter");
+  Builder->CreateStore(NextCounter, CounterAlloca);
+  Builder->CreateBr(CondBB);
+  
+  // Emit the after-loop block
+  AfterBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(AfterBB);
+  
+  // Restore the old value
+  if (OldVal)
+    NamedValues[VarName] = OldVal;
+  else
+    NamedValues.erase(VarName);
+  
+  // Return a dummy value
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
 llvm::Value *IfStmtAST::codegen() {
