@@ -140,6 +140,14 @@ public:
   llvm::Value *codegen() override;
 };
 
+/// SkipStmtAST - Statement class for skip statements (continue).
+class SkipStmtAST : public StmtAST {
+public:
+  SkipStmtAST() {}
+  
+  llvm::Value *codegen() override;
+};
+
 /// UseStmtAST - Statement class for use (import) statements.
 class UseStmtAST : public StmtAST {
   std::string Module;

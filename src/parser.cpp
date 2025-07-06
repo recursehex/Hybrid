@@ -679,6 +679,12 @@ std::unique_ptr<BreakStmtAST> ParseBreakStatement() {
   return std::make_unique<BreakStmtAST>();
 }
 
+/// skipstmt ::= 'skip'
+std::unique_ptr<SkipStmtAST> ParseSkipStatement() {
+  getNextToken(); // eat 'skip'
+  return std::make_unique<SkipStmtAST>();
+}
+
 /// statement ::= returnstmt | variabledecl | foreachstmt | usestmt | ifstmt | whilestmt | expressionstmt
 std::unique_ptr<StmtAST> ParseStatement() {
   switch (CurTok) {
@@ -694,6 +700,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseWhileStatement();
   case tok_break:
     return ParseBreakStatement();
+  case tok_skip:
+    return ParseSkipStatement();
   case tok_int:
   case tok_float:
   case tok_double:

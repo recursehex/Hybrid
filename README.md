@@ -7,7 +7,7 @@ Hybrid is a statically-typed programming language with C-style syntax that compi
 - **C-style syntax** with explicit type declarations
 - **LLVM backend** for optimized native code generation
 - **Static typing** with automatic type inference for literals
-- **Modern control flow** including if-else, while loops with break, and foreach
+- **Modern control flow** including if-else, while loops with break/skip, and foreach
 - **Arrays** with literals and indexing
 - **Interactive REPL** with live code compilation
 - **Cross-platform** support (macOS, Linux)
@@ -64,9 +64,22 @@ int checkEven(int n) {
     return n % 2  // Returns 0 if even, 1 if odd
 }
 
+// Foreach loop with skip
+int sumOddNumbers(int[] nums) {
+    int sum = 0
+    for int n in nums {
+        if checkEven(n) == 0 {
+            skip  // Skip even numbers
+        }
+        sum += n
+    }
+    return sum
+}
+
 // Call the functions
-findMax(numbers, 5)  // Returns 5
-checkEven(17)        // Returns 1
+findMax(numbers, 5)    // Returns 5
+checkEven(17)          // Returns 1
+sumOddNumbers(numbers) // Returns 9 (1+3+5)
 ```
 
 ## Documentation
@@ -104,10 +117,13 @@ return_type function_name(type1 param1, type2 param2) {
 // If-else
 if condition { } else { }
 
-// While loop
-while condition { }
+// While loop with break/skip
+while condition {
+    if done { break }     // Exit loop
+    if skip_this { skip } // Continue to next iteration
+}
 
-// Foreach (parsing complete, codegen pending)
+// Foreach loop
 for type var in collection { }
 ```
 
@@ -151,7 +167,9 @@ Hybrid/
 - LLVM code generation
 - Function definitions and calls
 - All primitive types and arrays
-- If-else and while loops with break statements
+- If-else statements
+- While loops with break/skip statements
+- Foreach loops with full code generation
 - Expression evaluation
 - Global and local variables
 - External function declarations
@@ -159,8 +177,8 @@ Hybrid/
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management
 - `new` and `free` keywords for heap allocation
-- Foreach loop code generation
 - Standard library integration
+- Module system and imports
 
 ## Contributing
 

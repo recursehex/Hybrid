@@ -2,7 +2,7 @@
 
 ## Overview
 
-Hybrid provides three main control flow constructs: if-else statements, while loops, and foreach loops. All control flow statements use curly braces `{}` for their bodies and support nesting.
+Hybrid provides three main control flow constructs: if-else statements, while loops, and foreach loops. All control flow statements use curly braces `{}` for their bodies and support nesting. Loops support `break` and `skip` statements for flow control.
 
 ## If-Else Statements
 
@@ -223,12 +223,71 @@ int nestedBreak() {
 }
 ```
 
-#### Important Notes
+### Skip Statements
 
-- `break` can only be used inside `while` or `for` loops
-- It immediately transfers control to the statement after the loop
-- In nested loops, `break` only exits the innermost enclosing loop
-- Using `break` outside of a loop results in a compilation error
+The `skip` statement continues to the next iteration of a loop (similar to `continue` in C/C++):
+
+```c
+// Skip even numbers
+int sumOddNumbers(int[] values) {
+    int sum = 0
+    int i = 0
+    while i < 10 {
+        i = i + 1
+        if values[i] % 2 == 0 {
+            skip  // Continue to next iteration
+        }
+        sum = sum + values[i]
+    }
+    return sum
+}
+
+// Skip with multiple conditions
+int processFiltered(int[] data) {
+    int count = 0
+    int i = 0
+    while i < 100 {
+        if data[i] < 0 || data[i] > 100 {
+            i = i + 1
+            skip
+        }
+        count = count + 1
+        i = i + 1
+    }
+    return count
+}
+```
+
+#### Skip in Nested Loops
+
+Like `break`, `skip` only affects the innermost loop:
+
+```c
+int nestedSkip() {
+    int total = 0
+    int i = 0
+    while i < 10 {
+        int j = 0
+        while j < 10 {
+            j = j + 1
+            if j % 2 == 0 {
+                skip  // Only skips inner loop iteration
+            }
+            total = total + 1
+        }
+        i = i + 1
+    }
+    return total  // Returns 50 (10 * 5 odd numbers)
+}
+```
+
+#### Important Notes for Break and Skip
+
+- `break` and `skip` can only be used inside `while` or `for` loops
+- `break` immediately transfers control to the statement after the loop
+- `skip` immediately transfers control to the loop's condition check (while) or increment (for)
+- In nested loops, both statements only affect the innermost enclosing loop
+- Using `break` or `skip` outside of a loop results in a compilation error
 
 ## Foreach Loops
 
@@ -256,6 +315,17 @@ for float temp in temperatures {
         count = count + 1
     }
 }
+
+// Using break and skip in foreach
+for int value in data {
+    if value < 0 {
+        break  // Exit the loop
+    }
+    if value == 0 {
+        skip   // Continue to next element
+    }
+    result = result + value
+}
 ```
 
 ### Nested Foreach Loops
@@ -272,7 +342,9 @@ for int i in outerList {
 
 - The loop variable is scoped to the loop body
 - The loop variable type must match the collection element type
-- Currently, foreach loops are parsed but code generation is pending
+- Foreach loops support `break` and `skip` statements
+- Arrays are automatically sized based on their initialization
+- Loop variable is a copy of the array element
 
 ## Implementation Details
 
@@ -281,3 +353,5 @@ for int i in outerList {
 - Block statements create new scopes for local variables
 - Control flow statements can be nested to any depth
 - LLVM IR uses phi nodes and basic blocks for control flow
+- Foreach loops use internal counters and array indexing for iteration
+- Break jumps to the loop exit block, skip jumps to the increment/condition block

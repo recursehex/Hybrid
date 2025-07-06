@@ -30,6 +30,9 @@ static std::map<std::string, std::string> GlobalTypes; // Track types of globals
 // Stack to track loop exit blocks for break statements
 static std::vector<llvm::BasicBlock *> LoopExitBlocks;
 
+// Stack to track loop continue blocks for skip statements
+static std::vector<llvm::BasicBlock *> LoopContinueBlocks;
+
 // Initialize LLVM
 void InitializeModule() {
   TheContext = std::make_unique<llvm::LLVMContext>();
@@ -943,14 +946,16 @@ llvm::Value *ForEachStmtAST::codegen() {
   llvm::Value *OldVal = NamedValues[VarName];
   NamedValues[VarName] = VarAlloca;
   
-  // Push the exit block for break statements
+  // Push the exit and continue blocks for break/skip statements
   LoopExitBlocks.push_back(AfterBB);
+  LoopContinueBlocks.push_back(IncBB);
   
   // Generate code for the body
   llvm::Value *BodyV = Body->codegen();
   
-  // Pop the exit block
+  // Pop the exit and continue blocks
   LoopExitBlocks.pop_back();
+  LoopContinueBlocks.pop_back();
   
   if (!BodyV) {
     // Restore the old value
@@ -1100,14 +1105,16 @@ llvm::Value *WhileStmtAST::codegen() {
   LoopBB->insertInto(TheFunction);
   Builder->SetInsertPoint(LoopBB);
   
-  // Push the exit block for break statements
+  // Push the exit and continue blocks for break/skip statements
   LoopExitBlocks.push_back(AfterBB);
+  LoopContinueBlocks.push_back(CondBB);
   
   // Generate code for the body
   llvm::Value *BodyV = getBody()->codegen();
   
-  // Pop the exit block
+  // Pop the exit and continue blocks
   LoopExitBlocks.pop_back();
+  LoopContinueBlocks.pop_back();
   
   if (!BodyV)
     return nullptr;
@@ -1146,6 +1153,27 @@ llvm::Value *BreakStmtAST::codegen() {
   // (which should be unreachable)
   llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
   llvm::BasicBlock *DeadBB = llvm::BasicBlock::Create(*TheContext, "afterbreak", TheFunction);
+  Builder->SetInsertPoint(DeadBB);
+  
+  // Return a dummy value
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
+llvm::Value *SkipStmtAST::codegen() {
+  // Check if we're inside a loop
+  if (LoopContinueBlocks.empty())
+    return LogErrorV("'skip' statement not within a loop");
+  
+  // Get the current loop's continue block
+  llvm::BasicBlock *ContinueBlock = LoopContinueBlocks.back();
+  
+  // Create an unconditional branch to the loop continue point
+  Builder->CreateBr(ContinueBlock);
+  
+  // Create a new dead block for any code after the skip
+  // (which should be unreachable)
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *DeadBB = llvm::BasicBlock::Create(*TheContext, "afterskip", TheFunction);
   Builder->SetInsertPoint(DeadBB);
   
   // Return a dummy value

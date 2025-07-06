@@ -36,7 +36,7 @@ Hybrid types map directly to LLVM types:
 | `bool` | `i1` | 1-bit integer |
 | `void` | `void` | No value |
 | `string` | `ptr` | Pointer to i8 |
-| `T[]` | `ptr` | Pointer to element type T |
+| `T[]` | `{ ptr, i32 }` | Struct with pointer and size |
 
 ## Memory Management
 
@@ -61,12 +61,22 @@ Global variables are allocated as LLVM globals:
 
 ### Arrays
 
-Arrays are allocated on the stack with explicit size:
+Arrays are represented as structs containing a pointer and size:
 
 ```llvm
 ; int[] arr = [1, 2, 3]
-%arr = alloca [3 x i32], align 4
-; Initialize elements using getelementptr
+%arraytmp = alloca i32, i32 3, align 4
+; Initialize elements
+%elem0 = getelementptr i32, ptr %arraytmp, i32 0
+store i32 1, ptr %elem0, align 4
+; ... more elements ...
+
+; Create array struct
+%arrayStruct = alloca { ptr, i32 }, align 8
+%ptrField = getelementptr inbounds { ptr, i32 }, ptr %arrayStruct, i32 0, i32 0
+store ptr %arraytmp, ptr %ptrField, align 8
+%sizeField = getelementptr inbounds { ptr, i32 }, ptr %arrayStruct, i32 0, i32 1
+store i32 3, ptr %sizeField, align 4
 ```
 
 ## Function Generation
@@ -203,6 +213,116 @@ exit:
   ; Continue after loop
 ```
 
+### Foreach Loops
+
+```c
+for int num in numbers {
+    sum = sum + num
+}
+```
+
+Generates indexed iteration over array elements:
+
+```llvm
+entry:
+  ; Extract array pointer and size
+  %arrayPtr = extractvalue { ptr, i32 } %numbers, 0
+  %arraySize = extractvalue { ptr, i32 } %numbers, 1
+  
+  ; Initialize loop counter
+  %loopcounter = alloca i32, align 4
+  store i32 0, ptr %loopcounter, align 4
+  
+  ; Create loop variable
+  %num = alloca i32, align 4
+  br label %forcond
+
+forcond:
+  %counter = load i32, ptr %loopcounter, align 4
+  %loopcond = icmp slt i32 %counter, %arraySize
+  br i1 %loopcond, label %forbody, label %forcont
+
+forbody:
+  ; Load current element
+  %elemptr = getelementptr i32, ptr %arrayPtr, i32 %counter
+  %elemval = load i32, ptr %elemptr, align 4
+  store i32 %elemval, ptr %num, align 4
+  
+  ; Loop body code here
+  ; ...
+  
+  br label %forinc
+
+forinc:
+  ; Increment counter
+  %nextcounter = add i32 %counter, 1
+  store i32 %nextcounter, ptr %loopcounter, align 4
+  br label %forcond
+
+forcont:
+  ; Continue after loop
+```
+
+### Break and Skip Statements
+
+#### Break Statement
+
+```c
+while condition {
+    if done { break }
+    // more code
+}
+```
+
+Uses unconditional branch to exit block:
+
+```llvm
+whilebody:
+  ; Check break condition
+  %done = load i1, ptr %done, align 1
+  br i1 %done, label %break_to_exit, label %continue_body
+
+break_to_exit:
+  br label %whilecont  ; Jump to loop exit
+
+continue_body:
+  ; Rest of loop body
+```
+
+#### Skip Statement
+
+```c
+for int n in nums {
+    if n % 2 == 0 { skip }
+    // process odd numbers
+}
+```
+
+Uses unconditional branch to loop increment:
+
+```llvm
+forbody:
+  ; Check skip condition
+  %mod = srem i32 %n, 2
+  %is_even = icmp eq i32 %mod, 0
+  br i1 %is_even, label %skip_to_inc, label %continue_body
+
+skip_to_inc:
+  br label %forinc  ; Jump to increment
+
+continue_body:
+  ; Rest of loop body
+```
+
+### Loop Control Flow Stack
+
+The compiler maintains stacks for break and skip targets:
+
+- `LoopExitBlocks`: Stack of exit blocks for break statements
+- `LoopContinueBlocks`: Stack of continue blocks for skip statements
+
+Each loop pushes its blocks on entry and pops on exit, enabling proper nested loop behavior.
+
 ## Optimization
 
 ### Automatic Optimizations
@@ -250,11 +370,15 @@ store ptr null, ptr %s, align 8
 arr[i]
 ```
 
-Uses `getelementptr` for address calculation:
+Extracts pointer from array struct and uses `getelementptr`:
 
 ```llvm
-%idx_ext = sext i32 %i to i64
-%elem_ptr = getelementptr i32, ptr %arr, i64 %idx_ext
+; Extract array pointer from struct
+%arr_struct = load { ptr, i32 }, ptr %arr, align 8
+%arr_ptr = extractvalue { ptr, i32 } %arr_struct, 0
+
+; Calculate element address
+%elem_ptr = getelementptr i32, ptr %arr_ptr, i32 %i
 %value = load i32, ptr %elem_ptr
 ```
 
@@ -264,11 +388,15 @@ Uses `getelementptr` for address calculation:
 arr[i] = value
 ```
 
-Generates:
+Extracts pointer and stores at calculated address:
 
 ```llvm
-%idx_ext = sext i32 %i to i64
-%elem_ptr = getelementptr i32, ptr %arr, i64 %idx_ext
+; Extract array pointer from struct
+%arr_struct = load { ptr, i32 }, ptr %arr, align 8
+%arr_ptr = extractvalue { ptr, i32 } %arr_struct, 0
+
+; Store at element address
+%elem_ptr = getelementptr i32, ptr %arr_ptr, i32 %i
 store i32 %value, ptr %elem_ptr
 ```
 

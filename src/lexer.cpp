@@ -58,6 +58,8 @@ int gettok() {
       return tok_while;
     if (IdentifierStr == "break")
       return tok_break;
+    if (IdentifierStr == "skip")
+      return tok_skip;
     return tok_identifier;
   }
 
