@@ -168,17 +168,108 @@ Hybrid/
 - Function definitions and calls
 - All primitive types and arrays
 - If-else statements
-- While loops with break/skip statements
-- Foreach loops with full code generation
+- While loops
+- Foreach loops
 - Expression evaluation
 - Global and local variables
 - External function declarations
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management
-- `new` and `free` keywords for heap allocation
 - Standard library integration
 - Module system and imports
+- Stuctures
+    - `class`
+    - `struct`
+    - `enum`
+    - `namespace`
+- OOP
+    - `this`
+    - `inherits`
+    - `abstract`
+    - `interface`
+    - `base`
+    - `virtual`
+    - `override`
+- Access modifiers
+    - `public`
+    - `private`
+    - `protected`
+    - `static`
+    - `const`
+- Heap allocation keywords
+    - `new`
+    - `free`
+- More sizes for primitive types
+    - `byte` - 8 bit integer
+    - `short` - 16 bit integer
+    - `long` - 64 bit integer
+    - `schar` - 8 bit character
+    - `lchar` - 32 bit character
+- Unsigned versions of integer types
+    - `sbyte` - 8 bit (`byte` is unsigned)
+    - `ushort` - 16 bit
+    - `uint` - 32 bit
+    - `ulong` - 64 bit
+- 128 bit base 10 floating point type
+    - `decimal`
+- Type casting
+    - `type:`
+- Nullable types
+    - `type?`
+- Reference types
+    - `ref type`
+- Increment/decrement operators supporting pre/postfix
+    - `++`
+    - `--`
+- Bitwise operators and their compound assignment operators
+    - `&` and `&=`
+    - `|` and `|=`
+    - `^` and `^=`
+    - `<<` and `<<=`
+    - `>>` and `>>=`
+- Nullity operators
+    - `?.`
+    - `?[]`
+    - `??`
+    - `??=`
+- Pointer operators
+    - `@` - pointer operator and dereference operator
+    - `#` - address operator
+    - `unsafe` - pointers can only be used within these blocks
+- Smart pointers
+    - `unique`
+    - `shared`
+    - `weak`
+- Tuples
+    - `(type1, type2) var`
+- String interpolation
+    - $"Hello, \`name\`!"
+- Switch case statements
+    - `switch`
+    - `case`
+    - `default`
+- Generics
+    - `<type>`
+- Type checking
+    - `is`
+    - `not`
+- Reflection keywords
+    - `typeof`
+    - `nameof`
+    - `sizeof`
+- Exception statements
+    - `try`
+    - `catch`
+    - `throw`
+    - `finally`
+    - `assert`
+- Properties
+    - `type var {}`
+    - `get`
+    - `set`
+    - `value`
+
 
 ## Contributing
 
