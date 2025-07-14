@@ -26,6 +26,7 @@ static std::unique_ptr<llvm::IRBuilder<>> Builder;
 static std::map<std::string, llvm::Value *> NamedValues;
 static std::map<std::string, llvm::GlobalVariable *> GlobalValues;
 static std::map<std::string, std::string> GlobalTypes; // Track types of globals
+static std::map<std::string, std::string> LocalTypes;  // Track types of locals
 
 // Stack to track loop exit blocks for break statements
 static std::vector<llvm::BasicBlock *> LoopExitBlocks;
@@ -236,12 +237,18 @@ llvm::Value *ArrayIndexExprAST::codegen() {
       // Otherwise, check if it's from a variable
       else if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
         std::string varName = VarExpr->getName();
-        if (GlobalTypes.count(varName)) {
-          std::string typeStr = GlobalTypes[varName];
-          if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-            std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
-            ElemType = getTypeFromString(elemTypeStr);
-          }
+        
+        // Check local types first, then global types
+        std::string typeStr;
+        if (LocalTypes.count(varName)) {
+          typeStr = LocalTypes[varName];
+        } else if (GlobalTypes.count(varName)) {
+          typeStr = GlobalTypes[varName];
+        }
+        
+        if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+          std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+          ElemType = getTypeFromString(elemTypeStr);
         }
       }
       
@@ -504,15 +511,47 @@ llvm::Value *BinaryExprAST::codegen() {
         
         // Get element type
         llvm::Type *ArrayType = ArrayVal->getType();
-        if (!ArrayType->isPointerTy())
-          return LogErrorV("Array indexing requires a pointer type");
+        llvm::Value *ArrayPtr = nullptr;
+        llvm::Type *ElemType = nullptr;
         
-        // For arrays, we need to infer the element type from context
-        // For now, we'll use the type of R
-        llvm::Type *ElemType = R->getType();
+        if (ArrayType->isStructTy()) {
+          // New array representation: extract pointer from struct
+          llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
+          if (StructType->getNumElements() == 2) {
+            // Extract the pointer (field 0)
+            ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
+            
+            // Determine element type from the context
+            if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(LHSAI->getArray())) {
+              std::string varName = VarExpr->getName();
+              
+              // Check local types first, then global types
+              std::string typeStr;
+              if (LocalTypes.count(varName)) {
+                typeStr = LocalTypes[varName];
+              } else if (GlobalTypes.count(varName)) {
+                typeStr = GlobalTypes[varName];
+              }
+              
+              if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+                std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+                ElemType = getTypeFromString(elemTypeStr);
+              }
+            }
+          }
+        } else if (ArrayType->isPointerTy()) {
+          // Old array representation
+          ArrayPtr = ArrayVal;
+          ElemType = R->getType(); // Use type of RHS
+        } else {
+          return LogErrorV("Array indexing requires an array type");
+        }
+        
+        if (!ArrayPtr || !ElemType)
+          return LogErrorV("Invalid array type for indexing");
         
         // Calculate the address and store
-        llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayVal, IndexVal, "elemptr");
+        llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
         Builder->CreateStore(R, ElemPtr);
         return R;
       } else {
@@ -614,34 +653,51 @@ llvm::Value *BinaryExprAST::codegen() {
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
       // Array element compound assignment: arr[i] += val
-      llvm::Value *ArrayPtr = LHSE->getArray()->codegen();
-      if (!ArrayPtr) return nullptr;
+      llvm::Value *ArrayVal = LHSE->getArray()->codegen();
+      if (!ArrayVal) return nullptr;
       
       llvm::Value *Index = LHSE->getIndex()->codegen();
       if (!Index) return nullptr;
       
-      // Determine element type - default to int32
-      llvm::Type *ElemType = llvm::Type::getInt32Ty(*TheContext);
+      // Handle struct arrays
+      llvm::Type *ArrayType = ArrayVal->getType();
+      llvm::Value *ArrayPtr = nullptr;
+      llvm::Type *ElemType = nullptr;
       
-      // Try to get the proper element type from the array variable
-      if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
-        std::string varName = ArrayVar->getName();
-        if (GlobalTypes.count(varName)) {
-          std::string typeStr = GlobalTypes[varName];
-          if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-            std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
-            if (elemTypeStr == "int") {
-              ElemType = llvm::Type::getInt32Ty(*TheContext);
-            } else if (elemTypeStr == "float" || elemTypeStr == "double") {
-              ElemType = llvm::Type::getDoubleTy(*TheContext);
-            } else if (elemTypeStr == "char") {
-              ElemType = llvm::Type::getInt8Ty(*TheContext);
-            } else if (elemTypeStr == "bool") {
-              ElemType = llvm::Type::getInt1Ty(*TheContext);
+      if (ArrayType->isStructTy()) {
+        // New array representation: extract pointer from struct
+        llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
+        if (StructType->getNumElements() == 2) {
+          // Extract the pointer (field 0)
+          ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
+          
+          // Determine element type from the context
+          if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
+            std::string varName = ArrayVar->getName();
+            
+            // Check local types first, then global types
+            std::string typeStr;
+            if (LocalTypes.count(varName)) {
+              typeStr = LocalTypes[varName];
+            } else if (GlobalTypes.count(varName)) {
+              typeStr = GlobalTypes[varName];
+            }
+            
+            if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+              std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+              ElemType = getTypeFromString(elemTypeStr);
             }
           }
         }
+      } else if (ArrayType->isPointerTy()) {
+        // Old array representation
+        ArrayPtr = ArrayVal;
+        // Default element type
+        ElemType = llvm::Type::getInt32Ty(*TheContext);
       }
+      
+      if (!ArrayPtr || !ElemType)
+        return LogErrorV("Invalid array type for compound assignment");
       
       // Get the element pointer
       llvm::Value *ElementPtr = Builder->CreateGEP(ElemType, ArrayPtr, Index, "arrayptr");
@@ -806,26 +862,51 @@ llvm::Value *BinaryExprAST::codegen() {
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
       // Array element compound assignment: arr[i] &= val
-      llvm::Value *ArrayPtr = LHSE->getArray()->codegen();
-      if (!ArrayPtr) return nullptr;
+      llvm::Value *ArrayVal = LHSE->getArray()->codegen();
+      if (!ArrayVal) return nullptr;
       
       llvm::Value *Index = LHSE->getIndex()->codegen();
       if (!Index) return nullptr;
       
-      // Determine element type - default to int32
-      llvm::Type *ElemType = llvm::Type::getInt32Ty(*TheContext);
+      // Handle struct arrays
+      llvm::Type *ArrayType = ArrayVal->getType();
+      llvm::Value *ArrayPtr = nullptr;
+      llvm::Type *ElemType = nullptr;
       
-      // Try to get the proper element type from the array variable
-      if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
-        std::string varName = ArrayVar->getName();
-        if (GlobalTypes.count(varName)) {
-          std::string typeStr = GlobalTypes[varName];
-          if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-            std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
-            ElemType = getTypeFromString(elemTypeStr);
+      if (ArrayType->isStructTy()) {
+        // New array representation: extract pointer from struct
+        llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
+        if (StructType->getNumElements() == 2) {
+          // Extract the pointer (field 0)
+          ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
+          
+          // Determine element type from the context
+          if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
+            std::string varName = ArrayVar->getName();
+            
+            // Check local types first, then global types
+            std::string typeStr;
+            if (LocalTypes.count(varName)) {
+              typeStr = LocalTypes[varName];
+            } else if (GlobalTypes.count(varName)) {
+              typeStr = GlobalTypes[varName];
+            }
+            
+            if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+              std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+              ElemType = getTypeFromString(elemTypeStr);
+            }
           }
         }
+      } else if (ArrayType->isPointerTy()) {
+        // Old array representation
+        ArrayPtr = ArrayVal;
+        // Default element type
+        ElemType = llvm::Type::getInt32Ty(*TheContext);
       }
+      
+      if (!ArrayPtr || !ElemType)
+        return LogErrorV("Invalid array type for bitwise compound assignment");
       
       // Get the element pointer
       llvm::Value *ElementPtr = Builder->CreateGEP(ElemType, ArrayPtr, Index, "arrayptr");
@@ -985,6 +1066,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     
     // Remember this local binding
     NamedValues[getName()] = Alloca;
+    LocalTypes[getName()] = getType();  // Track the type
     
     // Return the value that was stored
     return Builder->CreateLoad(VarType, Alloca, getName());
@@ -1363,6 +1445,12 @@ llvm::Function *FunctionAST::codegen() {
   
   // Record the function arguments in the NamedValues map
   NamedValues.clear();
+  LocalTypes.clear();  // Clear local types for new function
+  
+  // Get parameter info from the prototype
+  const auto &Params = getProto()->getArgs();
+  size_t i = 0;
+  
   for (auto &Arg : TheFunction->args()) {
     // Create an alloca for this variable
     llvm::AllocaInst *Alloca = Builder->CreateAlloca(Arg.getType(), nullptr, Arg.getName());
@@ -1372,6 +1460,12 @@ llvm::Function *FunctionAST::codegen() {
     
     // Add arguments to variable symbol table
     NamedValues[std::string(Arg.getName())] = Alloca;
+    
+    // Track the type of the parameter
+    if (i < Params.size()) {
+      LocalTypes[std::string(Arg.getName())] = Params[i].Type;
+    }
+    i++;
   }
   
   // Generate code for the function body
