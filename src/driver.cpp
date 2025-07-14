@@ -16,14 +16,24 @@ int main() {
   BinopPrecedence["*="] = 2;
   BinopPrecedence["/="] = 2;
   BinopPrecedence["%="] = 2;
+  BinopPrecedence["&="] = 2;  // bitwise compound assignments
+  BinopPrecedence["|="] = 2;
+  BinopPrecedence["^="] = 2;
+  BinopPrecedence["<<="] = 2;
+  BinopPrecedence[">>="] = 2;
   BinopPrecedence["||"] = 5;  // logical OR
   BinopPrecedence["&&"] = 6;  // logical AND
+  BinopPrecedence["|"] = 7;   // bitwise OR
+  BinopPrecedence["^"] = 8;   // bitwise XOR
+  BinopPrecedence["&"] = 9;   // bitwise AND
   BinopPrecedence["<"] = 10;  // comparisons
   BinopPrecedence[">"] = 10;
   BinopPrecedence["<="] = 10;
   BinopPrecedence[">="] = 10;
   BinopPrecedence["=="] = 10;
   BinopPrecedence["!="] = 10;
+  BinopPrecedence["<<"] = 15; // shift operators
+  BinopPrecedence[">>"] = 15;
   BinopPrecedence["+"] = 20;  // arithmetic
   BinopPrecedence["-"] = 20;
   BinopPrecedence["*"] = 40;  // multiplication/division/modulo

@@ -729,6 +729,140 @@ llvm::Value *BinaryExprAST::codegen() {
         R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
     }
     return Builder->CreateOr(L, R, "ortmp");
+  } else if (Op == "&") {
+    // Bitwise AND - only works on integers
+    if (isFloat)
+      return LogErrorV("Bitwise AND requires integer operands");
+    return Builder->CreateAnd(L, R, "andtmp");
+  } else if (Op == "|") {
+    // Bitwise OR - only works on integers
+    if (isFloat)
+      return LogErrorV("Bitwise OR requires integer operands");
+    return Builder->CreateOr(L, R, "ortmp");
+  } else if (Op == "^") {
+    // Bitwise XOR - only works on integers
+    if (isFloat)
+      return LogErrorV("Bitwise XOR requires integer operands");
+    return Builder->CreateXor(L, R, "xortmp");
+  } else if (Op == "<<") {
+    // Left shift - only works on integers
+    if (isFloat)
+      return LogErrorV("Left shift requires integer operands");
+    return Builder->CreateShl(L, R, "shltmp");
+  } else if (Op == ">>") {
+    // Right shift (arithmetic) - only works on integers
+    if (isFloat)
+      return LogErrorV("Right shift requires integer operands");
+    return Builder->CreateAShr(L, R, "ashrtmp");
+  } else if (Op == "&=" || Op == "|=" || Op == "^=" || Op == "<<=" || Op == ">>=") {
+    // Bitwise compound assignment operators
+    if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
+      // Simple variable compound assignment
+      llvm::Value *Variable = NamedValues[LHSE->getName()];
+      if (!Variable) {
+        Variable = GlobalValues[LHSE->getName()];
+        if (!Variable)
+          return LogErrorV("Unknown variable name for compound assignment");
+      }
+      
+      // Load current value
+      llvm::Value *CurrentVal;
+      if (NamedValues[LHSE->getName()]) {
+        // Local variable - alloca
+        llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
+        CurrentVal = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, LHSE->getName());
+      } else {
+        // Global variable
+        llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(Variable);
+        CurrentVal = Builder->CreateLoad(GV->getValueType(), Variable, LHSE->getName());
+      }
+      
+      // Check that operands are integers
+      if (CurrentVal->getType()->isFloatingPointTy() || R->getType()->isFloatingPointTy())
+        return LogErrorV("Bitwise compound assignment requires integer operands");
+      
+      // Promote types for the operation
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      
+      // Perform the operation based on the compound operator
+      llvm::Value *Result;
+      if (Op == "&=") {
+        Result = Builder->CreateAnd(PromotedCurrent, PromotedR, "andtmp");
+      } else if (Op == "|=") {
+        Result = Builder->CreateOr(PromotedCurrent, PromotedR, "ortmp");
+      } else if (Op == "^=") {
+        Result = Builder->CreateXor(PromotedCurrent, PromotedR, "xortmp");
+      } else if (Op == "<<=") {
+        Result = Builder->CreateShl(PromotedCurrent, PromotedR, "shltmp");
+      } else if (Op == ">>=") {
+        Result = Builder->CreateAShr(PromotedCurrent, PromotedR, "ashrtmp");
+      } else {
+        return LogErrorV("Unknown bitwise compound assignment operator");
+      }
+      
+      // Store the result back
+      Builder->CreateStore(Result, Variable);
+      return Result;
+      
+    } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
+      // Array element compound assignment: arr[i] &= val
+      llvm::Value *ArrayPtr = LHSE->getArray()->codegen();
+      if (!ArrayPtr) return nullptr;
+      
+      llvm::Value *Index = LHSE->getIndex()->codegen();
+      if (!Index) return nullptr;
+      
+      // Determine element type - default to int32
+      llvm::Type *ElemType = llvm::Type::getInt32Ty(*TheContext);
+      
+      // Try to get the proper element type from the array variable
+      if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
+        std::string varName = ArrayVar->getName();
+        if (GlobalTypes.count(varName)) {
+          std::string typeStr = GlobalTypes[varName];
+          if (typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+            std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+            ElemType = getTypeFromString(elemTypeStr);
+          }
+        }
+      }
+      
+      // Get the element pointer
+      llvm::Value *ElementPtr = Builder->CreateGEP(ElemType, ArrayPtr, Index, "arrayptr");
+      
+      // Load current value
+      llvm::Value *CurrentVal = Builder->CreateLoad(ElemType, ElementPtr, "arrayload");
+      
+      // Check that operands are integers
+      if (CurrentVal->getType()->isFloatingPointTy() || R->getType()->isFloatingPointTy())
+        return LogErrorV("Bitwise compound assignment requires integer operands");
+      
+      // Promote types for the operation
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      
+      // Perform the operation
+      llvm::Value *Result;
+      if (Op == "&=") {
+        Result = Builder->CreateAnd(PromotedCurrent, PromotedR, "andtmp");
+      } else if (Op == "|=") {
+        Result = Builder->CreateOr(PromotedCurrent, PromotedR, "ortmp");
+      } else if (Op == "^=") {
+        Result = Builder->CreateXor(PromotedCurrent, PromotedR, "xortmp");
+      } else if (Op == "<<=") {
+        Result = Builder->CreateShl(PromotedCurrent, PromotedR, "shltmp");
+      } else if (Op == ">>=") {
+        Result = Builder->CreateAShr(PromotedCurrent, PromotedR, "ashrtmp");
+      } else {
+        return LogErrorV("Unknown bitwise compound assignment operator");
+      }
+      
+      // Store the result back
+      Builder->CreateStore(Result, ElementPtr);
+      return Result;
+      
+    } else {
+      return LogErrorV("destination of bitwise compound assignment must be a variable or array element");
+    }
   }
   
   return LogErrorV("invalid binary operator");

@@ -173,6 +173,7 @@ Hybrid/
 - Expression evaluation
 - Global and local variables
 - External function declarations
+- Bitwise operators and compound assignments (`&`, `|`, `^`, `<<`, `>>`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management
@@ -222,12 +223,6 @@ Hybrid/
 - Increment/decrement operators supporting pre/postfix
     - `++`
     - `--`
-- Bitwise operators and their compound assignment operators
-    - `&` and `&=`
-    - `|` and `|=`
-    - `^` and `^=`
-    - `<<` and `<<=`
-    - `>>` and `>>=`
 - Nullity operators
     - `?.`
     - `?[]`

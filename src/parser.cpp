@@ -43,6 +43,26 @@ int GetTokPrecedence() {
     return BinopPrecedence["/="];
   } else if (CurTok == tok_mod_eq) {
     return BinopPrecedence["%="];
+  } else if (CurTok == tok_bitwise_and) {
+    return BinopPrecedence["&"];
+  } else if (CurTok == tok_bitwise_or) {
+    return BinopPrecedence["|"];
+  } else if (CurTok == tok_bitwise_xor) {
+    return BinopPrecedence["^"];
+  } else if (CurTok == tok_left_shift) {
+    return BinopPrecedence["<<"];
+  } else if (CurTok == tok_right_shift) {
+    return BinopPrecedence[">>"];
+  } else if (CurTok == tok_and_eq) {
+    return BinopPrecedence["&="];
+  } else if (CurTok == tok_or_eq) {
+    return BinopPrecedence["|="];
+  } else if (CurTok == tok_xor_eq) {
+    return BinopPrecedence["^="];
+  } else if (CurTok == tok_left_shift_eq) {
+    return BinopPrecedence["<<="];
+  } else if (CurTok == tok_right_shift_eq) {
+    return BinopPrecedence[">>="];
   }
   
   // Handle single character operators
@@ -300,6 +320,26 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       BinOp = "/=";
     } else if (CurTok == tok_mod_eq) {
       BinOp = "%=";
+    } else if (CurTok == tok_bitwise_and) {
+      BinOp = "&";
+    } else if (CurTok == tok_bitwise_or) {
+      BinOp = "|";
+    } else if (CurTok == tok_bitwise_xor) {
+      BinOp = "^";
+    } else if (CurTok == tok_left_shift) {
+      BinOp = "<<";
+    } else if (CurTok == tok_right_shift) {
+      BinOp = ">>";
+    } else if (CurTok == tok_and_eq) {
+      BinOp = "&=";
+    } else if (CurTok == tok_or_eq) {
+      BinOp = "|=";
+    } else if (CurTok == tok_xor_eq) {
+      BinOp = "^=";
+    } else if (CurTok == tok_left_shift_eq) {
+      BinOp = "<<=";
+    } else if (CurTok == tok_right_shift_eq) {
+      BinOp = ">>=";
     } else if (isascii(CurTok)) {
       BinOp = std::string(1, (char)CurTok);
     } else {

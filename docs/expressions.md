@@ -12,10 +12,14 @@ Operators are evaluated according to precedence rules (higher numbers bind tight
 |------------|-----------|---------------|
 | 40 | `*`, `/`, `%` | Left-to-right |
 | 20 | `+`, `-` | Left-to-right |
+| 15 | `<<`, `>>` | Left-to-right |
 | 10 | `<`, `>`, `<=`, `>=`, `==`, `!=` | Left-to-right |
+| 9 | `&` | Left-to-right |
+| 8 | `^` | Left-to-right |
+| 7 | `|` | Left-to-right |
 | 6 | `&&` | Left-to-right |
 | 5 | `||` | Left-to-right |
-| 2 | `=`, `+=`, `-=`, `*=`, `/=`, `%=` | Right-to-left |
+| 2 | `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` | Right-to-left |
 
 ## Arithmetic Operators
 
@@ -113,6 +117,113 @@ if x == 0 || risky_operation(x) {
 }
 ```
 
+## Bitwise Operators
+
+Bitwise operators perform operations on the binary representations of integer values. They only work with integer types.
+
+### Bitwise AND (`&`)
+
+Performs a bitwise AND operation:
+
+```c
+int a = 12     // 1100 in binary
+int b = 10     // 1010 in binary
+int result = a & b  // 8 (1000 in binary)
+
+// Common use: masking bits
+int flags = 0xFF
+int masked = flags & 0x0F  // Keep only lower 4 bits
+```
+
+### Bitwise OR (`|`)
+
+Performs a bitwise OR operation:
+
+```c
+int a = 12     // 1100 in binary
+int b = 10     // 1010 in binary
+int result = a | b  // 14 (1110 in binary)
+
+// Common use: setting flags
+int flags = 0x00
+flags = flags | 0x04  // Set bit 2
+```
+
+### Bitwise XOR (`^`)
+
+Performs a bitwise exclusive OR operation:
+
+```c
+int a = 12     // 1100 in binary
+int b = 10     // 1010 in binary
+int result = a ^ b  // 6 (0110 in binary)
+
+// Common use: toggling bits
+int flags = 0xFF
+flags = flags ^ 0x04  // Toggle bit 2
+```
+
+### Left Shift (`<<`)
+
+Shifts bits to the left, filling with zeros:
+
+```c
+int a = 5      // 0101 in binary
+int result = a << 2  // 20 (10100 in binary)
+
+// Equivalent to multiplication by powers of 2
+int doubled = x << 1   // x * 2
+int quadrupled = x << 2  // x * 4
+```
+
+### Right Shift (`>>`)
+
+Shifts bits to the right (arithmetic shift for signed integers):
+
+```c
+int a = 20     // 10100 in binary
+int result = a >> 2  // 5 (00101 in binary)
+
+// Equivalent to division by powers of 2
+int halved = x >> 1    // x / 2
+int quartered = x >> 2  // x / 4
+```
+
+### Bitwise Compound Assignment
+
+All bitwise operators have compound assignment forms:
+
+```c
+int x = 15     // 1111 in binary
+
+x &= 7         // x = x & 7   (result: 7)
+x |= 8         // x = x | 8   (result: 15)
+x ^= 3         // x = x ^ 3   (result: 12)
+x <<= 1        // x = x << 1  (result: 24)
+x >>= 2        // x = x >> 2  (result: 6)
+
+// With arrays
+int[] flags = [255, 128, 64]
+flags[0] &= 0x0F   // Mask to lower 4 bits
+flags[1] |= 0x01   // Set bit 0
+flags[2] ^= 0xFF   // Toggle all bits
+```
+
+### Type Restrictions
+
+Bitwise operators only work with integer types:
+
+```c
+// Valid
+int a = 5 & 3
+int b = 10 | 6
+int c = 7 ^ 2
+
+// Invalid - will cause compilation error
+float x = 3.5 & 1.5    // Error: Bitwise AND requires integer operands
+double y = 5.0 << 2    // Error: Left shift requires integer operands
+```
+
 ## Assignment Operators
 
 ### Basic Assignment
@@ -145,6 +256,14 @@ x -= 3   // Equivalent to: x = x - 3  (x becomes 12)
 x *= 2   // Equivalent to: x = x * 2  (x becomes 24)
 x /= 4   // Equivalent to: x = x / 4  (x becomes 6)
 x %= 5   // Equivalent to: x = x % 5  (x becomes 1)
+
+// Bitwise compound assignments (integer only)
+int y = 15
+y &= 7   // Equivalent to: y = y & 7   (y becomes 7)
+y |= 8   // Equivalent to: y = y | 8   (y becomes 15)
+y ^= 3   // Equivalent to: y = y ^ 3   (y becomes 12)
+y <<= 2  // Equivalent to: y = y << 2  (y becomes 48)
+y >>= 3  // Equivalent to: y = y >> 3  (y becomes 6)
 
 // With expressions
 int a = 20
@@ -271,13 +390,21 @@ Expressions generate appropriate LLVM IR based on their types:
 
 ; Integer comparison: x < y
 %cmp = icmp slt i32 %x, %y
+
+; Bitwise operations
+%and_result = and i32 %x, %y     ; x & y
+%or_result = or i32 %x, %y       ; x | y
+%xor_result = xor i32 %x, %y     ; x ^ y
+%shl_result = shl i32 %x, %y     ; x << y
+%ashr_result = ashr i32 %x, %y   ; x >> y (arithmetic shift)
 ```
 
 ### Type-specific Operations
 
-- Integer operations: `add`, `sub`, `mul`, `sdiv`, `icmp`
-- Floating-point operations: `fadd`, `fsub`, `fmul`, `fdiv`, `fcmp`
+- Integer operations: `add`, `sub`, `mul`, `sdiv`, `srem`, `icmp`
+- Floating-point operations: `fadd`, `fsub`, `fmul`, `fdiv`, `frem`, `fcmp`
 - Boolean operations: `and`, `or`, `xor` on `i1` values
+- Bitwise operations: `and`, `or`, `xor`, `shl`, `ashr` on integer values
 
 ## Examples
 

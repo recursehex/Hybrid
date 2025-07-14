@@ -63,7 +63,21 @@ enum Token {
   tok_minus_eq = -37,  // -=
   tok_mult_eq = -38,   // *=
   tok_div_eq = -39,    // /=
-  tok_mod_eq = -40     // %=
+  tok_mod_eq = -40,    // %=
+  
+  // bitwise operators
+  tok_bitwise_and = -41,     // &
+  tok_bitwise_or = -42,      // |
+  tok_bitwise_xor = -43,     // ^
+  tok_left_shift = -44,      // <<
+  tok_right_shift = -45,     // >>
+  
+  // bitwise compound assignment operators
+  tok_and_eq = -46,          // &=
+  tok_or_eq = -47,           // |=
+  tok_xor_eq = -48,          // ^=
+  tok_left_shift_eq = -49,   // <<=
+  tok_right_shift_eq = -50   // >>=
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

@@ -192,8 +192,19 @@ int gettok() {
     if (NextChar == '=') {
       LastChar = getchar();
       return tok_le;  // <=
+    } else if (NextChar == '<') {
+      NextChar = getchar();
+      if (NextChar == '=') {
+        LastChar = getchar();
+        return tok_left_shift_eq;  // <<=
+      } else {
+        // Not <<=, put the character back and return << token
+        ungetc(NextChar, stdin);
+        LastChar = getchar();
+        return tok_left_shift;  // <<
+      }
     } else {
-      // Not <=, put the character back and return < token
+      // Not <= or <<, put the character back and return < token
       ungetc(NextChar, stdin);
       LastChar = getchar();
       return tok_lt;  // <
@@ -205,8 +216,19 @@ int gettok() {
     if (NextChar == '=') {
       LastChar = getchar();
       return tok_ge;  // >=
+    } else if (NextChar == '>') {
+      NextChar = getchar();
+      if (NextChar == '=') {
+        LastChar = getchar();
+        return tok_right_shift_eq;  // >>=
+      } else {
+        // Not >>=, put the character back and return >> token
+        ungetc(NextChar, stdin);
+        LastChar = getchar();
+        return tok_right_shift;  // >>
+      }
     } else {
-      // Not >=, put the character back and return > token
+      // Not >= or >>, put the character back and return > token
       ungetc(NextChar, stdin);
       LastChar = getchar();
       return tok_gt;  // >
@@ -218,9 +240,14 @@ int gettok() {
     if (NextChar == '&') {
       LastChar = getchar();
       return tok_and;  // &&
+    } else if (NextChar == '=') {
+      LastChar = getchar();
+      return tok_and_eq;  // &=
     } else {
-      // Not &&, put the character back
+      // Not && or &=, put the character back and return & token
       ungetc(NextChar, stdin);
+      LastChar = getchar();
+      return tok_bitwise_and;  // &
     }
   }
   
@@ -229,9 +256,27 @@ int gettok() {
     if (NextChar == '|') {
       LastChar = getchar();
       return tok_or;  // ||
+    } else if (NextChar == '=') {
+      LastChar = getchar();
+      return tok_or_eq;  // |=
     } else {
-      // Not ||, put the character back
+      // Not || or |=, put the character back and return | token
       ungetc(NextChar, stdin);
+      LastChar = getchar();
+      return tok_bitwise_or;  // |
+    }
+  }
+  
+  if (LastChar == '^') {
+    int NextChar = getchar();
+    if (NextChar == '=') {
+      LastChar = getchar();
+      return tok_xor_eq;  // ^=
+    } else {
+      // Not ^=, put the character back and return ^ token
+      ungetc(NextChar, stdin);
+      LastChar = getchar();
+      return tok_bitwise_xor;  // ^
     }
   }
 
