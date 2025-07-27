@@ -46,6 +46,6 @@ std::unique_ptr<BreakStmtAST> ParseBreakStatement();
 std::unique_ptr<SkipStmtAST> ParseSkipStatement();
 
 // Top-level parsing that can handle both variable declarations and function definitions
-void ParseTypeIdentifier();
+bool ParseTypeIdentifier();
 
 #endif // PARSER_H

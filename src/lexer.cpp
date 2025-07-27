@@ -146,6 +146,18 @@ int gettok() {
         return gettok();
     }
     
+    // Handle increment operator
+    if (Op == '+' && NextChar == '+') {
+      LastChar = getchar();
+      return tok_inc; // ++
+    }
+
+    // Handle decrement operator
+    if (Op == '-' && NextChar == '-') {
+      LastChar = getchar();
+      return tok_dec; // --
+    }
+    
     // Check for compound assignment
     if (NextChar == '=') {
       LastChar = getchar();

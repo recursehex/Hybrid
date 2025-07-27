@@ -300,6 +300,56 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
 }
 
+llvm::Value *VariableExprAST::codegen_ptr() {
+  llvm::Value *V = NamedValues[getName()];
+  if (V) return V;
+
+  llvm::Value *G = GlobalValues[getName()];
+  if (G) return G;
+
+  return LogErrorV("Unknown variable name for increment/decrement");
+}
+
+llvm::Value *ArrayIndexExprAST::codegen_ptr() {
+  llvm::Value *ArrayVal = getArray()->codegen();
+  if (!ArrayVal)
+    return nullptr;
+
+  llvm::Value *IndexVal = getIndex()->codegen();
+  if (!IndexVal)
+    return nullptr;
+
+  if (!IndexVal->getType()->isIntegerTy(32)) {
+    if (IndexVal->getType()->isIntegerTy()) {
+      IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
+    } else if (IndexVal->getType()->isFloatingPointTy()) {
+      IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
+    } else {
+      return LogErrorV("Array index must be an integer");
+    }
+  }
+
+  llvm::Value *ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayptr");
+  
+  // For now, we'll determine the element type based on the array expression type
+  // In a real implementation, we'd track this information in the AST
+  llvm::Type *ElemTy = llvm::Type::getInt32Ty(*TheContext); // Default to i32
+  
+  // Try to infer the actual element type from the array
+  if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
+    // Look up the variable's type information
+    // For now, we'll use a simple heuristic
+    llvm::Value *V = NamedValues[VarExpr->getName()];
+    if (!V) V = GlobalValues[VarExpr->getName()];
+    if (V && V->getType()->isPointerTy()) {
+      // Assume it's a pointer to the element type
+      // In practice, we'd need proper type tracking
+    }
+  }
+
+  return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
+}
+
 llvm::Value *VariableExprAST::codegen() {
   // First look this variable up in the local function scope
   llvm::Value *V = NamedValues[getName()];
@@ -948,6 +998,66 @@ llvm::Value *BinaryExprAST::codegen() {
   
   return LogErrorV("invalid binary operator");
 }
+
+llvm::Value *UnaryExprAST::codegen() {
+  if (Op == "++" || Op == "--") {
+    fprintf(stderr, "Codegen for unary op %s\n", Op.c_str());
+    for (auto const& [key, val] : NamedValues)
+    {
+        fprintf(stderr, "NamedValues: %s\n", key.c_str());
+    }
+
+    llvm::Value *Ptr = Operand->codegen_ptr();
+    if (!Ptr) {
+        return LogErrorV("operand of ++/-- must be a variable");
+    }
+
+    llvm::Value *Val = Operand->codegen();
+    llvm::Type *Ty = Val->getType();
+
+    llvm::Value *One = nullptr;
+    if (Ty->isIntegerTy()) {
+        One = llvm::ConstantInt::get(Ty, 1);
+    } else if (Ty->isFloatingPointTy()) {
+        One = llvm::ConstantFP::get(Ty, 1.0);
+    } else {
+        return LogErrorV("++/-- requires integer or floating-point type");
+    }
+
+    llvm::Value *CurVal = Builder->CreateLoad(Ty, Ptr, "loadtmp");
+    llvm::Value *NextVal;
+
+    if (Op == "++") {
+        if (Ty->isFloatingPointTy())
+            NextVal = Builder->CreateFAdd(CurVal, One, "addtmp");
+        else
+            NextVal = Builder->CreateAdd(CurVal, One, "addtmp");
+    } else { // --
+        if (Ty->isFloatingPointTy())
+            NextVal = Builder->CreateFSub(CurVal, One, "subtmp");
+        else
+            NextVal = Builder->CreateSub(CurVal, One, "subtmp");
+    }
+
+    Builder->CreateStore(NextVal, Ptr);
+
+    return NextVal; // Only prefix for now
+  }
+
+  // Handle other unary operators
+  llvm::Value *OperandV = Operand->codegen();
+  if (!OperandV)
+    return nullptr;
+
+  if (Op == "-") {
+    return Builder->CreateNeg(OperandV, "negtmp");
+  } else if (Op == "!") {
+    return Builder->CreateNot(OperandV, "nottmp");
+  }
+
+  return LogErrorV("invalid unary operator");
+}
+
 
 llvm::Value *CallExprAST::codegen() {
   // Look up the name in the global module table

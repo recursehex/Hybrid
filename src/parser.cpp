@@ -210,24 +210,29 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
 }
 
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
-  int UnaryOp = CurTok;
-  getNextToken(); // eat the unary operator
-  
-  auto Operand = ParsePrimary();
+  // If the token is not a unary operator, it must be a primary expression.
+  if (CurTok != '-' && CurTok != tok_not && CurTok != tok_inc && CurTok != tok_dec) {
+    return ParsePrimary();
+  }
+
+  int Opc = CurTok;
+  std::string OpStr;
+  if (Opc == '-') OpStr = "-";
+  else if (Opc == tok_not) OpStr = "!";
+  else if (Opc == tok_inc) OpStr = "++";
+  else if (Opc == tok_dec) OpStr = "--";
+
+  getNextToken(); // eat the operator.
+
+  auto Operand = ParseUnaryExpr();
   if (!Operand)
     return nullptr;
-    
-  if (UnaryOp == '-') {
-    // Create a binary expression: 0 - operand
-    auto Zero = std::make_unique<NumberExprAST>(0.0);
-    return std::make_unique<BinaryExprAST>("-", std::move(Zero), std::move(Operand));
-  } else if (UnaryOp == tok_not) {
-    // Create a binary expression: operand == false (logical NOT)
-    auto False = std::make_unique<BoolExprAST>(false);
-    return std::make_unique<BinaryExprAST>("==", std::move(Operand), std::move(False));
+
+  if (OpStr == "-") {
+      // Represent -x as 0 - x
+      return std::make_unique<BinaryExprAST>("-", std::make_unique<NumberExprAST>(0), std::move(Operand));
   }
-  
-  return LogError("Unknown unary operator");
+  return std::make_unique<UnaryExprAST>(OpStr, std::move(Operand), true /* isPrefix */);
 }
 
 /// primary
@@ -273,6 +278,8 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     return ParseArrayExpr();
   case '-':
   case tok_not:
+  case tok_inc:
+  case tok_dec:
     return ParseUnaryExpr();
   }
 }
@@ -376,7 +383,7 @@ std::unique_ptr<ExprAST> ParseExpression() {
   if (!LHS)
     return nullptr;
 
-  // Handle postfix operators (array indexing)
+  // Handle postfix array indexing
   while (CurTok == '[') {
     LHS = ParseArrayIndex(std::move(LHS));
     if (!LHS)
@@ -797,6 +804,10 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
       
     Statements.push_back(std::move(Stmt));
     
+    // Skip optional semicolon after statement
+    if (CurTok == ';')
+      getNextToken();
+    
     // Skip newlines after statements
     while (CurTok == tok_newline)
       getNextToken();
@@ -812,7 +823,7 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
 
 /// ParseTypeIdentifier - Handles top-level declarations that start with a type
 /// Could be either a variable declaration or function definition
-void ParseTypeIdentifier() {
+bool ParseTypeIdentifier() {
   // Save the type information
   std::string Type = IdentifierStr;
   getNextToken(); // eat type
@@ -822,7 +833,7 @@ void ParseTypeIdentifier() {
     getNextToken(); // eat [
     if (CurTok != ']') {
       fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
-      return;
+      return false;
     }
     getNextToken(); // eat ]
     Type += "[]"; // Add array indicator to type
@@ -830,7 +841,7 @@ void ParseTypeIdentifier() {
   
   if (CurTok != tok_identifier) {
     fprintf(stderr, "Error: Expected identifier after type\n");
-    return;
+    return false;
   }
   
   std::string Name = IdentifierStr;
@@ -850,7 +861,7 @@ void ParseTypeIdentifier() {
         if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
             CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string) {
           fprintf(stderr, "Error: Expected parameter type\n");
-          return;
+          return false;
         }
         
         std::string ParamType = IdentifierStr;
@@ -861,7 +872,7 @@ void ParseTypeIdentifier() {
           getNextToken(); // eat [
           if (CurTok != ']') {
             fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
-            return;
+            return false;
           }
           getNextToken(); // eat ]
           ParamType += "[]"; // Add array indicator to type
@@ -869,7 +880,7 @@ void ParseTypeIdentifier() {
         
         if (CurTok != tok_identifier) {
           fprintf(stderr, "Error: Expected parameter name\n");
-          return;
+          return false;
         }
         
         std::string ParamName = IdentifierStr;
@@ -884,7 +895,7 @@ void ParseTypeIdentifier() {
         
         if (CurTok != ',') {
           fprintf(stderr, "Error: Expected ',' or ')' in parameter list\n");
-          return;
+          return false;
         }
         
         getNextToken(); // eat ','
@@ -900,7 +911,7 @@ void ParseTypeIdentifier() {
     auto Body = ParseBlock();
     if (!Body) {
       fprintf(stderr, "Error: Expected function body\n");
-      return;
+      return false;
     }
     
     auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
@@ -912,44 +923,45 @@ void ParseTypeIdentifier() {
     } else {
       fprintf(stderr, "Error: Failed to generate IR for function\n");
     }
-    
-  } else {
+    return true;
+  } else if (CurTok == '=') {
     // It's a variable declaration
-    if (CurTok != '=') {
-      fprintf(stderr, "Error: Expected '=' after variable name (all variables must be initialized)\n");
-      return;
-    }
-    
     getNextToken(); // eat '='
     auto Initializer = ParseExpression();
     if (!Initializer) {
       fprintf(stderr, "Error: Expected expression after '='\n");
-      return;
+      return false;
     }
     
+    // Create the variable declaration AST but don't generate code here
+    // Code generation will be handled by HandleVariableDeclaration in toplevel.cpp
     auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer));
-    fprintf(stderr, "Parsed variable declaration, generating code...\n");
     
-    // Wrap the variable declaration in an anonymous function like top-level expressions
-    // Return the type of the variable being declared
-    auto Proto = std::make_unique<PrototypeAST>(Type, "__anon_var_decl", std::vector<Parameter>());
+    // Need to wrap it in a function for top-level variable declarations
+    auto Proto = std::make_unique<PrototypeAST>("void", "__anon_var_decl",
+                                                std::vector<Parameter>());
+    
+    // Wrap the variable declaration in a return statement and block
+    auto ReturnStmt = std::make_unique<ReturnStmtAST>(
+        std::make_unique<VariableExprAST>(Name));
     std::vector<std::unique_ptr<StmtAST>> Statements;
     Statements.push_back(std::move(VarDecl));
-    
-    // Add a return statement that returns the variable value
-    auto VarRef = std::make_unique<VariableExprAST>(Name);
-    auto ReturnStmt = std::make_unique<ReturnStmtAST>(std::move(VarRef));
     Statements.push_back(std::move(ReturnStmt));
-    
     auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
-    auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     
-    if (auto FnIR = Fn->codegen()) {
+    auto Func = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
+    fprintf(stderr, "Parsed variable declaration, generating code...\n");
+    
+    if (auto FnIR = Func->codegen()) {
       fprintf(stderr, "Generated variable declaration IR:\n");
       FnIR->print(llvm::errs());
       fprintf(stderr, "\n");
     } else {
       fprintf(stderr, "Error: Failed to generate IR for variable declaration\n");
     }
+    return true;
+  } else {
+    fprintf(stderr, "Error: Expected '(' or '=' after identifier in top-level declaration\n");
+    return false;
   }
 }

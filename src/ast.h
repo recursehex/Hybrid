@@ -18,6 +18,7 @@ class ExprAST {
 public:
   virtual ~ExprAST() = default;
   virtual llvm::Value *codegen() = 0;
+  virtual llvm::Value *codegen_ptr() { return nullptr; }
 };
 
 /// StmtAST - Base class for all statement nodes.
@@ -237,6 +238,7 @@ public:
       : Array(std::move(Array)), Index(std::move(Index)) {}
   
   llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
   ExprAST *getArray() const { return Array.get(); }
   ExprAST *getIndex() const { return Index.get(); }
 };
@@ -249,6 +251,7 @@ public:
   VariableExprAST(const std::string &Name) : Name(Name) {}
   
   llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
   const std::string &getName() const { return Name; }
 };
 
@@ -266,6 +269,19 @@ public:
   const std::string &getOp() const { return Op; }
   ExprAST *getLHS() const { return LHS.get(); }
   ExprAST *getRHS() const { return RHS.get(); }
+};
+
+/// UnaryExprAST - Expression class for a unary operator.
+class UnaryExprAST : public ExprAST {
+  std::string Op;
+  std::unique_ptr<ExprAST> Operand;
+  bool isPrefix;
+
+public:
+  UnaryExprAST(const std::string &Op, std::unique_ptr<ExprAST> Operand, bool isPrefix)
+      : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix) {}
+
+  llvm::Value *codegen() override;
 };
 
 /// CallExprAST - Expression class for function calls.

@@ -53,15 +53,15 @@ int findMax(int[] arr, int len) {
         if arr[i] > max {
             max = arr[i]
         }
-        i += 1  // Compound assignment
-        counter += 1
+        ++i
+        ++counter
     }
     return max
 }
 
 // Modulo operator example
 int checkEven(int n) {
-    return n % 2  // Returns 0 if even, 1 if odd
+    return n % 2
 }
 
 // Foreach loop with skip
@@ -69,7 +69,7 @@ int sumOddNumbers(int[] nums) {
     int sum = 0
     for int n in nums {
         if checkEven(n) == 0 {
-            skip  // Skip even numbers
+            skip
         }
         sum += n
     }
@@ -132,6 +132,7 @@ for type var in collection { }
 - Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
 - Boolean: `&&`, `||`, `!`
 - Assignment: `=`, `+=`, `-=`, `*=`, `/=`, `%=`
+- Increment/Decrement: `++`, `--`
 
 ## Building from Source
 
@@ -174,6 +175,7 @@ Hybrid/
 - Global and local variables
 - External function declarations
 - Bitwise operators and compound assignments (`&`, `|`, `^`, `<<`, `>>`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
+- Increment/decrement operators (`++`, `--`)
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management
@@ -220,9 +222,9 @@ Hybrid/
     - `type?`
 - Reference types
     - `ref type`
-- Increment/decrement operators supporting pre/postfix
-    - `++`
-    - `--`
+- Postfix increment/decrement operators
+    - `x++`
+    - `x--`
 - Nullity operators
     - `?.`
     - `?[]`

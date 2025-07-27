@@ -33,7 +33,8 @@ void HandleExtern() {
       FnIR->print(llvm::errs());
       fprintf(stderr, "\n");
     }
-  } else {
+  }
+ else {
     // Skip token for error recovery.
     getNextToken();
   }
@@ -47,7 +48,8 @@ void HandleTopLevelExpression() {
       FnIR->print(llvm::errs());
       fprintf(stderr, "\n");
     }
-  } else {
+  }
+ else {
     // Skip token for error recovery.
     getNextToken();
   }
@@ -60,7 +62,8 @@ void HandleVariableDeclaration() {
       VarIR->print(llvm::errs());
       fprintf(stderr, "\n");
     }
-  } else {
+  }
+ else {
     // Skip token for error recovery.
     getNextToken();
   }
@@ -114,8 +117,11 @@ void MainLoop() {
     case tok_void:
     case tok_bool:
     case tok_string:
-      // Use the new unified handler
-      ParseTypeIdentifier();
+      if (!ParseTypeIdentifier()) {
+        // If ParseTypeIdentifier failed, it means it wasn't a valid type-prefixed declaration
+        // or an error occurred during parsing. Consume the current token to avoid infinite loop.
+        getNextToken();
+      }
       break;
     case tok_identifier:
       // For C-style declarations, functions start with type keywords,

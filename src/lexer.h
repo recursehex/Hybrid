@@ -77,7 +77,11 @@ enum Token {
   tok_or_eq = -47,           // |=
   tok_xor_eq = -48,          // ^=
   tok_left_shift_eq = -49,   // <<=
-  tok_right_shift_eq = -50   // >>=
+  tok_right_shift_eq = -50,  // >>=
+
+  // increment/decrement
+  tok_inc = -51,             // ++
+  tok_dec = -52              // --
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier
