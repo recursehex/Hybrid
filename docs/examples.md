@@ -119,7 +119,7 @@ int sumArray(int[] arr, int length) {
     int i = 0
     while i < length {
         sum = sum + arr[i]
-        i = i + 1
+        i++  // Using postfix increment
     }
     return sum
 }
@@ -143,7 +143,7 @@ int findMax(int[] arr, int length) {
         if arr[i] > max {
             max = arr[i]
         }
-        i = i + 1
+        i++
     }
     return max
 }
@@ -175,6 +175,51 @@ void reverseArray(int[] arr, int length) {
 int[] nums = [1, 2, 3, 4, 5]
 reverseArray(nums, 5)
 // nums is now [5, 4, 3, 2, 1]
+```
+
+### Using Increment/Decrement Operators
+
+```c
+// increment_examples.hy
+// Demonstrates the difference between prefix and postfix operators
+
+int demonstratePostfix() {
+    int index = 0
+    int[] values = [10, 20, 30, 40, 50]
+    
+    // Postfix: use current value, then increment
+    int first = values[index++]   // first = values[0] = 10, then index becomes 1
+    int second = values[index++]  // second = values[1] = 20, then index becomes 2
+    
+    // index is now 2
+    return first + second  // Returns 30
+}
+
+int demonstratePrefix() {
+    int count = 0
+    int[] results = [0, 0, 0, 0, 0]
+    
+    // Prefix: increment first, then use new value
+    results[++count] = 100  // count becomes 1, then results[1] = 100
+    results[++count] = 200  // count becomes 2, then results[2] = 200
+    
+    return count  // Returns 2
+}
+
+// Practical example: parsing with lookahead
+int countDigits(char[] str, int len) {
+    int i = 0
+    int count = 0
+    
+    while i < len {
+        char c = str[i++]  // Get current char, then move to next
+        if c >= '0' && c <= '9' {
+            count++
+        }
+    }
+    
+    return count
+}
 ```
 
 ## Algorithms

@@ -53,8 +53,8 @@ int findMax(int[] arr, int len) {
         if arr[i] > max {
             max = arr[i]
         }
-        ++i
-        ++counter
+        i++       // Postfix increment  
+        counter++ // Could also use: ++counter
     }
     return max
 }
@@ -132,7 +132,7 @@ for type var in collection { }
 - Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
 - Boolean: `&&`, `||`, `!`
 - Assignment: `=`, `+=`, `-=`, `*=`, `/=`, `%=`
-- Increment/Decrement: `++`, `--`
+- Increment/Decrement: `++`, `--` (both prefix and postfix)
 
 ## Building from Source
 
@@ -175,7 +175,7 @@ Hybrid/
 - Global and local variables
 - External function declarations
 - Bitwise operators and compound assignments (`&`, `|`, `^`, `<<`, `>>`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
-- Increment/decrement operators (`++`, `--`)
+- Increment/decrement operators (`++`, `--`) - both prefix and postfix
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management
@@ -222,9 +222,6 @@ Hybrid/
     - `type?`
 - Reference types
     - `ref type`
-- Postfix increment/decrement operators
-    - `x++`
-    - `x--`
 - Nullity operators
     - `?.`
     - `?[]`

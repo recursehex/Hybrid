@@ -383,11 +383,20 @@ std::unique_ptr<ExprAST> ParseExpression() {
   if (!LHS)
     return nullptr;
 
-  // Handle postfix array indexing
-  while (CurTok == '[') {
-    LHS = ParseArrayIndex(std::move(LHS));
-    if (!LHS)
-      return nullptr;
+  // Handle postfix operators (array indexing, increment, decrement)
+  while (true) {
+    if (CurTok == '[') {
+      LHS = ParseArrayIndex(std::move(LHS));
+      if (!LHS)
+        return nullptr;
+    } else if (CurTok == tok_inc || CurTok == tok_dec) {
+      // Postfix increment/decrement
+      std::string OpStr = (CurTok == tok_inc) ? "++" : "--";
+      getNextToken(); // eat the operator
+      LHS = std::make_unique<UnaryExprAST>(OpStr, std::move(LHS), false);
+    } else {
+      break;
+    }
   }
 
   return ParseBinOpRHS(0, std::move(LHS));

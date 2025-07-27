@@ -1001,12 +1001,6 @@ llvm::Value *BinaryExprAST::codegen() {
 
 llvm::Value *UnaryExprAST::codegen() {
   if (Op == "++" || Op == "--") {
-    fprintf(stderr, "Codegen for unary op %s\n", Op.c_str());
-    for (auto const& [key, val] : NamedValues)
-    {
-        fprintf(stderr, "NamedValues: %s\n", key.c_str());
-    }
-
     llvm::Value *Ptr = Operand->codegen_ptr();
     if (!Ptr) {
         return LogErrorV("operand of ++/-- must be a variable");
@@ -1041,7 +1035,8 @@ llvm::Value *UnaryExprAST::codegen() {
 
     Builder->CreateStore(NextVal, Ptr);
 
-    return NextVal; // Only prefix for now
+    // For prefix operators, return the new value; for postfix, return the old value
+    return isPrefix ? NextVal : CurVal;
   }
 
   // Handle other unary operators

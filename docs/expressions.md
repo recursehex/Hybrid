@@ -56,6 +56,67 @@ float neg = -3.14      // -3.14
 int expr = -(10 + 5)   // -15
 ```
 
+### Increment and Decrement Operators
+
+Hybrid supports both prefix and postfix increment (`++`) and decrement (`--`) operators:
+
+#### Prefix Operators
+Prefix operators modify the variable first, then return the new value:
+
+```c
+int x = 5
+int y = ++x     // x becomes 6, y gets 6
+int z = --x     // x becomes 5, z gets 5
+
+// With floats
+float f = 3.5
+float g = ++f   // f becomes 4.5, g gets 4.5
+```
+
+#### Postfix Operators
+Postfix operators return the current value first, then modify the variable:
+
+```c
+int x = 5
+int y = x++     // y gets 5, x becomes 6
+int z = x--     // z gets 6, x becomes 5
+
+// With floats
+float f = 3.5
+float g = f++   // g gets 3.5, f becomes 4.5
+```
+
+#### Usage Examples
+
+```c
+// In loops - postfix is common for loop counters
+int i = 0
+while i < 10 {
+    process(i)
+    i++         // Increment after using the value
+}
+
+// With arrays
+int[] arr = [10, 20, 30]
+int index = 0
+int val1 = arr[index++]  // val1 gets arr[0] (10), index becomes 1
+int val2 = arr[index++]  // val2 gets arr[1] (20), index becomes 2
+
+// Prefix when you need the new value immediately
+int count = 0
+if ++count == 1 {       // Increment first, then compare
+    // This executes because count is now 1
+}
+
+// Difference in expressions
+int a = 5
+int b = 5
+int result1 = 10 + a++  // result1 = 15 (10 + 5), a becomes 6
+int result2 = 10 + ++b  // result2 = 16 (10 + 6), b becomes 6
+```
+
+Both prefix and postfix operators work with integers and floating-point numbers.
+
 ## Comparison Operators
 
 All comparison operators return boolean values:
