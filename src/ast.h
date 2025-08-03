@@ -15,10 +15,19 @@ namespace llvm {
 
 /// ExprAST - Base class for all expression nodes.
 class ExprAST {
+protected:
+  mutable std::string TypeName; // The type name of this expression (e.g., "int", "byte", "float")
+  
 public:
   virtual ~ExprAST() = default;
   virtual llvm::Value *codegen() = 0;
   virtual llvm::Value *codegen_ptr() { return nullptr; }
+  
+  // Get the type name of this expression
+  virtual std::string getTypeName() const { return TypeName; }
+  
+  // Set the type name (used during codegen)
+  void setTypeName(const std::string &TN) const { TypeName = TN; }
 };
 
 /// StmtAST - Base class for all statement nodes.
@@ -282,6 +291,20 @@ public:
       : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix) {}
 
   llvm::Value *codegen() override;
+};
+
+/// CastExprAST - Expression class for type casting.
+class CastExprAST : public ExprAST {
+  std::string TargetType;
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  CastExprAST(const std::string &TargetType, std::unique_ptr<ExprAST> Operand)
+      : TargetType(TargetType), Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  const std::string &getTargetType() const { return TargetType; }
+  ExprAST *getOperand() const { return Operand.get(); }
 };
 
 /// CallExprAST - Expression class for function calls.

@@ -244,6 +244,30 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
 ///   ::= charexpr
 ///   ::= arrayexpr
 std::unique_ptr<ExprAST> ParsePrimary() {
+  // Check for type casting: type: expr
+  if (CurTok == tok_int || CurTok == tok_float || CurTok == tok_double || 
+      CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool || CurTok == tok_string ||
+      CurTok == tok_byte || CurTok == tok_short || CurTok == tok_long || CurTok == tok_sbyte ||
+      CurTok == tok_ushort || CurTok == tok_uint || CurTok == tok_ulong ||
+      CurTok == tok_schar || CurTok == tok_lchar) {
+    std::string TypeName = IdentifierStr;
+    int SavedTok = CurTok;
+    getNextToken(); // consume type
+    
+    // Check if this is a type cast (type:)
+    if (CurTok == tok_colon) {
+      getNextToken(); // consume ':'
+      auto Operand = ParsePrimary();
+      if (!Operand)
+        return nullptr;
+      return std::make_unique<CastExprAST>(TypeName, std::move(Operand));
+    } else {
+      // Not a cast, restore state and continue with default handling
+      // This shouldn't happen in normal parsing flow, but handle it gracefully
+      return LogError("unexpected type token in expression");
+    }
+  }
+  
   switch (CurTok) {
   default:
     return LogError("unknown token when expecting an expression");

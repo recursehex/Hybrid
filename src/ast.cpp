@@ -64,6 +64,22 @@ llvm::Function *LogErrorF(const char *Str) {
   return nullptr;
 }
 
+// Helper to check if a type name represents a signed type
+bool isSignedType(const std::string &TypeStr) {
+  // Signed types: int, sbyte, short, long, char (in C, char is signed by default)
+  // Note: schar is "short char" (8-bit), not signed char
+  return TypeStr == "int" || TypeStr == "sbyte" || TypeStr == "short" || 
+         TypeStr == "long" || TypeStr == "char";
+}
+
+// Helper to check if a type name represents an unsigned type
+bool isUnsignedType(const std::string &TypeStr) {
+  // Unsigned types: byte, ushort, uint, ulong
+  // Note: schar and lchar are character types, treating as unsigned
+  return TypeStr == "byte" || TypeStr == "ushort" || TypeStr == "uint" || 
+         TypeStr == "ulong" || TypeStr == "schar" || TypeStr == "lchar";
+}
+
 // Type conversion helper
 llvm::Type *getTypeFromString(const std::string &TypeStr) {
   if (TypeStr == "int")
@@ -138,14 +154,17 @@ llvm::Value *NumberExprAST::codegen() {
   double val = getValue();
   if (val == floor(val) && val >= INT32_MIN && val <= INT32_MAX) {
     // It's a whole number in int32 range, create as integer
+    setTypeName("int");
     return llvm::ConstantInt::get(*TheContext, llvm::APInt(32, (int32_t)val));
   } else {
     // It's a floating point number
+    setTypeName("double");
     return llvm::ConstantFP::get(*TheContext, llvm::APFloat(val));
   }
 }
 
 llvm::Value *BoolExprAST::codegen() {
+  setTypeName("bool");
   return llvm::ConstantInt::get(*TheContext, llvm::APInt(1, getValue() ? 1 : 0));
 }
 
@@ -157,15 +176,18 @@ llvm::Value *NullExprAST::codegen() {
 
 llvm::Value *StringExprAST::codegen() {
   // Create a global string constant
+  setTypeName("string");
   return Builder->CreateGlobalString(getValue(), "str");
 }
 
 llvm::Value *CharExprAST::codegen() {
+  setTypeName("char");
   return llvm::ConstantInt::get(*TheContext, llvm::APInt(8, getValue()));
 }
 
 // Forward declaration for castToType
 llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType);
+llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::string& targetTypeName);
 
 // Helper to check if types are compatible for implicit conversion
 // No implicit conversion between different sized integers
@@ -398,6 +420,10 @@ llvm::Value *VariableExprAST::codegen() {
   if (V) {
     // Local variable - load from alloca
     llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
+    // Set type name from local types
+    if (LocalTypes.count(getName())) {
+      setTypeName(LocalTypes[getName()]);
+    }
     return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
   }
   
@@ -405,6 +431,10 @@ llvm::Value *VariableExprAST::codegen() {
   llvm::GlobalVariable *GV = GlobalValues[getName()];
   if (GV) {
     // Global variable - load from global
+    // Set type name from global types
+    if (GlobalTypes.count(getName())) {
+      setTypeName(GlobalTypes[getName()]);
+    }
     return Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
   }
   
@@ -487,6 +517,68 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
   return value;
 }
 
+// Overloaded castToType that knows the target type name for proper range checking
+llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::string& targetTypeName) {
+  llvm::Type* sourceType = value->getType();
+  
+  if (sourceType == targetType)
+    return value;
+  
+  // Special case: allow casting constant integers to smaller integer types
+  // This is needed for literals like: byte b = 100
+  if (llvm::ConstantInt* CI = llvm::dyn_cast<llvm::ConstantInt>(value)) {
+    if (sourceType->isIntegerTy() && targetType->isIntegerTy() && 
+        !targetType->isIntegerTy(1)) { // Don't allow to bool
+      // Check if the constant fits in the target type
+      llvm::APInt Val = CI->getValue();
+      unsigned targetBits = targetType->getIntegerBitWidth();
+      int64_t v = Val.getSExtValue();
+      
+      // Check ranges based on target type name (which tells us signedness)
+      bool inRange = false;
+      if (targetBits == 8) {
+        if (isSignedType(targetTypeName)) {
+          // sbyte, char: -128 to 127
+          inRange = (v >= -128 && v <= 127);
+        } else {
+          // byte, schar: 0 to 255
+          inRange = (v >= 0 && v <= 255);
+        }
+      } else if (targetBits == 16) {
+        if (isSignedType(targetTypeName)) {
+          // short: -32768 to 32767
+          inRange = (v >= -32768 && v <= 32767);
+        } else {
+          // ushort: 0 to 65535
+          inRange = (v >= 0 && v <= 65535);
+        }
+      } else if (targetBits == 32) {
+        if (isSignedType(targetTypeName)) {
+          // int: -2147483648 to 2147483647
+          inRange = (v >= INT32_MIN && v <= INT32_MAX);
+        } else {
+          // uint: 0 to 4294967295
+          inRange = (v >= 0 && v <= UINT32_MAX);
+        }
+      } else if (targetBits == 64) {
+        // For 64-bit, we can always fit a 32-bit source
+        inRange = true;
+      }
+      
+      if (!inRange) {
+        LogErrorV(("Integer literal " + std::to_string(v) + 
+                   " is out of range for target type " + targetTypeName).c_str());
+        return value;
+      }
+      
+      return llvm::ConstantInt::get(targetType, Val.trunc(targetBits));
+    }
+  }
+  
+  // For non-constant values, use the regular castToType
+  return castToType(value, targetType);
+}
+
 // Helper function to promote types for binary operations
 std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* R) {
   llvm::Type* LType = L->getType();
@@ -553,6 +645,10 @@ llvm::Value *BinaryExprAST::codegen() {
   if (!L || !R)
     return nullptr;
 
+  // Get type names from operands
+  std::string leftTypeName = getLHS()->getTypeName();
+  std::string rightTypeName = getRHS()->getTypeName();
+
   // Promote types to compatible types
   auto promoted = promoteTypes(L, R);
   L = promoted.first;
@@ -560,6 +656,18 @@ llvm::Value *BinaryExprAST::codegen() {
 
   // Check if we're working with floating point or integer types
   bool isFloat = L->getType()->isFloatingPointTy();
+  
+  // Set result type name based on the promoted type
+  if (isFloat) {
+    setTypeName(L->getType()->isFloatTy() ? "float" : "double");
+  } else {
+    // For integers, use the larger type's name or left type if same size
+    if (!leftTypeName.empty()) {
+      setTypeName(leftTypeName);
+    } else {
+      setTypeName("int"); // Default
+    }
+  }
 
   // Handle single-character operators
   if (Op.length() == 1) {
@@ -590,6 +698,7 @@ llvm::Value *BinaryExprAST::codegen() {
       else
         return Builder->CreateSRem(L, R, "modtmp");
     case '<':
+      setTypeName("bool");
       if (isFloat) {
         L = Builder->CreateFCmpULT(L, R, "cmptmp");
       } else {
@@ -598,6 +707,7 @@ llvm::Value *BinaryExprAST::codegen() {
       // Return the boolean result as i1
       return L;
     case '>':
+      setTypeName("bool");
       if (isFloat) {
         L = Builder->CreateFCmpUGT(L, R, "cmptmp");
       } else {
@@ -704,21 +814,25 @@ llvm::Value *BinaryExprAST::codegen() {
   
   // Handle multi-character operators
   if (Op == "==") {
+    setTypeName("bool");
     if (isFloat)
       return Builder->CreateFCmpOEQ(L, R, "eqtmp");
     else
       return Builder->CreateICmpEQ(L, R, "eqtmp");
   } else if (Op == "!=") {
+    setTypeName("bool");
     if (isFloat)
       return Builder->CreateFCmpONE(L, R, "netmp");
     else
       return Builder->CreateICmpNE(L, R, "netmp");
   } else if (Op == "<=") {
+    setTypeName("bool");
     if (isFloat)
       return Builder->CreateFCmpOLE(L, R, "letmp");
     else
       return Builder->CreateICmpSLE(L, R, "letmp");
   } else if (Op == ">=") {
+    setTypeName("bool");
     if (isFloat)
       return Builder->CreateFCmpOGE(L, R, "getmp");
     else
@@ -911,6 +1025,7 @@ llvm::Value *BinaryExprAST::codegen() {
       else if (R->getType()->isIntegerTy())
         R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
     }
+    setTypeName("bool");
     return Builder->CreateAnd(L, R, "andtmp");
   } else if (Op == "||") {
     // Convert operands to booleans if needed
@@ -926,6 +1041,7 @@ llvm::Value *BinaryExprAST::codegen() {
       else if (R->getType()->isIntegerTy())
         R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
     }
+    setTypeName("bool");
     return Builder->CreateOr(L, R, "ortmp");
   } else if (Op == "&") {
     // Bitwise AND - only works on integers
@@ -1145,6 +1261,78 @@ llvm::Value *UnaryExprAST::codegen() {
   return LogErrorV("invalid unary operator");
 }
 
+llvm::Value *CastExprAST::codegen() {
+  // Get the operand value
+  llvm::Value *OperandV = getOperand()->codegen();
+  if (!OperandV)
+    return nullptr;
+
+  // Get the source type name from the operand
+  std::string sourceTypeName = getOperand()->getTypeName();
+
+  // Get the target LLVM type
+  llvm::Type *TargetLLVMType = getTypeFromString(getTargetType());
+  if (!TargetLLVMType)
+    return LogErrorV("Invalid target type for cast");
+
+  // Set our type name to the target type
+  setTypeName(getTargetType());
+
+  llvm::Type *SourceType = OperandV->getType();
+  
+  // If same type, just return the value
+  if (SourceType == TargetLLVMType)
+    return OperandV;
+
+  // Integer to integer casts
+  if (SourceType->isIntegerTy() && TargetLLVMType->isIntegerTy()) {
+    unsigned SourceBits = SourceType->getIntegerBitWidth();
+    unsigned TargetBits = TargetLLVMType->getIntegerBitWidth();
+    
+    if (SourceBits < TargetBits) {
+      // Determine if we should use sign or zero extension based on source type
+      if (!sourceTypeName.empty() && isUnsignedType(sourceTypeName)) {
+        return Builder->CreateZExt(OperandV, TargetLLVMType, "casttmp");
+      } else {
+        return Builder->CreateSExt(OperandV, TargetLLVMType, "casttmp");
+      }
+    } else if (SourceBits > TargetBits) {
+      return Builder->CreateTrunc(OperandV, TargetLLVMType, "casttmp");
+    }
+    return OperandV;
+  }
+  
+  // Integer to float
+  if (SourceType->isIntegerTy() && TargetLLVMType->isFloatingPointTy()) {
+    // Use the source type name to determine if we should use signed or unsigned conversion
+    if (!sourceTypeName.empty() && isUnsignedType(sourceTypeName)) {
+      return Builder->CreateUIToFP(OperandV, TargetLLVMType, "casttmp");
+    } else {
+      return Builder->CreateSIToFP(OperandV, TargetLLVMType, "casttmp");
+    }
+  }
+  
+  // Float to integer
+  if (SourceType->isFloatingPointTy() && TargetLLVMType->isIntegerTy()) {
+    // Use signed or unsigned conversion based on target type
+    if (isUnsignedType(getTargetType())) {
+      return Builder->CreateFPToUI(OperandV, TargetLLVMType, "casttmp");
+    } else {
+      return Builder->CreateFPToSI(OperandV, TargetLLVMType, "casttmp");
+    }
+  }
+  
+  // Float to float (different precision)
+  if (SourceType->isFloatingPointTy() && TargetLLVMType->isFloatingPointTy()) {
+    if (SourceType->getPrimitiveSizeInBits() < TargetLLVMType->getPrimitiveSizeInBits()) {
+      return Builder->CreateFPExt(OperandV, TargetLLVMType, "casttmp");
+    } else {
+      return Builder->CreateFPTrunc(OperandV, TargetLLVMType, "casttmp");
+    }
+  }
+  
+  return LogErrorV("Invalid cast between incompatible types");
+}
 
 llvm::Value *CallExprAST::codegen() {
   // Look up the name in the global module table
@@ -1228,7 +1416,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         return nullptr;
       
       // Cast the initializer to the variable type if needed
-      InitVal = castToType(InitVal, VarType);
+      InitVal = castToType(InitVal, VarType, getType());
       
       // Store the initial value
       Builder->CreateStore(InitVal, GV);
@@ -1255,7 +1443,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         return nullptr;
       
       // Cast the initializer to the variable type if needed
-      InitVal = castToType(InitVal, VarType);
+      InitVal = castToType(InitVal, VarType, getType());
       
       // Store the initial value
       Builder->CreateStore(InitVal, Alloca);

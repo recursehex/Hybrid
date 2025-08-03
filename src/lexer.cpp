@@ -310,6 +310,12 @@ int gettok() {
     }
   }
 
+  // Check for colon (type casting operator)
+  if (LastChar == ':') {
+    LastChar = getchar();
+    return tok_colon;
+  }
+
   // Check for newline.
   if (LastChar == '\n' || LastChar == '\r') {
     if (LastChar == '\r') {

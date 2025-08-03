@@ -94,7 +94,10 @@ enum Token {
 
   // increment/decrement
   tok_inc = -51,             // ++
-  tok_dec = -52              // --
+  tok_dec = -52,             // --
+  
+  // type casting
+  tok_colon = -53            // :
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

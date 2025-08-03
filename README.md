@@ -138,6 +138,7 @@ for type var in collection { }
 - Boolean: `&&`, `||`, `!`
 - Assignment: `=`, `+=`, `-=`, `*=`, `/=`, `%=`
 - Increment/Decrement: `++`, `--` (both prefix and postfix)
+- Type Casting: `:` (e.g., `int: floatVar`, `byte: 100`)
 
 ## Building from Source
 
@@ -221,8 +222,8 @@ Hybrid/
     - `free`
 - 128 bit base 10 floating point type
     - `decimal`
-- Type casting
-    - `type:`
+- Type casting ✓
+    - `type:` (implemented with proper sign/zero extension)
 - Nullable types
     - `type?`
 - Reference types
