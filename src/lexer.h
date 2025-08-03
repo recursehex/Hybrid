@@ -30,6 +30,19 @@ enum Token {
   tok_void = -16,
   tok_bool = -17,
   tok_string = -18,
+  
+  // sized integer types
+  tok_byte = -85,
+  tok_short = -86,
+  tok_long = -87,
+  tok_sbyte = -88,
+  tok_ushort = -89,
+  tok_uint = -90,
+  tok_ulong = -91,
+  
+  // sized character types
+  tok_schar = -92,
+  tok_lchar = -93,
 
   // primary
   tok_identifier = -19,

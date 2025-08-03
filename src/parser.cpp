@@ -407,7 +407,10 @@ std::unique_ptr<ExprAST> ParseExpression() {
 std::unique_ptr<PrototypeAST> ParsePrototype() {
   // Parse return type
   if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-      CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string)
+      CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
+      CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
+      CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
+      CurTok != tok_schar && CurTok != tok_lchar)
     return LogErrorP("Expected return type in prototype");
 
   std::string ReturnType = IdentifierStr;
@@ -434,7 +437,10 @@ std::unique_ptr<PrototypeAST> ParsePrototype() {
   // Parse first parameter
   while (true) {
     if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-        CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string)
+        CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
+        CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
+        CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
+        CurTok != tok_schar && CurTok != tok_lchar)
       return LogErrorP("Expected parameter type");
     
     std::string ParamType = IdentifierStr;
@@ -519,7 +525,10 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
 /// variabledecl ::= type identifier '=' expression
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration() {
   if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double && 
-      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string)
+      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
+      CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
+      CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
+      CurTok != tok_schar && CurTok != tok_lchar)
     return nullptr;
     
   std::string Type = IdentifierStr;
@@ -565,7 +574,10 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   
   // Parse type
   if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double &&
-      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string) {
+      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
+      CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
+      CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
+      CurTok != tok_schar && CurTok != tok_lchar) {
     LogError("Expected type after 'for'");
     return nullptr;
   }
@@ -765,6 +777,15 @@ std::unique_ptr<StmtAST> ParseStatement() {
   case tok_void:
   case tok_bool:
   case tok_string:
+  case tok_byte:
+  case tok_short:
+  case tok_long:
+  case tok_sbyte:
+  case tok_ushort:
+  case tok_uint:
+  case tok_ulong:
+  case tok_schar:
+  case tok_lchar:
     return ParseVariableDeclaration();
   case '}':
     // End of block - not a statement, but not an error either
@@ -868,7 +889,10 @@ bool ParseTypeIdentifier() {
     if (CurTok != ')') {
       while (true) {
         if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-            CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string) {
+            CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
+            CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
+            CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
+            CurTok != tok_schar && CurTok != tok_lchar) {
           fprintf(stderr, "Error: Expected parameter type\n");
           return false;
         }

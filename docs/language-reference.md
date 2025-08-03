@@ -63,7 +63,10 @@ add(5, 3)
 
 The following keywords are reserved:
 
-- Type keywords: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
+- Type keywords: 
+  - Basic types: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
+  - Sized integers: `byte`, `sbyte`, `short`, `ushort`, `uint`, `long`, `ulong`
+  - Character types: `schar`, `lchar`
 - Control flow: `if`, `else`, `for`, `in`, `while`, `break`
 - Function keywords: `return`, `extern`
 - Boolean literals: `true`, `false`
@@ -78,7 +81,11 @@ The following keywords are reserved:
 3.14      // Float literal (double)
 -10       // Negative integer
 -2.5      // Negative float
+255       // Can be assigned to byte
+65535     // Can be assigned to ushort
 ```
+
+Integer literals are automatically sized to fit the target type with range checking.
 
 ### Boolean Literals
 

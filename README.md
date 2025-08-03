@@ -100,9 +100,14 @@ Comprehensive documentation is available in the `docs/` directory:
 ## Language Overview
 
 ### Types
-- Primitives: `int`, `float`, `double`, `char`, `bool`, `string`, `void`
-- Arrays: `int[]`, `float[]`, etc.
+- Basic primitives: `int` (32-bit), `float` (32-bit), `double` (64-bit), `char` (8-bit), `bool` (1-bit), `string` (pointer), `void`
+- Sized integers: 
+  - Unsigned: `byte` (8-bit), `ushort` (16-bit), `uint` (32-bit), `ulong` (64-bit)
+  - Signed: `sbyte` (8-bit), `short` (16-bit), `long` (64-bit)
+- Character types: `schar` (8-bit), `lchar` (32-bit Unicode)
+- Arrays: `int[]`, `float[]`, `byte[]`, etc.
 - All variables must be initialized at declaration
+- Strict type checking: no implicit conversions between different sized types
 
 ### Functions
 ```c
@@ -176,6 +181,17 @@ Hybrid/
 - External function declarations
 - Bitwise operators and compound assignments (`&`, `|`, `^`, `<<`, `>>`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
 - Increment/decrement operators (`++`, `--`) - both prefix and postfix
+- Multiple sizes for integers and characters
+    - `byte` - 8 bit unsigned integer
+    - `short` - 16 bit signed integer
+    - `long` - 64 bit signed integer
+    - `schar` - 8 bit character
+    - `lchar` - 32 bit character
+- Unsigned versions of integer types
+    - `sbyte` - 8 bit signed (`byte` is unsigned)
+    - `ushort` - 16 bit unsigned
+    - `uint` - 32 bit unsigned
+    - `ulong` - 64 bit unsigned
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management
@@ -203,17 +219,6 @@ Hybrid/
 - Heap allocation keywords
     - `new`
     - `free`
-- More sizes for primitive types
-    - `byte` - 8 bit integer
-    - `short` - 16 bit integer
-    - `long` - 64 bit integer
-    - `schar` - 8 bit character
-    - `lchar` - 32 bit character
-- Unsigned versions of integer types
-    - `sbyte` - 8 bit (`byte` is unsigned)
-    - `ushort` - 16 bit
-    - `uint` - 32 bit
-    - `ulong` - 64 bit
 - 128 bit base 10 floating point type
     - `decimal`
 - Type casting

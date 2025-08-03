@@ -44,6 +44,24 @@ int gettok() {
       return tok_bool;
     if (IdentifierStr == "string")
       return tok_string;
+    if (IdentifierStr == "byte")
+      return tok_byte;
+    if (IdentifierStr == "short")
+      return tok_short;
+    if (IdentifierStr == "long")
+      return tok_long;
+    if (IdentifierStr == "sbyte")
+      return tok_sbyte;
+    if (IdentifierStr == "ushort")
+      return tok_ushort;
+    if (IdentifierStr == "uint")
+      return tok_uint;
+    if (IdentifierStr == "ulong")
+      return tok_ulong;
+    if (IdentifierStr == "schar")
+      return tok_schar;
+    if (IdentifierStr == "lchar")
+      return tok_lchar;
     if (IdentifierStr == "true")
       return tok_true;
     if (IdentifierStr == "false")

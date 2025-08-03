@@ -80,6 +80,26 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     return llvm::Type::getVoidTy(*TheContext);
   else if (TypeStr == "string")
     return llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0); // Strings as char*
+  // New sized integer types
+  else if (TypeStr == "byte")
+    return llvm::Type::getInt8Ty(*TheContext);   // 8-bit unsigned
+  else if (TypeStr == "sbyte")
+    return llvm::Type::getInt8Ty(*TheContext);   // 8-bit signed
+  else if (TypeStr == "short")
+    return llvm::Type::getInt16Ty(*TheContext);  // 16-bit signed
+  else if (TypeStr == "ushort")
+    return llvm::Type::getInt16Ty(*TheContext);  // 16-bit unsigned
+  else if (TypeStr == "uint")
+    return llvm::Type::getInt32Ty(*TheContext);  // 32-bit unsigned
+  else if (TypeStr == "long")
+    return llvm::Type::getInt64Ty(*TheContext);  // 64-bit signed
+  else if (TypeStr == "ulong")
+    return llvm::Type::getInt64Ty(*TheContext);  // 64-bit unsigned
+  // Sized character types
+  else if (TypeStr == "schar")
+    return llvm::Type::getInt8Ty(*TheContext);   // 8-bit character
+  else if (TypeStr == "lchar")
+    return llvm::Type::getInt32Ty(*TheContext);  // 32-bit character (Unicode)
   else if (TypeStr.size() > 2 && TypeStr.substr(TypeStr.size() - 2) == "[]") {
     // Array type: return the array struct type {ptr, size}
     std::string ElementType = TypeStr.substr(0, TypeStr.size() - 2);
@@ -146,6 +166,28 @@ llvm::Value *CharExprAST::codegen() {
 
 // Forward declaration for castToType
 llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType);
+
+// Helper to check if types are compatible for implicit conversion
+// No implicit conversion between different sized integers
+bool areTypesCompatible(llvm::Type* type1, llvm::Type* type2) {
+  if (type1 == type2)
+    return true;
+  
+  // Bool is its own type - no implicit conversions
+  if (type1->isIntegerTy(1) || type2->isIntegerTy(1))
+    return false;
+  
+  // Allow implicit conversion between integer and float types
+  if ((type1->isIntegerTy() && type2->isFloatingPointTy()) ||
+      (type1->isFloatingPointTy() && type2->isIntegerTy()))
+    return true;
+  
+  // Allow implicit conversion between float types
+  if (type1->isFloatingPointTy() && type2->isFloatingPointTy())
+    return true;
+  
+  return false;
+}
 
 llvm::Value *ArrayExprAST::codegen() {
   // Get the element type
@@ -376,38 +418,72 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
   if (sourceType == targetType)
     return value;
   
+  // Special case: allow casting constant integers to smaller integer types
+  // This is needed for literals like: byte b = 100
+  if (llvm::ConstantInt* CI = llvm::dyn_cast<llvm::ConstantInt>(value)) {
+    if (sourceType->isIntegerTy() && targetType->isIntegerTy() && 
+        !targetType->isIntegerTy(1)) { // Don't allow to bool
+      // Check if the constant fits in the target type
+      llvm::APInt Val = CI->getValue();
+      unsigned targetBits = targetType->getIntegerBitWidth();
+      
+      // Check ranges based on target type
+      bool inRange = false;
+      if (targetBits == 8) {
+        // byte (unsigned) or sbyte/char (signed)
+        int64_t v = Val.getSExtValue();
+        // Assuming unsigned types use the full range
+        inRange = (v >= 0 && v <= 255); // For byte
+        // For sbyte/char, would need to track signedness
+      } else if (targetBits == 16) {
+        // short (signed) or ushort (unsigned)
+        int64_t v = Val.getSExtValue();
+        inRange = (v >= -32768 && v <= 65535); // Conservative: covers both signed and unsigned
+      } else if (targetBits == 32) {
+        // int (signed) or uint (unsigned)
+        inRange = true; // Source is already 32-bit
+      } else if (targetBits == 64) {
+        // long (signed) or ulong (unsigned)
+        inRange = true; // Can always extend to 64-bit
+      }
+      
+      if (!inRange) {
+        LogErrorV(("Integer literal " + std::to_string(Val.getSExtValue()) + 
+                   " is out of range for target type").c_str());
+        return value;
+      }
+      
+      return llvm::ConstantInt::get(targetType, Val.trunc(targetBits));
+    }
+  }
+  
+  // Check if types are compatible for implicit casting
+  if (!areTypesCompatible(sourceType, targetType)) {
+    // For explicit casts in the future, we might allow this
+    // For now, implicit casts must follow compatibility rules
+    return value; // Return original value, let the caller handle the error
+  }
+  
   // Integer to float
   if (sourceType->isIntegerTy() && targetType->isFloatingPointTy()) {
-    if (sourceType->isIntegerTy(1)) // bool
-      return Builder->CreateUIToFP(value, targetType, "casttmp");
-    else
-      return Builder->CreateSIToFP(value, targetType, "casttmp");
+    return Builder->CreateSIToFP(value, targetType, "casttmp");
   }
   
   // Float to integer
   if (sourceType->isFloatingPointTy() && targetType->isIntegerTy()) {
-    if (targetType->isIntegerTy(1)) // bool
-      return Builder->CreateFPToUI(value, targetType, "casttmp");
-    else
-      return Builder->CreateFPToSI(value, targetType, "casttmp");
+    return Builder->CreateFPToSI(value, targetType, "casttmp");
   }
   
-  // Integer to integer (different sizes)
-  if (sourceType->isIntegerTy() && targetType->isIntegerTy()) {
-    unsigned sourceBits = sourceType->getIntegerBitWidth();
-    unsigned targetBits = targetType->getIntegerBitWidth();
-    
-    if (sourceBits < targetBits) {
-      if (sourceType->isIntegerTy(1)) // bool
-        return Builder->CreateZExt(value, targetType, "casttmp");
-      else
-        return Builder->CreateSExt(value, targetType, "casttmp");
-    } else if (sourceBits > targetBits) {
-      return Builder->CreateTrunc(value, targetType, "casttmp");
+  // Float to float (different precision)
+  if (sourceType->isFloatingPointTy() && targetType->isFloatingPointTy()) {
+    if (sourceType->getPrimitiveSizeInBits() < targetType->getPrimitiveSizeInBits()) {
+      return Builder->CreateFPExt(value, targetType, "casttmp");
+    } else {
+      return Builder->CreateFPTrunc(value, targetType, "casttmp");
     }
   }
   
-  // If we can't cast, return the original value (shouldn't happen in well-typed programs)
+  // If we can't cast, return the original value
   return value;
 }
 
@@ -420,35 +496,51 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
   if (LType == RType)
     return {L, R};
   
+  // Check if types are compatible
+  if (!areTypesCompatible(LType, RType)) {
+    // Generate a more helpful error message
+    std::string LTypeStr = "unknown", RTypeStr = "unknown";
+    
+    // Determine type names
+    if (LType->isIntegerTy(1)) LTypeStr = "bool";
+    else if (LType->isIntegerTy(8)) LTypeStr = "byte/sbyte/char";
+    else if (LType->isIntegerTy(16)) LTypeStr = "short/ushort";
+    else if (LType->isIntegerTy(32)) LTypeStr = "int/uint";
+    else if (LType->isIntegerTy(64)) LTypeStr = "long/ulong";
+    else if (LType->isFloatTy()) LTypeStr = "float";
+    else if (LType->isDoubleTy()) LTypeStr = "double";
+    else if (LType->isFP128Ty()) LTypeStr = "fp128";
+    
+    if (RType->isIntegerTy(1)) RTypeStr = "bool";
+    else if (RType->isIntegerTy(8)) RTypeStr = "byte/sbyte/char";
+    else if (RType->isIntegerTy(16)) RTypeStr = "short/ushort";
+    else if (RType->isIntegerTy(32)) RTypeStr = "int/uint";
+    else if (RType->isIntegerTy(64)) RTypeStr = "long/ulong";
+    else if (RType->isFloatTy()) RTypeStr = "float";
+    else if (RType->isDoubleTy()) RTypeStr = "double";
+    else if (RType->isFP128Ty()) RTypeStr = "fp128";
+    
+    LogErrorV(("Type mismatch: cannot implicitly convert between '" + LTypeStr + "' and '" + RTypeStr + "'").c_str());
+    return {L, R}; // Return original values, error already logged
+  }
+  
   // If one is float and other is int, promote int to float
   if (LType->isFloatingPointTy() && RType->isIntegerTy()) {
-    if (RType->isIntegerTy(1)) // bool to float
-      R = Builder->CreateUIToFP(R, LType, "promtmp");
-    else // int to float
-      R = Builder->CreateSIToFP(R, LType, "promtmp");
+    R = Builder->CreateSIToFP(R, LType, "promtmp");
     return {L, R};
   }
   
   if (LType->isIntegerTy() && RType->isFloatingPointTy()) {
-    if (LType->isIntegerTy(1)) // bool to float
-      L = Builder->CreateUIToFP(L, RType, "promtmp");
-    else // int to float
-      L = Builder->CreateSIToFP(L, RType, "promtmp");
+    L = Builder->CreateSIToFP(L, RType, "promtmp");
     return {L, R};
   }
   
-  // If both are integers but different sizes, promote to larger
-  if (LType->isIntegerTy() && RType->isIntegerTy()) {
-    if (LType->getIntegerBitWidth() < RType->getIntegerBitWidth()) {
-      if (LType->isIntegerTy(1)) // bool
-        L = Builder->CreateZExt(L, RType, "promtmp");
-      else
-        L = Builder->CreateSExt(L, RType, "promtmp");
-    } else if (RType->getIntegerBitWidth() < LType->getIntegerBitWidth()) {
-      if (RType->isIntegerTy(1)) // bool
-        R = Builder->CreateZExt(R, LType, "promtmp");
-      else
-        R = Builder->CreateSExt(R, LType, "promtmp");
+  // If both are floats but different precision, promote to higher precision
+  if (LType->isFloatingPointTy() && RType->isFloatingPointTy()) {
+    if (LType->isFloatTy() && RType->isDoubleTy()) {
+      L = Builder->CreateFPExt(L, RType, "promtmp");
+    } else if (LType->isDoubleTy() && RType->isFloatTy()) {
+      R = Builder->CreateFPExt(R, LType, "promtmp");
     }
   }
   

@@ -117,6 +117,15 @@ void MainLoop() {
     case tok_void:
     case tok_bool:
     case tok_string:
+    case tok_byte:
+    case tok_short:
+    case tok_long:
+    case tok_sbyte:
+    case tok_ushort:
+    case tok_uint:
+    case tok_ulong:
+    case tok_schar:
+    case tok_lchar:
       if (!ParseTypeIdentifier()) {
         // If ParseTypeIdentifier failed, it means it wasn't a valid type-prefixed declaration
         // or an error occurred during parsing. Consume the current token to avoid infinite loop.
