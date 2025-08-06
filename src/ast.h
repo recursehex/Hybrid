@@ -366,6 +366,62 @@ public:
   BlockStmtAST *getBody() const { return Body.get(); }
 };
 
+/// FieldAST - Represents a field in a struct.
+class FieldAST {
+  std::string Type;
+  std::string Name;
+
+public:
+  FieldAST(const std::string &Type, const std::string &Name)
+      : Type(Type), Name(Name) {}
+  
+  const std::string &getType() const { return Type; }
+  const std::string &getName() const { return Name; }
+};
+
+/// MemberAccessExprAST - Expression class for struct member access (e.g., point.x).
+class MemberAccessExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Object;
+  std::string MemberName;
+
+public:
+  MemberAccessExprAST(std::unique_ptr<ExprAST> Object, const std::string &MemberName)
+      : Object(std::move(Object)), MemberName(MemberName) {}
+  
+  llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
+  ExprAST *getObject() const { return Object.get(); }
+  const std::string &getMemberName() const { return MemberName; }
+};
+
+/// ThisExprAST - Expression class for 'this' keyword in struct methods.
+class ThisExprAST : public ExprAST {
+public:
+  ThisExprAST() {}
+  
+  llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
+};
+
+/// StructAST - Represents a struct definition.
+class StructAST {
+  std::string Name;
+  std::vector<std::unique_ptr<FieldAST>> Fields;
+  std::vector<std::unique_ptr<FunctionAST>> Methods;
+
+public:
+  StructAST(const std::string &Name,
+            std::vector<std::unique_ptr<FieldAST>> Fields,
+            std::vector<std::unique_ptr<FunctionAST>> Methods)
+      : Name(Name), Fields(std::move(Fields)), Methods(std::move(Methods)) {}
+  
+  llvm::Type *codegen();
+  
+  const std::string &getName() const { return Name; }
+  const std::vector<std::unique_ptr<FieldAST>> &getFields() const { return Fields; }
+  const std::vector<std::unique_ptr<FunctionAST>> &getMethods() const { return Methods; }
+};
+
 // Initialize LLVM module
 void InitializeModule();
 

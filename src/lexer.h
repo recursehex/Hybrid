@@ -21,6 +21,8 @@ enum Token {
   tok_while = -9,
   tok_break = -10,
   tok_skip = -11,
+  tok_struct = -94,
+  tok_this = -95,
 
   // types
   tok_int = -12,

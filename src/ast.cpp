@@ -27,6 +27,9 @@ static std::map<std::string, llvm::Value *> NamedValues;
 static std::map<std::string, llvm::GlobalVariable *> GlobalValues;
 static std::map<std::string, std::string> GlobalTypes; // Track types of globals
 static std::map<std::string, std::string> LocalTypes;  // Track types of locals
+static std::map<std::string, llvm::StructType *> StructTypes; // Track struct types
+static std::map<std::string, std::vector<std::pair<std::string, unsigned>>> StructFieldIndices; // Track field names and indices
+static std::map<std::string, std::map<std::string, std::string>> StructFieldTypes; // Track field types: structName -> (fieldName -> typeName)
 
 // Stack to track loop exit blocks for break statements
 static std::vector<llvm::BasicBlock *> LoopExitBlocks;
@@ -128,6 +131,13 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     }
     return nullptr;
   }
+  
+  // Check if it's a struct type
+  auto structIt = StructTypes.find(TypeStr);
+  if (structIt != StructTypes.end()) {
+    return llvm::PointerType::get(structIt->second, 0); // Struct instances are pointers
+  }
+  
   return nullptr;
 }
 
@@ -438,7 +448,7 @@ llvm::Value *VariableExprAST::codegen() {
     return Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
   }
   
-  return LogErrorV("Unknown variable name");
+  return LogErrorV(("Unknown variable name: " + getName()).c_str());
 }
 
 // Helper function to cast a value to a target type
@@ -739,7 +749,7 @@ llvm::Value *BinaryExprAST::codegen() {
           return R;
         }
         
-        return LogErrorV("Unknown variable name");
+        return LogErrorV(("Unknown variable name: " + LHSE->getName()).c_str());
       } else if (ArrayIndexExprAST *LHSAI = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
         // Array element assignment
         llvm::Value *ArrayVal = LHSAI->getArray()->codegen();
@@ -806,8 +816,22 @@ llvm::Value *BinaryExprAST::codegen() {
         llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
         Builder->CreateStore(R, ElemPtr);
         return R;
+      } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
+        // Member access assignment (e.g., this.x = value)
+        llvm::Value *FieldPtr = LHSMA->codegen_ptr();
+        if (!FieldPtr)
+          return nullptr;
+        
+        // Cast RHS to the field type if necessary
+        // We need to determine the field type from the struct definition
+        // For now, trust that R has the correct type
+        // TODO: Add proper type checking
+        // R = castToType(R, FieldType);
+        
+        Builder->CreateStore(R, FieldPtr);
+        return R;
       } else {
-        return LogErrorV("destination of '=' must be a variable or array element");
+        return LogErrorV("destination of '=' must be a variable, array element, or struct member");
       }
     }
   }
@@ -1335,6 +1359,36 @@ llvm::Value *CastExprAST::codegen() {
 }
 
 llvm::Value *CallExprAST::codegen() {
+  // Check if this is a struct constructor call
+  if (StructTypes.find(getCallee()) != StructTypes.end()) {
+    // This is a struct constructor call
+    std::string ConstructorName = getCallee() + "_new";
+    llvm::Function *ConstructorF = TheModule->getFunction(ConstructorName);
+    if (!ConstructorF)
+      return LogErrorV(("Unknown struct constructor: " + getCallee()).c_str());
+    
+    // Set the type name for this expression
+    setTypeName(getCallee());
+    
+    // Call the constructor
+    if (ConstructorF->arg_size() != getArgs().size())
+      return LogErrorV("Incorrect # arguments passed to constructor");
+    
+    std::vector<llvm::Value *> ArgsV;
+    unsigned i = 0;
+    for (auto &Arg : ConstructorF->args()) {
+      llvm::Value *ArgVal = getArgs()[i]->codegen();
+      if (!ArgVal)
+        return nullptr;
+      
+      // Cast the argument to the expected parameter type
+      ArgVal = castToType(ArgVal, Arg.getType());
+      ArgsV.push_back(ArgVal);
+      ++i;
+    }
+    return Builder->CreateCall(ConstructorF, ArgsV, "structtmp");
+  }
+  
   // Look up the name in the global module table
   llvm::Function *CalleeF = TheModule->getFunction(getCallee());
   if (!CalleeF)
@@ -1393,9 +1447,37 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   if (!VarType)
     return LogErrorV("Unknown type name");
   
-  // Check if we're at global scope (in __anon_var_decl function)
-  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
-  bool isGlobal = (TheFunction->getName() == "__anon_var_decl");
+  // Check if we're at global scope
+  llvm::Function *TheFunction = nullptr;
+  bool isGlobal = false;
+  
+  if (Builder->GetInsertBlock()) {
+    TheFunction = Builder->GetInsertBlock()->getParent();
+    isGlobal = (TheFunction->getName() == "__anon_var_decl");
+  } else {
+    // No insertion point means we're at top level
+    isGlobal = true;
+    
+    // Create or get the __anon_var_decl function for global variable initialization
+    TheFunction = TheModule->getFunction("__anon_var_decl");
+    if (!TheFunction) {
+      // Create the function
+      llvm::FunctionType *FT = llvm::FunctionType::get(
+          llvm::Type::getVoidTy(*TheContext), false);
+      TheFunction = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
+                                          "__anon_var_decl", TheModule.get());
+    }
+    
+    // Create a basic block if needed
+    if (TheFunction->empty()) {
+      llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
+      Builder->SetInsertPoint(BB);
+    } else {
+      // Set insert point to the end of the existing block
+      Builder->SetInsertPoint(&TheFunction->getEntryBlock());
+    }
+  }
+  
   
   if (isGlobal) {
     // Create a global variable
@@ -1874,4 +1956,265 @@ llvm::Function *FunctionAST::codegen() {
   // Error reading body, remove function
   TheFunction->eraseFromParent();
   return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// Struct Code Generation
+//===----------------------------------------------------------------------===//
+
+llvm::Type *StructAST::codegen() {
+  // Check if this struct type already exists
+  if (StructTypes.find(Name) != StructTypes.end()) {
+    fprintf(stderr, "Error: Struct type already defined: %s\n", Name.c_str());
+    return nullptr;
+  }
+  
+  // Save the current insertion point so we can restore it after generating constructors
+  auto SavedInsertBlock = Builder->GetInsertBlock();
+  
+  // Create the struct type
+  std::vector<llvm::Type*> FieldTypes;
+  std::vector<std::pair<std::string, unsigned>> FieldIndices;
+  
+  // Process fields
+  unsigned FieldIndex = 0;
+  std::map<std::string, std::string> FieldTypeMap;
+  for (const auto &Field : Fields) {
+    llvm::Type *FieldType = getTypeFromString(Field->getType());
+    if (!FieldType) {
+      fprintf(stderr, "Error: Unknown field type: %s\n", Field->getType().c_str());
+      return nullptr;
+    }
+    FieldTypes.push_back(FieldType);
+    FieldIndices.push_back({Field->getName(), FieldIndex++});
+    FieldTypeMap[Field->getName()] = Field->getType();
+  }
+  
+  // Create the struct type
+  llvm::StructType *StructType = llvm::StructType::create(*TheContext, FieldTypes, Name);
+  
+  // Store the struct type
+  StructTypes[Name] = StructType;
+  StructFieldIndices[Name] = FieldIndices;
+  StructFieldTypes[Name] = FieldTypeMap;
+  
+  // Generate constructor and other methods
+  for (const auto &Method : Methods) {
+    // For constructors, we need to handle them specially
+    if (Method->getProto()->getName() == Name) {
+      // This is a constructor - we'll generate it as a static method that returns a new instance
+      std::string ConstructorName = Name + "_new";
+      auto ConstructorProto = std::make_unique<PrototypeAST>(
+          Name, ConstructorName, Method->getProto()->getArgs());
+      
+      // Generate the constructor function
+      llvm::Function *ConstructorFunc = ConstructorProto->codegen();
+      if (!ConstructorFunc) {
+        return nullptr;
+      }
+      
+      // Create a basic block to start insertion into
+      llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", ConstructorFunc);
+      Builder->SetInsertPoint(BB);
+      
+      // Allocate memory for the struct
+      llvm::Value *StructPtr = Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
+      
+      // Store the struct pointer as 'this'
+      NamedValues["this"] = StructPtr;
+      LocalTypes["this"] = Name;
+      
+      // Set up the argument values
+      int i = 0;
+      for (auto &Arg : ConstructorFunc->args()) {
+        std::string ArgName = Method->getProto()->getArgs()[i].Name;
+        
+        // Create an alloca for this argument
+        llvm::AllocaInst *Alloca = Builder->CreateAlloca(
+            Arg.getType(), nullptr, ArgName);
+        
+        // Store the initial value into the alloca
+        Builder->CreateStore(&Arg, Alloca);
+        
+        // Add arguments to variable symbol table
+        NamedValues[ArgName] = Alloca;
+        LocalTypes[ArgName] = Method->getProto()->getArgs()[i].Type;
+        i++;
+      }
+      
+      // Generate the constructor body
+      if (Method->getBody()->codegen()) {
+        // Return the struct pointer
+        Builder->CreateRet(StructPtr);
+        
+        // Validate the generated code
+        llvm::verifyFunction(*ConstructorFunc);
+      } else {
+        ConstructorFunc->eraseFromParent();
+        return nullptr;
+      }
+      
+      // Clear local values
+      NamedValues.clear();
+      LocalTypes.clear();
+    } else {
+      // Regular method - generate as-is but with implicit 'this' parameter
+      Method->codegen();
+    }
+  }
+  
+  // Restore the insertion point if we had one, otherwise clear it
+  if (SavedInsertBlock) {
+    Builder->SetInsertPoint(SavedInsertBlock);
+  } else {
+    // No previous insertion point - we're at top level
+    // Clear the insertion point so next top-level code creates its own context
+    Builder->ClearInsertionPoint();
+  }
+  
+  return StructType;
+}
+
+llvm::Value *MemberAccessExprAST::codegen() {
+  // Get the type name of the object BEFORE codegen (might be empty for nested access)
+  std::string ObjectTypeNameBefore = Object->getTypeName();
+  
+  // Generate code for the object
+  llvm::Value *ObjectPtr = Object->codegen();
+  if (!ObjectPtr) {
+    return nullptr;
+  }
+  
+  // Get the type name of the object AFTER codegen (should be set now)
+  std::string ObjectTypeName = Object->getTypeName();
+  
+  
+  // If ObjectTypeName is empty but we have a valid pointer, it might be a nested struct access
+  // In that case, the ObjectPtr is already a pointer to a struct
+  if (ObjectTypeName.empty() && ObjectPtr->getType()->isPointerTy()) {
+    // In newer LLVM, pointers are opaque, so we need to track the type differently
+    // For now, we'll rely on the type name being set correctly by the previous member access
+    // This is a limitation that needs a better solution
+  }
+  
+  // Find the struct type
+  auto StructIt = StructTypes.find(ObjectTypeName);
+  if (StructIt == StructTypes.end()) {
+    return LogErrorV(("Object is not a struct type: " + ObjectTypeName).c_str());
+  }
+  
+  // Find the field index
+  auto FieldIndicesIt = StructFieldIndices.find(ObjectTypeName);
+  if (FieldIndicesIt == StructFieldIndices.end()) {
+    return LogErrorV("Internal error: struct field indices not found");
+  }
+  
+  // Find the specific field
+  unsigned FieldIndex = 0;
+  bool FieldFound = false;
+  for (const auto &Field : FieldIndicesIt->second) {
+    if (Field.first == MemberName) {
+      FieldIndex = Field.second;
+      FieldFound = true;
+      break;
+    }
+  }
+  
+  if (!FieldFound) {
+    return LogErrorV(("Field not found in struct: " + MemberName).c_str());
+  }
+  
+  // Generate GEP to access the field
+  std::vector<llvm::Value*> Indices = {
+    llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)),
+    llvm::ConstantInt::get(*TheContext, llvm::APInt(32, FieldIndex))
+  };
+  
+  llvm::Value *FieldPtr = Builder->CreateGEP(
+      StructIt->second, ObjectPtr, Indices, MemberName + "_ptr");
+  
+  // Load the field value
+  // Get the field type from the struct definition
+  llvm::Type *FieldType = StructIt->second->getElementType(FieldIndex);
+  
+  // Set the type name for this expression
+  std::string FieldTypeName;
+  auto FieldTypesIt = StructFieldTypes.find(ObjectTypeName);
+  if (FieldTypesIt != StructFieldTypes.end()) {
+    auto TypeIt = FieldTypesIt->second.find(MemberName);
+    if (TypeIt != FieldTypesIt->second.end()) {
+      FieldTypeName = TypeIt->second;
+      setTypeName(FieldTypeName);
+    }
+  }
+  
+  // Load the field value
+  return Builder->CreateLoad(FieldType, FieldPtr, MemberName);
+}
+
+llvm::Value *MemberAccessExprAST::codegen_ptr() {
+  // Generate code for the object
+  llvm::Value *ObjectPtr = Object->codegen();
+  if (!ObjectPtr) {
+    return nullptr;
+  }
+  
+  // Get the type name of the object
+  std::string ObjectTypeName = Object->getTypeName();
+  
+  // Find the struct type
+  auto StructIt = StructTypes.find(ObjectTypeName);
+  if (StructIt == StructTypes.end()) {
+    return LogErrorV(("Object is not a struct type: " + ObjectTypeName).c_str());
+  }
+  
+  // Find the field index
+  auto FieldIndicesIt = StructFieldIndices.find(ObjectTypeName);
+  if (FieldIndicesIt == StructFieldIndices.end()) {
+    return LogErrorV("Internal error: struct field indices not found");
+  }
+  
+  // Find the specific field
+  unsigned FieldIndex = 0;
+  bool FieldFound = false;
+  for (const auto &Field : FieldIndicesIt->second) {
+    if (Field.first == MemberName) {
+      FieldIndex = Field.second;
+      FieldFound = true;
+      break;
+    }
+  }
+  
+  if (!FieldFound) {
+    return LogErrorV(("Field not found in struct: " + MemberName).c_str());
+  }
+  
+  // Generate GEP to access the field
+  std::vector<llvm::Value*> Indices = {
+    llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)),
+    llvm::ConstantInt::get(*TheContext, llvm::APInt(32, FieldIndex))
+  };
+  
+  return Builder->CreateGEP(StructIt->second, ObjectPtr, Indices, MemberName + "_ptr");
+}
+
+llvm::Value *ThisExprAST::codegen() {
+  // Look up 'this' in the named values
+  auto It = NamedValues.find("this");
+  if (It == NamedValues.end()) {
+    return LogErrorV("'this' can only be used inside struct methods");
+  }
+  
+  // Get type from LocalTypes
+  auto TypeIt = LocalTypes.find("this");
+  if (TypeIt != LocalTypes.end()) {
+    setTypeName(TypeIt->second);
+  }
+  
+  return It->second;
+}
+
+llvm::Value *ThisExprAST::codegen_ptr() {
+  // 'this' is already a pointer
+  return codegen();
 }

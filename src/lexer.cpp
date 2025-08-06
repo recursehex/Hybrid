@@ -78,10 +78,15 @@ int gettok() {
       return tok_break;
     if (IdentifierStr == "skip")
       return tok_skip;
+    if (IdentifierStr == "struct")
+      return tok_struct;
+    if (IdentifierStr == "this")
+      return tok_this;
     return tok_identifier;
   }
 
-  if (isdigit(LastChar) || LastChar == '.') { // Number: [0-9.]+
+  if (isdigit(LastChar)) { 
+    // Number: [0-9.]+
     std::string NumStr;
     do {
       NumStr += LastChar;
@@ -90,6 +95,27 @@ int gettok() {
 
     NumVal = strtod(NumStr.c_str(), nullptr);
     return tok_number;
+  }
+  
+  // Check for decimal numbers starting with '.'
+  if (LastChar == '.') {
+    int NextChar = getchar();
+    if (isdigit(NextChar)) {
+      // It's a decimal number like .5
+      std::string NumStr = ".";
+      NumStr += NextChar;
+      LastChar = getchar();
+      while (isdigit(LastChar)) {
+        NumStr += LastChar;
+        LastChar = getchar();
+      }
+      NumVal = strtod(NumStr.c_str(), nullptr);
+      return tok_number;
+    } else {
+      // Not a number, put back the character and return '.'
+      ungetc(NextChar, stdin);
+      // Fall through to return '.' as a token
+    }
   }
 
   if (LastChar == '"') { // String literal: "..."

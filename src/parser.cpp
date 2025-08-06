@@ -1,6 +1,7 @@
 #include "parser.h"
 #include "lexer.h"
 #include <cstdio>
+#include <set>
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Function.h"
 
@@ -13,6 +14,9 @@ int getNextToken() { return CurTok = gettok(); }
 /// BinopPrecedence - This holds the precedence for each binary operator that is
 /// defined.
 std::map<std::string, int> BinopPrecedence;
+
+/// StructNames - Track struct names as valid types
+std::set<std::string> StructNames;
 
 /// GetTokPrecedence - Get the precedence of the pending binary operator token.
 int GetTokPrecedence() {
@@ -273,6 +277,9 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     return LogError("unknown token when expecting an expression");
   case tok_identifier:
     return ParseIdentifierExpr();
+  case tok_this:
+    getNextToken(); // consume 'this'
+    return std::make_unique<ThisExprAST>();
   case tok_number:
     return ParseNumberExpr();
   case tok_true:
@@ -407,7 +414,7 @@ std::unique_ptr<ExprAST> ParseExpression() {
   if (!LHS)
     return nullptr;
 
-  // Handle postfix operators (array indexing, increment, decrement)
+  // Handle postfix operators (array indexing, increment, decrement, member access)
   while (true) {
     if (CurTok == '[') {
       LHS = ParseArrayIndex(std::move(LHS));
@@ -418,6 +425,16 @@ std::unique_ptr<ExprAST> ParseExpression() {
       std::string OpStr = (CurTok == tok_inc) ? "++" : "--";
       getNextToken(); // eat the operator
       LHS = std::make_unique<UnaryExprAST>(OpStr, std::move(LHS), false);
+    } else if (CurTok == '.') {
+      // Member access
+      getNextToken(); // eat '.'
+      if (CurTok != tok_identifier) {
+        LogError("Expected member name after '.'");
+        return nullptr;
+      }
+      std::string MemberName = IdentifierStr;
+      getNextToken(); // eat member name
+      LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName);
     } else {
       break;
     }
@@ -1021,4 +1038,250 @@ bool ParseTypeIdentifier() {
     fprintf(stderr, "Error: Expected '(' or '=' after identifier in top-level declaration\n");
     return false;
   }
+}
+
+/// structdef ::= 'struct' identifier '{' (field | method)* '}'
+std::unique_ptr<StructAST> ParseStructDefinition() {
+  getNextToken(); // eat 'struct'
+  
+  // Skip newlines after 'struct'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse struct name
+  if (CurTok != tok_identifier) {
+    LogError("Expected struct name after 'struct'");
+    return nullptr;
+  }
+  
+  std::string StructName = IdentifierStr;
+  getNextToken(); // eat struct name
+  
+  // Skip newlines before '{'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  if (CurTok != '{') {
+    LogError("Expected '{' after struct name");
+    return nullptr;
+  }
+  
+  getNextToken(); // eat '{'
+  
+  // Skip newlines after '{'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  std::vector<std::unique_ptr<FieldAST>> Fields;
+  std::vector<std::unique_ptr<FunctionAST>> Methods;
+  
+  // Parse struct members
+  while (CurTok != '}' && CurTok != tok_eof) {
+    // Skip newlines
+    while (CurTok == tok_newline)
+      getNextToken();
+    
+    if (CurTok == '}')
+      break;
+    
+    // Check if this is a field or method
+    // We need to look ahead to distinguish between field declarations and methods
+    // Methods have the struct name as their identifier (constructor)
+    if (CurTok == tok_identifier && IdentifierStr == StructName) {
+      // This is a constructor
+      getNextToken(); // eat struct name
+      
+      if (CurTok != '(') {
+        LogError("Expected '(' after constructor name");
+        return nullptr;
+      }
+      
+      // Parse constructor as a function with void return type
+      getNextToken(); // eat '('
+      
+      std::vector<Parameter> Args;
+      while (CurTok != ')' && CurTok != tok_eof) {
+        // Parse parameter type
+        if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double &&
+            CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
+            CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
+            CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
+            CurTok != tok_schar && CurTok != tok_lchar &&
+            !(CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end())) {
+          LogError("Expected parameter type");
+          return nullptr;
+        }
+        
+        std::string ParamType = IdentifierStr;
+        getNextToken(); // eat type
+        
+        // Parse parameter name
+        if (CurTok != tok_identifier) {
+          LogError("Expected parameter name");
+          return nullptr;
+        }
+        
+        std::string ParamName = IdentifierStr;
+        getNextToken(); // eat name
+        
+        Args.push_back(Parameter(ParamType, ParamName));
+        
+        if (CurTok == ')') break;
+        
+        if (CurTok != ',') {
+          LogError("Expected ')' or ',' in parameter list");
+          return nullptr;
+        }
+        getNextToken(); // eat ','
+      }
+      
+      if (CurTok != ')') {
+        LogError("Expected ')' after parameters");
+        return nullptr;
+      }
+      getNextToken(); // eat ')'
+      
+      // Skip newlines before '{'
+      while (CurTok == tok_newline)
+        getNextToken();
+      
+      // Parse constructor body
+      if (CurTok != '{') {
+        LogError("Expected '{' after constructor declaration");
+        return nullptr;
+      }
+      
+      auto Body = ParseBlock();
+      if (!Body)
+        return nullptr;
+      
+      // Create constructor as a method with void return type
+      auto Proto = std::make_unique<PrototypeAST>("void", StructName, std::move(Args));
+      auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
+      Methods.push_back(std::move(Constructor));
+      
+    } else if (CurTok == tok_int || CurTok == tok_float || CurTok == tok_double ||
+               CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool || CurTok == tok_string ||
+               CurTok == tok_byte || CurTok == tok_short || CurTok == tok_long || CurTok == tok_sbyte ||
+               CurTok == tok_ushort || CurTok == tok_uint || CurTok == tok_ulong ||
+               CurTok == tok_schar || CurTok == tok_lchar || 
+               (CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end())) {
+      // This might be a field or a method
+      std::string Type = IdentifierStr;
+      getNextToken(); // eat type
+      
+      // Check for array type
+      if (CurTok == '[') {
+        getNextToken(); // eat [
+        if (CurTok != ']') {
+          LogError("Expected ']' after '[' in array type");
+          return nullptr;
+        }
+        getNextToken(); // eat ]
+        Type += "[]";
+      }
+      
+      if (CurTok != tok_identifier) {
+        LogError("Expected identifier after type");
+        return nullptr;
+      }
+      
+      std::string Name = IdentifierStr;
+      getNextToken(); // eat identifier
+      
+      // Skip newlines
+      while (CurTok == tok_newline)
+        getNextToken();
+      
+      // If we see '(', this is a method
+      if (CurTok == '(') {
+        // Parse method - similar to ParsePrototype but we already have the return type and name
+        getNextToken(); // eat '('
+        
+        std::vector<Parameter> Args;
+        while (CurTok != ')' && CurTok != tok_eof) {
+          // Parse parameter type
+          if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double &&
+              CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
+              CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
+              CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
+              CurTok != tok_schar && CurTok != tok_lchar &&
+              !(CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end())) {
+            LogError("Expected parameter type");
+            return nullptr;
+          }
+          
+          std::string ParamType = IdentifierStr;
+          getNextToken(); // eat type
+          
+          // Parse parameter name
+          if (CurTok != tok_identifier) {
+            LogError("Expected parameter name");
+            return nullptr;
+          }
+          
+          std::string ParamName = IdentifierStr;
+          getNextToken(); // eat name
+          
+          Args.push_back(Parameter(ParamType, ParamName));
+          
+          if (CurTok == ')') break;
+          
+          if (CurTok != ',') {
+            LogError("Expected ')' or ',' in parameter list");
+            return nullptr;
+          }
+          getNextToken(); // eat ','
+        }
+        
+        if (CurTok != ')') {
+          LogError("Expected ')' after parameters");
+          return nullptr;
+        }
+        getNextToken(); // eat ')'
+        
+        // Skip newlines before '{'
+        while (CurTok == tok_newline)
+          getNextToken();
+        
+        // Parse method body
+        if (CurTok != '{') {
+          LogError("Expected '{' after method declaration");
+          return nullptr;
+        }
+        
+        auto Body = ParseBlock();
+        if (!Body)
+          return nullptr;
+        
+        auto Proto = std::make_unique<PrototypeAST>(Type, Name, std::move(Args));
+        auto Method = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
+        Methods.push_back(std::move(Method));
+        
+      } else {
+        // This is a field - fields don't have initializers in structs
+        auto Field = std::make_unique<FieldAST>(Type, Name);
+        Fields.push_back(std::move(Field));
+      }
+    } else {
+      LogError("Expected field or method declaration in struct");
+      return nullptr;
+    }
+    
+    // Skip newlines
+    while (CurTok == tok_newline)
+      getNextToken();
+  }
+  
+  if (CurTok != '}') {
+    LogError("Expected '}' at end of struct definition");
+    return nullptr;
+  }
+  
+  getNextToken(); // eat '}'
+  
+  // Add struct name to the set of valid types
+  StructNames.insert(StructName);
+  
+  return std::make_unique<StructAST>(StructName, std::move(Fields), std::move(Methods));
 }

@@ -48,4 +48,8 @@ std::unique_ptr<SkipStmtAST> ParseSkipStatement();
 // Top-level parsing that can handle both variable declarations and function definitions
 bool ParseTypeIdentifier();
 
+// Struct parsing functions
+std::unique_ptr<StructAST> ParseStructDefinition();
+std::unique_ptr<FieldAST> ParseField();
+
 #endif // PARSER_H

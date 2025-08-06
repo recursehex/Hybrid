@@ -9,6 +9,7 @@ Hybrid is a statically-typed programming language with C-style syntax that compi
 - **Static typing** with automatic type inference for literals
 - **Modern control flow** including if-else, while loops with break/skip, and foreach
 - **Arrays** with literals and indexing
+- **Structs** with constructors and member access
 - **Interactive REPL** with live code compilation
 - **Cross-platform** support (macOS, Linux)
 
@@ -75,6 +76,21 @@ int sumOddNumbers(int[] nums) {
     }
     return sum
 }
+
+// Struct definition
+struct Point {
+    int x
+    int y
+    
+    Point(int x, int y) {
+        this.x = x
+        this.y = y
+    }
+}
+
+// Using structs
+Point p = Point(10, 20)
+int distance = p.x + p.y  // 30
 
 // Call the functions
 findMax(numbers, 5)    // Returns 5
@@ -222,8 +238,6 @@ Hybrid/
     - `free`
 - 128 bit base 10 floating point type
     - `decimal`
-- Type casting ✓
-    - `type:` (implemented with proper sign/zero extension)
 - Nullable types
     - `type?`
 - Reference types

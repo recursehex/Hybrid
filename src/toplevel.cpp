@@ -3,6 +3,7 @@
 #include "lexer.h"
 #include "ast.h"
 #include <cstdio>
+#include <set>
 
 // LLVM includes for module and context management
 #include "llvm/IR/LLVMContext.h"
@@ -89,6 +90,19 @@ void HandleUseStatement() {
   }
 }
 
+void HandleStructDefinition() {
+  if (auto StructAST = ParseStructDefinition()) {
+    if (auto StructType = StructAST->codegen()) {
+      fprintf(stderr, "Generated struct type:\n");
+      StructType->print(llvm::errs());
+      fprintf(stderr, "\n");
+    }
+  } else {
+    // Skip token for error recovery.
+    getNextToken();
+  }
+}
+
 
 /// top ::= definition | external | expression | variabledecl | foreachstmt | usestmt | ';' | '\n'
 void MainLoop() {
@@ -109,6 +123,9 @@ void MainLoop() {
       break;
     case tok_for:
       HandleForEachStatement();
+      break;
+    case tok_struct:
+      HandleStructDefinition();
       break;
     case tok_int:
     case tok_float:
@@ -133,9 +150,99 @@ void MainLoop() {
       }
       break;
     case tok_identifier:
-      // For C-style declarations, functions start with type keywords,
-      // so a bare identifier is likely an expression
-      HandleTopLevelExpression();
+      {
+        // Check if this identifier is a struct type
+        extern std::set<std::string> StructNames;
+        extern std::string IdentifierStr;
+        extern int CurTok;
+        
+        if (StructNames.find(IdentifierStr) != StructNames.end()) {
+          // It's a struct type, we need to look ahead to determine what it is
+          std::string structName = IdentifierStr;
+          getNextToken(); // consume the struct name
+          
+          if (CurTok == '(') {
+            // It's a struct constructor call - treat as expression
+            // We need to put the tokens back for expression parsing
+            // Since we can't easily "unget" tokens, we'll create a CallExprAST directly
+            getNextToken(); // eat '('
+            std::vector<std::unique_ptr<ExprAST>> Args;
+            if (CurTok != ')') {
+              while (true) {
+                if (auto Arg = ParseExpression())
+                  Args.push_back(std::move(Arg));
+                else {
+                  getNextToken(); // error recovery
+                  break;
+                }
+                
+                if (CurTok == ')')
+                  break;
+                  
+                if (CurTok != ',') {
+                  fprintf(stderr, "Error: Expected ')' or ',' in argument list\n");
+                  getNextToken(); // error recovery
+                  break;
+                }
+                getNextToken();
+              }
+            }
+            
+            if (CurTok == ')') {
+              getNextToken(); // eat ')'
+              
+              // Create and codegen the constructor call
+              auto Call = std::make_unique<CallExprAST>(structName, std::move(Args));
+              if (auto CallIR = Call->codegen()) {
+                fprintf(stderr, "Generated struct instantiation IR:\n");
+                CallIR->print(llvm::errs());
+                fprintf(stderr, "\n");
+              } else {
+                fprintf(stderr, "Error: Failed to generate struct instantiation\n");
+              }
+            }
+          } else {
+            // It's a variable declaration - we need to handle it properly
+            // The struct name has been consumed, current token should be the variable name
+            if (CurTok == tok_identifier) {
+              std::string varName = IdentifierStr;
+              getNextToken(); // eat variable name
+              
+              if (CurTok == '=') {
+                getNextToken(); // eat '='
+                auto Init = ParseExpression();
+                if (Init) {
+                  auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(structName, varName, std::move(Init));
+                  if (auto VarIR = VarDecl->codegen()) {
+                    fprintf(stderr, "Generated variable declaration IR:\n");
+                    VarIR->print(llvm::errs());
+                    fprintf(stderr, "\n");
+                  }
+                }
+              } else {
+                fprintf(stderr, "Error: Expected '=' after variable name (all variables must be initialized)\n");
+                getNextToken(); // error recovery
+              }
+            } else if (CurTok == '[') {
+              // Array type - put back the struct name processing
+              // This is getting complex, let's use the original ParseTypeIdentifier approach
+              // We need to restore the state
+              IdentifierStr = structName;
+              CurTok = tok_identifier;
+              if (!ParseTypeIdentifier()) {
+                getNextToken();
+              }
+            } else {
+              fprintf(stderr, "Error: Expected variable name or '(' after struct type '%s'\n", structName.c_str());
+              // Token already consumed, just continue
+            }
+          }
+        } else {
+          // For C-style declarations, functions start with type keywords,
+          // so a bare identifier is likely an expression
+          HandleTopLevelExpression();
+        }
+      }
       break;
     default:
       HandleTopLevelExpression();
