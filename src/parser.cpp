@@ -114,6 +114,9 @@ std::unique_ptr<ExprAST> ParseParenExpr() {
   return V;
 }
 
+// Forward declaration
+static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix();
+
 /// identifierexpr
 ///   ::= identifier
 ///   ::= identifier '(' expression* ')'
@@ -386,8 +389,8 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     
     getNextToken(); // eat binop
 
-    // Parse the primary expression after the binary operator.
-    auto RHS = ParsePrimary();
+    // Parse the primary expression (with postfix operators) after the binary operator.
+    auto RHS = ParsePrimaryWithPostfix();
     if (!RHS)
       return nullptr;
 
@@ -406,10 +409,8 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
   }
 }
 
-/// expression
-///   ::= primary binoprhs
-///
-std::unique_ptr<ExprAST> ParseExpression() {
+/// Parse primary expression and any postfix operators
+static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
   auto LHS = ParsePrimary();
   if (!LHS)
     return nullptr;
@@ -425,7 +426,7 @@ std::unique_ptr<ExprAST> ParseExpression() {
       std::string OpStr = (CurTok == tok_inc) ? "++" : "--";
       getNextToken(); // eat the operator
       LHS = std::make_unique<UnaryExprAST>(OpStr, std::move(LHS), false);
-    } else if (CurTok == '.') {
+    } else if (CurTok == tok_dot) {
       // Member access
       getNextToken(); // eat '.'
       if (CurTok != tok_identifier) {
@@ -439,6 +440,17 @@ std::unique_ptr<ExprAST> ParseExpression() {
       break;
     }
   }
+  
+  return LHS;
+}
+
+/// expression
+///   ::= primary binoprhs
+///
+std::unique_ptr<ExprAST> ParseExpression() {
+  auto LHS = ParsePrimaryWithPostfix();
+  if (!LHS)
+    return nullptr;
 
   return ParseBinOpRHS(0, std::move(LHS));
 }

@@ -341,6 +341,12 @@ int gettok() {
     LastChar = getchar();
     return tok_colon;
   }
+  
+  // Check for dot (member access).
+  if (LastChar == '.') {
+    LastChar = getchar();
+    return tok_dot;
+  }
 
   // Check for newline.
   if (LastChar == '\n' || LastChar == '\r') {
