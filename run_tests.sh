@@ -17,6 +17,11 @@ TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
 
+# Initialize command line option variables early to avoid unset variable errors
+VERBOSE_MODE=0
+FAILURES_ONLY=0
+TEST_PATTERN=""
+
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
 echo "==============================="
 
@@ -63,17 +68,22 @@ run_test() {
     
     # Check for error patterns in output
     local has_errors=0
-    if echo "$output" | grep -q "Error:"; then
+    if echo "$output" | grep -q "Error:" 2>/dev/null; then
         has_errors=1
-    elif echo "$output" | grep -q "Failed to generate"; then
+    fi
+    if echo "$output" | grep -q "Failed to generate" 2>/dev/null; then
         has_errors=1
-    elif echo "$output" | grep -q "Unknown function"; then
+    fi
+    if echo "$output" | grep -q "Unknown function" 2>/dev/null; then
         has_errors=1
-    elif echo "$output" | grep -q "Unknown variable"; then
+    fi
+    if echo "$output" | grep -q "Unknown variable" 2>/dev/null; then
         has_errors=1
-    elif echo "$output" | grep -q "invalid binary operator"; then
+    fi
+    if echo "$output" | grep -q "invalid binary operator" 2>/dev/null; then
         has_errors=1
-    elif echo "$output" | grep -q "Expected.*after"; then
+    fi
+    if echo "$output" | grep -q "Expected.*after" 2>/dev/null; then
         has_errors=1
     fi
     
@@ -84,19 +94,19 @@ run_test() {
     if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
         if [ $has_errors -eq 1 ] || [ $exit_code -ne 0 ]; then
             test_passed=1
-            ((PASSED_TESTS++))
+            PASSED_TESTS=$((PASSED_TESTS + 1))
         else
             test_passed=0
-            ((FAILED_TESTS++))
+            FAILED_TESTS=$((FAILED_TESTS + 1))
         fi
     else
         # Normal tests should not have errors
         if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
             test_passed=1
-            ((PASSED_TESTS++))
+            PASSED_TESTS=$((PASSED_TESTS + 1))
         else
             test_passed=0
-            ((FAILED_TESTS++))
+            FAILED_TESTS=$((FAILED_TESTS + 1))
         fi
     fi
     
@@ -128,7 +138,7 @@ run_test() {
         echo
     fi
     
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
 }
 
 # Function to run a test with visible output (for debugging)
@@ -146,17 +156,22 @@ run_test_verbose() {
         
         # Check for error patterns in output
         local has_errors=0
-        if echo "$output" | grep -q "Error:"; then
+        if echo "$output" | grep -q "Error:" 2>/dev/null; then
             has_errors=1
-        elif echo "$output" | grep -q "Failed to generate"; then
+        fi
+        if echo "$output" | grep -q "Failed to generate" 2>/dev/null; then
             has_errors=1
-        elif echo "$output" | grep -q "Unknown function"; then
+        fi
+        if echo "$output" | grep -q "Unknown function" 2>/dev/null; then
             has_errors=1
-        elif echo "$output" | grep -q "Unknown variable"; then
+        fi
+        if echo "$output" | grep -q "Unknown variable" 2>/dev/null; then
             has_errors=1
-        elif echo "$output" | grep -q "invalid binary operator"; then
+        fi
+        if echo "$output" | grep -q "invalid binary operator" 2>/dev/null; then
             has_errors=1
-        elif echo "$output" | grep -q "Expected.*after"; then
+        fi
+        if echo "$output" | grep -q "Expected.*after" 2>/dev/null; then
             has_errors=1
         fi
         
@@ -204,9 +219,7 @@ run_test_verbose() {
 }
 
 # Parse command line arguments
-VERBOSE_MODE=0
-FAILURES_ONLY=0
-TEST_PATTERN=""
+# (Variables already initialized at the top of the script)
 
 # Parse flags and patterns
 while [[ $# -gt 0 ]]; do
@@ -293,7 +306,7 @@ if [ $VERBOSE_MODE -eq 1 ]; then
     echo
     for test_file in $TEST_FILES; do
         run_test_verbose "$test_file"
-        ((TOTAL_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
         # For verbose mode, we need to check if the test passed or failed
         # Run it again silently to check the result
         output=$(./hybrid < "$test_file" 2>&1)
@@ -319,16 +332,16 @@ if [ $VERBOSE_MODE -eq 1 ]; then
         # Special case: tests that should fail (have "fail" in name)
         if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
             if [ $has_errors -eq 1 ] || [ $exit_code -ne 0 ]; then
-                ((PASSED_TESTS++))
+                PASSED_TESTS=$((PASSED_TESTS + 1))
             else
-                ((FAILED_TESTS++))
+                FAILED_TESTS=$((FAILED_TESTS + 1))
             fi
         else
             # Normal tests should not have errors
             if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
-                ((PASSED_TESTS++))
+                PASSED_TESTS=$((PASSED_TESTS + 1))
             else
-                ((FAILED_TESTS++))
+                FAILED_TESTS=$((FAILED_TESTS + 1))
             fi
         fi
     done
