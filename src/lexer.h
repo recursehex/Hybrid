@@ -2,6 +2,7 @@
 #define LEXER_H
 
 #include <string>
+#include <cstdint>
 
 // The lexer returns tokens [0-255] if it is an unknown character, otherwise one
 // of these for known things.
@@ -108,7 +109,7 @@ enum Token {
 extern std::string IdentifierStr; // Filled in if tok_identifier
 extern double NumVal;             // Filled in if tok_number
 extern std::string StringVal;     // Filled in if tok_string_literal
-extern char CharVal;              // Filled in if tok_char_literal
+extern uint16_t CharVal;          // Filled in if tok_char_literal
 
 // gettok - Return the next token from standard input.
 int gettok();

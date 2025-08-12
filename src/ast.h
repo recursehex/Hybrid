@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 // LLVM forward declarations
 namespace llvm {
@@ -212,13 +213,13 @@ public:
 
 /// CharExprAST - Expression class for character literals like 'a'.
 class CharExprAST : public ExprAST {
-  char Val;
+  uint16_t Val;
 
 public:
-  CharExprAST(char Val) : Val(Val) {}
+  CharExprAST(uint16_t Val) : Val(Val) {}
   
   llvm::Value *codegen() override;
-  char getValue() const { return Val; }
+  uint16_t getValue() const { return Val; }
 };
 
 /// ArrayExprAST - Expression class for array literals like [1, 2, 3].

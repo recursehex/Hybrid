@@ -136,11 +136,11 @@ Comprehensive documentation is available in the `docs/` directory:
 ## Language Overview
 
 ### Types
-- Basic primitives: `int` (32-bit), `float` (32-bit), `double` (64-bit), `char` (8-bit), `bool` (1-bit), `string` (pointer), `void`
+- Basic primitives: `int` (32-bit), `float` (32-bit), `double` (64-bit), `char` (16-bit), `bool` (1-bit), `string` (pointer), `void`
 - Sized integers: 
   - Unsigned: `byte` (8-bit), `ushort` (16-bit), `uint` (32-bit), `ulong` (64-bit)
   - Signed: `sbyte` (8-bit), `short` (16-bit), `long` (64-bit)
-- Character types: `schar` (8-bit), `lchar` (32-bit Unicode)
+- Character types: `char` (16-bit Unicode), `schar` (8-bit), `lchar` (32-bit Unicode)
 - Arrays: `int[]`, `float[]`, `byte[]`, etc.
 - All variables must be initialized at declaration
 - Strict type checking: no implicit conversions between different sized types
@@ -248,7 +248,7 @@ Hybrid/
     - `short` - 16 bit signed integer
     - `long` - 64 bit signed integer
     - `schar` - 8 bit character
-    - `lchar` - 32 bit character
+    - `lchar` - 32 bit Unicode character
 - Unsigned versions of integer types
     - `sbyte` - 8 bit signed (`byte` is unsigned)
     - `ushort` - 16 bit unsigned

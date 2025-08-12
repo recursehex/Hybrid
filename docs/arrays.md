@@ -220,7 +220,7 @@ Arrays are implemented as pointers to their first element:
 |-------------|-------------------|
 | `int[]` | `ptr` to `i32` |
 | `float[]` | `ptr` to `float` |
-| `char[]` | `ptr` to `i8` |
+| `char[]` | `ptr` to `i16` |
 | `bool[]` | `ptr` to `i1` |
 | `double[]` | `ptr` to `double` |
 | `string[]` | `ptr` to `ptr` |

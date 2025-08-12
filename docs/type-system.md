@@ -13,10 +13,10 @@ Hybrid uses a static type system with explicit type declarations. All variables 
 | Type | Description | LLVM Type | Example |
 |------|-------------|-----------|---------|
 | `int` | 32-bit signed integer | `i32` | `int x = 42` |
-| `float` | Single-precision floating point | `float` | `float pi = 3.14f` |
-| `double` | Double-precision floating point | `double` | `double e = 2.71828` |
-| `char` | 8-bit character | `i8` | `char ch = 'A'` |
-| `bool` | Boolean value | `i1` | `bool flag = true` |
+| `float` | 32-bit floating point | `float` | `float pi = 3.14f` |
+| `double` | 64-bit floating point | `double` | `double e = 2.71828` |
+| `char` | 16-bit Unicode character | `i16` | `char ch = 'A'` |
+| `bool` | 8-bit boolean value | `i1` | `bool flag = true` |
 | `void` | No value (functions only) | `void` | `void func() { }` |
 | `string` | String type | `ptr` | `string s = "hello"` |
 
@@ -32,7 +32,7 @@ Hybrid uses a static type system with explicit type declarations. All variables 
 | `long` | 64-bit signed integer | `i64` | -2^63 to 2^63-1 | `long l = 1000000000` |
 | `ulong` | 64-bit unsigned integer | `i64` | 0 to 2^64-1 | `ulong ul = 10000000000` |
 
-#### Character Types
+#### Sized Character Types
 
 | Type | Description | LLVM Type | Example |
 |------|-------------|-----------|---------|
@@ -192,7 +192,7 @@ Hybrid types map directly to LLVM types:
 | `sbyte` | `i8` | 8-bit signed integer |
 | `float` | `float` | 32-bit IEEE float |
 | `double` | `double` | 64-bit IEEE float |
-| `char` | `i8` | 8-bit character |
+| `char` | `i16` | 16-bit Unicode character |
 | `schar` | `i8` | 8-bit signed character |
 | `lchar` | `i32` | 32-bit Unicode character |
 | `bool` | `i1` | 1-bit integer |

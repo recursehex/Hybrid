@@ -5,7 +5,7 @@
 std::string IdentifierStr; // Filled in if tok_identifier
 double NumVal;             // Filled in if tok_number
 std::string StringVal;     // Filled in if tok_string_literal
-char CharVal;              // Filled in if tok_char_literal
+uint16_t CharVal;          // Filled in if tok_char_literal
 
 /// gettok - Return the next token from standard input.
 int gettok() {

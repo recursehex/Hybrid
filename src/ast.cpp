@@ -92,7 +92,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   else if (TypeStr == "double")
     return llvm::Type::getDoubleTy(*TheContext);
   else if (TypeStr == "char")
-    return llvm::Type::getInt8Ty(*TheContext);
+    return llvm::Type::getInt16Ty(*TheContext);
   else if (TypeStr == "bool")
     return llvm::Type::getInt1Ty(*TheContext);
   else if (TypeStr == "void")
@@ -192,7 +192,7 @@ llvm::Value *StringExprAST::codegen() {
 
 llvm::Value *CharExprAST::codegen() {
   setTypeName("char");
-  return llvm::ConstantInt::get(*TheContext, llvm::APInt(8, getValue()));
+  return llvm::ConstantInt::get(*TheContext, llvm::APInt(16, getValue()));
 }
 
 // Forward declaration for castToType
@@ -353,7 +353,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
           } else if (elemTypeStr == "float" || elemTypeStr == "double") {
             ElemType = llvm::Type::getDoubleTy(*TheContext);
           } else if (elemTypeStr == "char") {
-            ElemType = llvm::Type::getInt8Ty(*TheContext);
+            ElemType = llvm::Type::getInt16Ty(*TheContext);
           } else if (elemTypeStr == "bool") {
             ElemType = llvm::Type::getInt1Ty(*TheContext);
           }
