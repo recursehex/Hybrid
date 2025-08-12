@@ -191,8 +191,23 @@ llvm::Value *StringExprAST::codegen() {
 }
 
 llvm::Value *CharExprAST::codegen() {
-  setTypeName("char");
-  return llvm::ConstantInt::get(*TheContext, llvm::APInt(16, getValue()));
+  uint32_t val = getValue();
+  
+  // Determine the appropriate type based on the context
+  // For now, we'll use the default char (16-bit) unless the value requires more
+  if (val > 0xFFFF) {
+    // Value requires 32-bit (lchar)
+    setTypeName("lchar");
+    return llvm::ConstantInt::get(*TheContext, llvm::APInt(32, val));
+  } else if (val > 0xFF) {
+    // Value requires 16-bit (char)
+    setTypeName("char");
+    return llvm::ConstantInt::get(*TheContext, llvm::APInt(16, val));
+  } else {
+    // Value fits in 16-bit (default char)
+    setTypeName("char");
+    return llvm::ConstantInt::get(*TheContext, llvm::APInt(16, val));
+  }
 }
 
 // Forward declaration for castToType

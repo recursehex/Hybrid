@@ -5,7 +5,7 @@
 std::string IdentifierStr; // Filled in if tok_identifier
 double NumVal;             // Filled in if tok_number
 std::string StringVal;     // Filled in if tok_string_literal
-uint16_t CharVal;          // Filled in if tok_char_literal
+uint32_t CharVal;          // Filled in if tok_char_literal (supports full Unicode)
 
 /// gettok - Return the next token from standard input.
 int gettok() {
@@ -131,11 +131,40 @@ int gettok() {
           case 'r': StringVal += '\r'; break;
           case '\\': StringVal += '\\'; break;
           case '"': StringVal += '"'; break;
+          case 'u': { // Unicode escape: \uXXXX
+            uint32_t unicode = 0;
+            for (int i = 0; i < 4; i++) {
+              LastChar = getchar();
+              if (LastChar >= '0' && LastChar <= '9') {
+                unicode = (unicode << 4) | (LastChar - '0');
+              } else if (LastChar >= 'a' && LastChar <= 'f') {
+                unicode = (unicode << 4) | (LastChar - 'a' + 10);
+              } else if (LastChar >= 'A' && LastChar <= 'F') {
+                unicode = (unicode << 4) | (LastChar - 'A' + 10);
+              } else {
+                StringVal += '?'; // Invalid escape
+                goto string_continue;
+              }
+            }
+            // Convert Unicode codepoint to UTF-8
+            if (unicode <= 0x7F) {
+              StringVal += static_cast<char>(unicode);
+            } else if (unicode <= 0x7FF) {
+              StringVal += static_cast<char>(0xC0 | (unicode >> 6));
+              StringVal += static_cast<char>(0x80 | (unicode & 0x3F));
+            } else {
+              StringVal += static_cast<char>(0xE0 | (unicode >> 12));
+              StringVal += static_cast<char>(0x80 | ((unicode >> 6) & 0x3F));
+              StringVal += static_cast<char>(0x80 | (unicode & 0x3F));
+            }
+            break;
+          }
           default: StringVal += LastChar; break;
         }
       } else {
         StringVal += LastChar;
       }
+string_continue:
       LastChar = getchar();
     }
     if (LastChar == '"') {
@@ -160,12 +189,82 @@ int gettok() {
         case '\\': CharVal = '\\'; break;
         case '\'': CharVal = '\''; break;
         case '0': CharVal = '\0'; break;
+        case 'u': { // Unicode escape: \uXXXX (16-bit)
+          uint16_t unicode = 0;
+          for (int i = 0; i < 4; i++) {
+            LastChar = getchar();
+            if (LastChar >= '0' && LastChar <= '9') {
+              unicode = (unicode << 4) | (LastChar - '0');
+            } else if (LastChar >= 'a' && LastChar <= 'f') {
+              unicode = (unicode << 4) | (LastChar - 'a' + 10);
+            } else if (LastChar >= 'A' && LastChar <= 'F') {
+              unicode = (unicode << 4) | (LastChar - 'A' + 10);
+            } else {
+              // Invalid Unicode escape
+              CharVal = '?';
+              goto char_literal_end;
+            }
+          }
+          CharVal = unicode;
+          break;
+        }
+        case 'U': { // Unicode escape: \UXXXXXXXX (32-bit)
+          uint32_t unicode = 0;
+          for (int i = 0; i < 8; i++) {
+            LastChar = getchar();
+            if (LastChar >= '0' && LastChar <= '9') {
+              unicode = (unicode << 4) | (LastChar - '0');
+            } else if (LastChar >= 'a' && LastChar <= 'f') {
+              unicode = (unicode << 4) | (LastChar - 'a' + 10);
+            } else if (LastChar >= 'A' && LastChar <= 'F') {
+              unicode = (unicode << 4) | (LastChar - 'A' + 10);
+            } else {
+              // Invalid Unicode escape
+              CharVal = '?';
+              goto char_literal_end;
+            }
+          }
+          CharVal = unicode;
+          break;
+        }
         default: CharVal = LastChar; break;
       }
+    } else if ((LastChar & 0x80) != 0) {
+      // UTF-8 multi-byte character
+      uint32_t unicode = 0;
+      int bytes_to_read = 0;
+      
+      if ((LastChar & 0xE0) == 0xC0) { // 2-byte UTF-8
+        unicode = LastChar & 0x1F;
+        bytes_to_read = 1;
+      } else if ((LastChar & 0xF0) == 0xE0) { // 3-byte UTF-8
+        unicode = LastChar & 0x0F;
+        bytes_to_read = 2;
+      } else if ((LastChar & 0xF8) == 0xF0) { // 4-byte UTF-8
+        unicode = LastChar & 0x07;
+        bytes_to_read = 3;
+      } else {
+        // Invalid UTF-8 start byte
+        CharVal = '?';
+        goto char_literal_end;
+      }
+      
+      for (int i = 0; i < bytes_to_read; i++) {
+        LastChar = getchar();
+        if ((LastChar & 0xC0) != 0x80) {
+          // Invalid UTF-8 continuation byte
+          CharVal = '?';
+          goto char_literal_end;
+        }
+        unicode = (unicode << 6) | (LastChar & 0x3F);
+      }
+      
+      CharVal = unicode;
     } else {
       CharVal = LastChar;
     }
     
+char_literal_end:
     LastChar = getchar();
     if (LastChar == '\'') {
       LastChar = getchar(); // eat closing '

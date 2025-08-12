@@ -213,13 +213,13 @@ public:
 
 /// CharExprAST - Expression class for character literals like 'a'.
 class CharExprAST : public ExprAST {
-  uint16_t Val;
+  uint32_t Val;
 
 public:
-  CharExprAST(uint16_t Val) : Val(Val) {}
+  CharExprAST(uint32_t Val) : Val(Val) {}
   
   llvm::Value *codegen() override;
-  uint16_t getValue() const { return Val; }
+  uint32_t getValue() const { return Val; }
 };
 
 /// ArrayExprAST - Expression class for array literals like [1, 2, 3].

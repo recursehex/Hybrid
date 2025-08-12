@@ -109,7 +109,7 @@ enum Token {
 extern std::string IdentifierStr; // Filled in if tok_identifier
 extern double NumVal;             // Filled in if tok_number
 extern std::string StringVal;     // Filled in if tok_string_literal
-extern uint16_t CharVal;          // Filled in if tok_char_literal
+extern uint32_t CharVal;          // Filled in if tok_char_literal (supports full Unicode)
 
 // gettok - Return the next token from standard input.
 int gettok();
