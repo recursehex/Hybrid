@@ -187,12 +187,12 @@ The main entry point and initialization.
 
 ### 1. Lexical Analysis
 ```
-"int x = 42" → [tok_int, tok_identifier("x"), '=', tok_number(42)]
+"int x = 42" -> [tok_int, tok_identifier("x"), '=', tok_number(42)]
 ```
 
 ### 2. Parsing
 ```
-Tokens → ParseVariableDeclaration() → VariableDeclarationStmtAST
+Tokens -> ParseVariableDeclaration() -> VariableDeclarationStmtAST
 ```
 
 ### 3. AST Construction
@@ -261,29 +261,43 @@ store i32 42, ptr %x, align 4
 
 ## Build System
 
-### Makefile Structure
-```makefile
-# Automatic LLVM detection
-LLVM_CONFIG := $(shell which llvm-config || echo /opt/homebrew/opt/llvm/bin/llvm-config)
+### CMake Configuration
+The project uses CMake for building with automatic LLVM detection:
 
-# Compilation flags
-CXXFLAGS := $(shell $(LLVM_CONFIG) --cxxflags) -std=c++17
-LDFLAGS := $(shell $(LLVM_CONFIG) --ldflags --libs core)
+```cmake
+# Find LLVM package
+find_package(LLVM REQUIRED CONFIG)
+
+# Configure build types
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_BUILD_TYPE Release)
+
+# Link LLVM libraries
+llvm_map_components_to_libnames(llvm_libs core support)
+target_link_libraries(hybrid PRIVATE ${llvm_libs})
 ```
+
+### Build Presets
+CMakePresets.json provides pre-configured builds:
+- **debug**: Debug build with symbols
+- **release**: Optimized release build
+- **relwithdebinfo**: Release with debug info
 
 ### Source Organization
 ```
 Hybrid/
-├── src/           # Source files
+├── src/                # Source files
 │   ├── ast.cpp/h
 │   ├── lexer.cpp/h
 │   ├── parser.cpp/h
-│   ├── codegen.cpp/h
 │   ├── toplevel.cpp/h
-│   └── driver.cpp
-├── test/          # Test files
-├── docs/          # Documentation
-└── Makefile       # Build configuration
+│   ├── driver.cpp
+│   └── CMakeLists.txt
+├── test/               # Test files
+├── docs/               # Documentation
+├── CMakeLists.txt      # Main build config
+├── CMakePresets.json   # Build presets
+└── build.sh            # Build script
 ```
 
 ## Performance Considerations

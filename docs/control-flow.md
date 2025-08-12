@@ -11,13 +11,17 @@ Conditional branching using C-style if-else syntax.
 ### Basic Syntax
 
 ```c
-if condition {
+if condition
+{
     // statements
 }
 
-if condition {
+if condition
+{
     // if body
-} else {
+}
+else
+{
     // else body
 }
 ```
@@ -25,13 +29,20 @@ if condition {
 ### If-Else-If Chains
 
 ```c
-if score >= 90 {
+if score >= 90
+{
     return 4  // A grade
-} else if score >= 80 {
+}
+else if score >= 80
+{
     return 3  // B grade
-} else if score >= 70 {
+}
+else if score >= 70
+{
     return 2  // C grade
-} else {
+}
+else
+{
     return 1  // F grade
 }
 ```
@@ -41,7 +52,8 @@ if score >= 90 {
 Multiple if statements can be used consecutively, often with early returns:
 
 ```c
-int compare(int a, int b) {
+int compare(int a, int b)
+{
     if a == b { return 0 }
     if a < b { return -1 }
     if a > b { return 1 }
@@ -70,22 +82,26 @@ Complex conditions can be built using boolean operators:
 
 ```c
 // AND operator
-if x > 0 && x < 10 {
+if x > 0 && x < 10
+{
     return true
 }
 
 // OR operator
-if status == 1 || status == 2 {
+if status == 1 || status == 2
+{
     return active
 }
 
 // NOT operator
-if !finished {
+if !finished
+{
     return false
 }
 
 // Complex conditions
-if (x > 0 && y > 0) || override {
+if (x > 0 && y > 0) || override
+{
     return true
 }
 ```
@@ -105,7 +121,8 @@ While loops repeat a block of statements as long as a condition is true.
 ### Basic Syntax
 
 ```c
-while condition {
+while condition
+{
     // statements
 }
 ```
@@ -114,18 +131,23 @@ while condition {
 
 ```c
 // Simple countdown
-int countdown(int n) {
-    while n > 0 {
-        n = n - 1
+int countdown(int n)
+{
+    while n > 0
+    {
+        n--
     }
     return n
 }
 
 // Loop with complex condition
-int processItems(int count, bool active) {
-    while count > 0 && active {
-        count = count - 1
-        if count == 5 {
+int processItems(int count, bool active)
+{
+    while count > 0 && active
+    {
+        count--
+        if count == 5
+        {
             active = false
         }
     }
@@ -136,15 +158,17 @@ int processItems(int count, bool active) {
 ### Nested While Loops
 
 ```c
-int nestedExample() {
+int nestedExample()
+{
     int i = 0
-    while i < 3 {
+    while i < 3
+    {
         int j = 0
-        while j < 2 {
-            // Inner loop body
-            j = j + 1
+        while j < 2
+        {
+            j++
         }
-        i = i + 1
+        i++
     }
     return i
 }
@@ -155,15 +179,18 @@ int nestedExample() {
 While loops can be exited early using return statements:
 
 ```c
-int findFirst(int[] arr, int target) {
+int findFirst(int[] arr, int target)
+{
     int i = 0
-    while i < 10 {
-        if arr[i] == target {
+    while i < 10
+    {
+        if arr[i] == target
+        {
             return i  // Early exit
         }
-        i = i + 1
+        i++
     }
-    return -1  // Not found
+    return -1  // Required return
 }
 ```
 
@@ -173,28 +200,34 @@ The `break` statement provides another way to exit loops early:
 
 ```c
 // Basic break usage
-int countUntilZero(int[] values) {
+int countUntilZero(int[] values)
+{
     int count = 0
     int i = 0
-    while i < 100 {
-        if values[i] == 0 {
+    while i < 100
+    {
+        if values[i] == 0
+        {
             break  // Exit the loop
         }
-        count = count + 1
-        i = i + 1
+        count++
+        i++
     }
     return count
 }
 
 // Break in infinite loop
-int readUntilDone() {
+int readUntilDone()
+{
     int sum = 0
-    while true {
+    while true
+    {
         int value = getInput()
-        if value < 0 {
+        if value < 0
+        {
             break
         }
-        sum = sum + value
+        sum += value
     }
     return sum
 }
@@ -205,19 +238,23 @@ int readUntilDone() {
 Break only exits the innermost loop:
 
 ```c
-int nestedBreak() {
+int nestedBreak()
+{
     int total = 0
     int i = 0
-    while i < 10 {
+    while i < 10
+    {
         int j = 0
-        while j < 10 {
-            if j == 5 {
+        while j < 10
+        {
+            if j == 5
+            {
                 break  // Only exits inner loop
             }
-            total = total + 1
-            j = j + 1
+            total++
+            j++
         }
-        i = i + 1
+        i++
     }
     return total  // Returns 50 (10 * 5)
 }
@@ -229,30 +266,36 @@ The `skip` statement continues to the next iteration of a loop (similar to `cont
 
 ```c
 // Skip even numbers
-int sumOddNumbers(int[] values) {
+int sumOddNumbers(int[] values)
+{
     int sum = 0
     int i = 0
-    while i < 10 {
-        i = i + 1
-        if values[i] % 2 == 0 {
+    while i < 10
+    {
+        i++
+        if values[i] % 2 == 0
+        {
             skip  // Continue to next iteration
         }
-        sum = sum + values[i]
+        sum += values[i]
     }
     return sum
 }
 
 // Skip with multiple conditions
-int processFiltered(int[] data) {
+int processFiltered(int[] data)
+{
     int count = 0
     int i = 0
-    while i < 100 {
-        if data[i] < 0 || data[i] > 100 {
-            i = i + 1
+    while i < 100
+    {
+        if data[i] < 0 || data[i] > 100
+        {
+            i++
             skip
         }
-        count = count + 1
-        i = i + 1
+        count++
+        i++
     }
     return count
 }
@@ -263,19 +306,23 @@ int processFiltered(int[] data) {
 Like `break`, `skip` only affects the innermost loop:
 
 ```c
-int nestedSkip() {
+int nestedSkip()
+{
     int total = 0
     int i = 0
-    while i < 10 {
+    while i < 10
+    {
         int j = 0
-        while j < 10 {
-            j = j + 1
-            if j % 2 == 0 {
+        while j < 10
+        {
+            j++
+            if j % 2 == 0
+            {
                 skip  // Only skips inner loop iteration
             }
-            total = total + 1
+            total=+
         }
-        i = i + 1
+        i++
     }
     return total  // Returns 50 (10 * 5 odd numbers)
 }
@@ -296,7 +343,8 @@ Foreach loops iterate over collections with a typed loop variable.
 ### Basic Syntax
 
 ```c
-for type variable in collection {
+for type variable in collection
+{
     // loop body
 }
 ```
@@ -305,35 +353,44 @@ for type variable in collection {
 
 ```c
 // Iterate over an array
-for int num in numbers {
-    sum = sum + num
+int[] numbers = [1, 2, 3]
+for int num in numbers
+{
+    sum += num
 }
 
 // Process each element
-for float temp in temperatures {
-    if temp > 98.6 {
-        count = count + 1
+for float temp in temperatures
+{
+    if temp > 98.6
+    {
+        count++
     }
 }
 
 // Using break and skip in foreach
-for int value in data {
-    if value < 0 {
+for int value in data
+{
+    if value < 0
+    {
         break  // Exit the loop
     }
-    if value == 0 {
+    if value == 0
+    {
         skip   // Continue to next element
     }
-    result = result + value
+    result += value
 }
 ```
 
 ### Nested Foreach Loops
 
 ```c
-for int i in outerList {
-    for int j in innerList {
-        result = result + (i * j)
+for int i in outerList
+{
+    for int j in innerList
+    {
+        result += (i * j)
     }
 }
 ```

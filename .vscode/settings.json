@@ -49,5 +49,14 @@
         "vector": "cpp",
         "algorithm": "cpp"
     },
-    "C_Cpp.errorSquiggles": "enabled"
+    "C_Cpp.errorSquiggles": "enabled",
+    "cmake.configureSettings": {
+        "LLVM_DIR": "/opt/homebrew/opt/llvm/lib/cmake/llvm"
+    },
+    "cmake.useCMakePresets": "auto",
+    "cmake.defaultVariants": {
+        "buildType": {
+            "default": "debug"
+        }
+    }
 }

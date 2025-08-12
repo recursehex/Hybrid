@@ -51,7 +51,8 @@ int globalCount = 0
 string appName = "MyApp"
 
 // Function definitions
-int add(int x, int y) {
+int add(int x, int y)
+{
     return x + y
 }
 

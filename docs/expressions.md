@@ -393,8 +393,8 @@ double result = x + y  // x promoted to double, result is 7.5
 
 ### Promotion Rules
 
-1. `int` → `double` in mixed arithmetic
-2. All numeric types → `bool` in boolean context (0 is false, non-zero is true)
+1. `int` -> `double` in mixed arithmetic
+2. All numeric types -> `bool` in boolean context (0 is false, non-zero is true)
 3. Function arguments are promoted to match parameter types
 
 ## Expression Statements

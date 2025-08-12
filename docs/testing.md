@@ -129,12 +129,14 @@ A typical test file contains:
 // Test description comment
 
 // Test case 1: Basic functionality
-int basicTest() {
+int basicTest()
+{
     return 42
 }
 
 // Test case 2: Edge cases
-int edgeCase(int x) {
+int edgeCase(int x)
+{
     if x < 0 { return -1 }
     return x
 }
@@ -162,7 +164,8 @@ edgeCase(10)
 // Tests arithmetic operations and precedence
 
 // Test basic operations
-int testBasic() {
+int testBasic()
+{
     int a = 10 + 5    // 15
     int b = 20 - 8    // 12
     int c = 3 * 4     // 12
@@ -171,12 +174,14 @@ int testBasic() {
 }
 
 // Test operator precedence
-int testPrecedence() {
+int testPrecedence()
+{
     return 2 + 3 * 4  // Should be 14, not 20
 }
 
 // Test mixed types
-double testMixed() {
+double testMixed()
+{
     int x = 5
     double y = 2.5
     return x + y  // 7.5
@@ -196,7 +201,8 @@ For tests that should fail, include "fail" in the filename:
 // test/test_undefined_var_fail.hy
 // This test should fail with "Unknown variable" error
 
-int useUndefined() {
+int useUndefined()
+{
     return x  // Error: x is not defined
 }
 ```

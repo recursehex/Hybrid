@@ -329,7 +329,7 @@ Each loop pushes its blocks on entry and pops on exit, enabling proper nested lo
 
 The LLVM backend performs several optimizations:
 
-1. **Constant folding**: `2 + 3` → `5`
+1. **Constant folding**: `2 + 3` -> `5`
 2. **Dead code elimination**: Removes unreachable code
 3. **Common subexpression elimination**: Reuses computed values
 4. **Peephole optimizations**: Local instruction improvements

@@ -1,2 +1,30 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+out/
+install/
+
+# Build artifacts
 hybrid
 hybrid.dSYM/
+*.exe
+*.out
+*.app
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# IDE specific
+.vs/
+.vscode/browse.vc.db*
+.vscode/ipch/
+
+# OS specific
+.DS_Store
+Thumbs.db

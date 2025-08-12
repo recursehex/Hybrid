@@ -46,11 +46,14 @@ Array literals are comma-separated values enclosed in square brackets:
 ### Type Inference
 
 Array element types are inferred from the literals:
-- Whole numbers → `int[]`
-- Decimal numbers → `float[]` or `double[]`
-- Characters in single quotes → `char[]`
-- Booleans → `bool[]`
-- Strings in double quotes → `string[]`
+
+| Literal Type | Example | Inferred Array Type |
+|--------------|---------|-------------------|
+| Whole numbers | `[1, 2, 3]` | `int[]` |
+| Decimal numbers | `[1.5, 2.5]` | `float[]` or `double[]` |
+| Characters (single quotes) | `['a', 'b']` | `char[]` |
+| Booleans | `[true, false]` | `bool[]` |
+| Strings (double quotes) | `["hello", "world"]` | `string[]` |
 
 ## Array Indexing
 
@@ -92,16 +95,40 @@ scores[index] = 92
 
 ## Arrays in Functions
 
+### Pass-by-Reference Semantics
+
+Arrays are passed to functions **by reference**, not by copy. This means:
+
+- Functions receive a pointer to the original array, not a copy
+- Modifications inside the function affect the original array
+- No performance penalty for passing large arrays
+- Memory is shared between caller and function
+
+```c
+void modifyArray(int[] arr) {
+    arr[0] = 999  // This changes the original array
+}
+
+int main() {
+    int[] numbers = [1, 2, 3]
+    modifyArray(numbers)
+    // numbers[0] is now 999, not 1
+    return numbers[0]  // Returns 999
+}
+```
+
 ### Array Parameters
 
 Arrays can be passed as function parameters:
 
 ```c
-int sum(int[] arr) {
+int sum(int[] arr)
+{
     return arr[0] + arr[1] + arr[2]
 }
 
-float average(float[] values) {
+float average(float[] values)
+{
     float total = values[0] + values[1] + values[2]
     return total / 3.0
 }
@@ -109,17 +136,43 @@ float average(float[] values) {
 
 ### Using Arrays in Function Bodies
 
+Since arrays are passed by reference, functions can both read and modify array elements:
+
 ```c
-int findMax(int[] numbers) {
+int findMax(int[] numbers)
+{
     int max = numbers[0]
     int i = 1
-    while i < 5 {
-        if numbers[i] > max {
+    while i < 5
+    {
+        if numbers[i] > max
+        {
             max = numbers[i]
         }
-        i = i + 1
+        i++
     }
     return max
+}
+
+// This function modifies the array in-place
+void sortFirst3(int[] arr)
+{
+    // Simple bubble sort for first 3 elements
+    if arr[0] > arr[1] {
+        int temp = arr[0]
+        arr[0] = arr[1]
+        arr[1] = temp
+    }
+    if arr[1] > arr[2] {
+        int temp = arr[1]
+        arr[1] = arr[2]
+        arr[2] = temp
+    }
+    if arr[0] > arr[1] {
+        int temp = arr[0]
+        arr[0] = arr[1]
+        arr[1] = temp
+    }
 }
 ```
 
@@ -128,13 +181,15 @@ int findMax(int[] numbers) {
 Arrays can be declared as local variables within functions:
 
 ```c
-int processData() {
+int processData()
+{
     int[] local = [1, 2, 3, 4, 5]
     int sum = 0
     int i = 0
-    while i < 5 {
-        sum = sum + local[i]
-        i = i + 1
+    while i < 5
+    {
+        sum += local[i]
+        i++
     }
     return sum
 }
@@ -149,7 +204,8 @@ Arrays can be declared at global scope:
 int[] globalScores = [100, 95, 87, 92]
 float[] globalRates = [0.05, 0.10, 0.15]
 
-int getGlobalScore(int index) {
+int getGlobalScore(int index)
+{
     return globalScores[index]
 }
 ```
@@ -159,9 +215,15 @@ int getGlobalScore(int index) {
 ### Memory Representation
 
 Arrays are implemented as pointers to their first element:
-- `int[]` → `ptr` to `i32`
-- `float[]` → `ptr` to `float`
-- `char[]` → `ptr` to `i8`
+
+| Hybrid Type | LLVM Representation |
+|-------------|-------------------|
+| `int[]` | `ptr` to `i32` |
+| `float[]` | `ptr` to `float` |
+| `char[]` | `ptr` to `i8` |
+| `bool[]` | `ptr` to `i1` |
+| `double[]` | `ptr` to `double` |
+| `string[]` | `ptr` to `ptr` |
 
 ### Stack Allocation
 
@@ -211,17 +273,20 @@ Planned features include:
 ### Array Sum
 
 ```c
-int sumArray(int[] nums) {
+int sumArray(int[] nums)
+{
     int total = 0
     int i = 0
-    while i < 5 {
-        total = total + nums[i]
-        i = i + 1
+    while i < 5
+    {
+        total += nums[i]
+        i++
     }
     return total
 }
 
-int main() {
+int main()
+{
     int[] values = [10, 20, 30, 40, 50]
     return sumArray(values)  // Returns 150
 }
@@ -230,16 +295,19 @@ int main() {
 ### Array Manipulation
 
 ```c
-void doubleElements(int[] arr) {
+void doubleElements(int[] arr)
+{
     int i = 0
-    while i < 4 {
-        arr[i] = arr[i] * 2
-        i = i + 1
+    while i < 4
+    {
+        arr[i] *= 2
+        i++
     }
     return
 }
 
-int example() {
+int example()
+{
     int[] nums = [1, 2, 3, 4]
     doubleElements(nums)
     // nums is now [2, 4, 6, 8]

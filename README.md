@@ -1,13 +1,13 @@
 # Hybrid Programming Language
 
-Hybrid is a statically-typed programming language with C-style syntax that compiles to native code via LLVM. It combines familiar syntax with modern features and will feature automatic reference counting (ARC) for memory management.
+Hybrid is a modern, statically-typed programming language that interops with C++ while being memory-safe. It combines the familiar syntax of C/C++ with the high-level features and feel of Python. It will feature automatic reference counting (ARC) and support AOT and JIT compilation.
 
 ## Features
 
 - **C-style syntax** with explicit type declarations
 - **LLVM backend** for optimized native code generation
 - **Static typing** with automatic type inference for literals
-- **Modern control flow** including if-else, while loops with break/skip, and foreach
+- **Control flow** including if-else, while loops, and foreach
 - **Arrays** with literals and indexing
 - **Structs** with constructors and member access
 - **Interactive REPL** with live code compilation
@@ -15,25 +15,45 @@ Hybrid is a statically-typed programming language with C-style syntax that compi
 
 ## Quick Start
 
+### Prerequisites
+
 ```bash
 # Install LLVM
 brew install llvm        # macOS
 apt install llvm-dev     # Ubuntu/Debian
 
-# Build the compiler
-make
+# Install CMake (if not already installed)
+brew install cmake       # macOS
+apt install cmake        # Ubuntu/Debian
+```
+
+### Building
+
+```bash
+# Configure and build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# Or use the convenient build script
+./build.sh              # Release build
+./build.sh -d           # Debug build
+./build.sh -c -t        # Clean build and run tests
+
+# Or use CMake presets
+cmake --preset=release
+cmake --build --preset=release
 
 # Run interactive mode
-./hybrid
+./build/hybrid          # or ./build/release/hybrid with presets
 
 # Run a program
-./hybrid < program.hy
+./build/hybrid < program.hy
 
 # Run tests
 ./run_tests.sh
 ```
 
-## Example
+## Examples
 
 ```c
 // Function definition
@@ -156,30 +176,55 @@ for type var in collection { }
 - Increment/Decrement: `++`, `--` (both prefix and postfix)
 - Type Casting: `:` (e.g., `int: floatVar`, `byte: 100`)
 
-## Building from Source
+## Build System
+
+The project uses CMake for cross-platform builds.
 
 ### Prerequisites
 - LLVM 20+ with development headers
 - C++17 compatible compiler
-- Make build tool
+- CMake 3.20+
+
+### CMake Features
+- **Cross-platform support**: Works on macOS, Linux, and Windows
+- **Multiple build configurations**: Debug, Release, RelWithDebInfo
+- **Automatic LLVM detection**: Finds LLVM installation automatically
+- **IDE integration**: Generates compile_commands.json for clangd/VSCode
+- **CMake Presets**: Pre-configured builds for common scenarios
+- **Parallel builds**: Efficient multi-core compilation
+- **Installation support**: Standard CMake install targets
+- **Package generation**: CPack support for distribution
 
 ### Build Commands
-```bash
-make          # Build the compiler
-make clean    # Clean build artifacts
-```
 
-The Makefile automatically detects LLVM installation via `llvm-config`.
+```bash
+# Standard CMake
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+cmake --build build --target run-tests
+
+# Using CMake Presets
+cmake --preset=release
+cmake --build --preset=release
+
+# Using convenience script
+./build.sh              # Release build
+./build.sh -d           # Debug build
+./build.sh -c -t        # Clean build and run tests
+```
 
 ## Project Structure
 
 ```
 Hybrid/
-├── src/          # Compiler source code
-├── test/         # Test suite (.hy files)
-├── docs/         # Documentation
-├── Makefile      # Build configuration
-└── run_tests.sh  # Test runner script
+├── src/                # Compiler source code
+│   └── CMakeLists.txt  # Source build configuration
+├── test/               # Test suite (.hy files)
+├── docs/               # Documentation
+├── CMakeLists.txt      # Main build configuration
+├── CMakePresets.json   # Build presets for IDEs
+├── build.sh            # Convenience build script
+└── run_tests.sh        # Test runner script
 ```
 
 ## Current Status

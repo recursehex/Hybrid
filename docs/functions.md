@@ -9,7 +9,8 @@ Functions in Hybrid use C-style syntax with explicit return types and typed para
 ### Basic Syntax
 
 ```c
-return_type function_name(type1 param1, type2 param2) {
+returnType functionName(type1 param1, type2 param2)
+{
     // function body
     return expression
 }
@@ -24,9 +25,9 @@ int add(int x, int y) { return x + y }
 int square(int n) { return n * n }
 ```
 
-#### Multi-line Compact Style
+#### K&R Style
 
-Opening brace on the same line as the function signature:
+Opening brace on the same line as the function definition:
 
 ```c
 int multiply(int a, int b) {
@@ -35,9 +36,9 @@ int multiply(int a, int b) {
 }
 ```
 
-#### Allman Style
+#### Allman Style (preferred)
 
-Opening brace on a separate line:
+Opening brace on the next line:
 
 ```c
 int fibonacci(int n)
@@ -54,8 +55,8 @@ int fibonacci(int n)
 Parameters require both type and name:
 
 ```c
-int add(int x, int y) { return x + y }
-float divide(float numerator, float denominator) {
+float divide(float numerator, float denominator)
+{
     return numerator / denominator
 }
 ```
@@ -65,26 +66,24 @@ float divide(float numerator, float denominator) {
 Functions with no parameters use empty parentheses:
 
 ```c
-int getConstant() {
+int getAnswer()
+{
     return 42
-}
-
-void printMessage() {
-    // Implementation
-    return
 }
 ```
 
 ### Array Parameters
 
-Arrays can be passed as parameters:
+Arrays can be passed as parameters by reference:
 
 ```c
-int sumArray(int[] arr) {
+int sumArray(int[] arr)
+{
     return arr[0] + arr[1] + arr[2]
 }
 
-float average(float[] values) {
+float average(float[] values)
+{
     float sum = values[0] + values[1] + values[2]
     return sum / 3.0
 }
@@ -110,12 +109,14 @@ string returnString() { return "Hello" }
 Functions that don't return a value use `void`:
 
 ```c
-void printValue(int x) {
+void printValue(int x)
+{
     // Do something with x
     return  // Empty return for void functions
 }
 
-void noReturn() {
+void noReturn()
+{
     // Implicit return at end of void function
 }
 ```
@@ -129,7 +130,8 @@ Currently, functions cannot return arrays directly. Arrays must be passed as par
 ### Basic Return
 
 ```c
-int getValue() {
+int getValue()
+{
     return 10
 }
 ```
@@ -139,7 +141,8 @@ int getValue() {
 Void functions use empty return statements:
 
 ```c
-void doSomething() {
+void doSomething()
+{
     return  // No value
 }
 ```
@@ -149,7 +152,8 @@ void doSomething() {
 Functions can have multiple return points:
 
 ```c
-int absolute(int x) {
+int absolute(int x)
+{
     if x < 0 {
         return -x
     }
@@ -159,11 +163,12 @@ int absolute(int x) {
 
 ### Type Casting on Return
 
-Return values are automatically cast to match the function's declared return type:
+Valid return values are automatically cast to match the function's declared return type:
 
 ```c
-double mixedArithmetic(int x) {
-    return x / 2  // int result is cast to double
+double mixedArithmetic(int x)
+{
+    return x / 2  // int is implicitly cast to double
 }
 ```
 
@@ -174,7 +179,7 @@ External functions can be declared for linking with C libraries:
 ### Syntax
 
 ```c
-extern return_type function_name(type1 param1, type2 param2)
+extern returnType functionName(type1 param1, type2 param2)
 ```
 
 ### Examples
@@ -198,7 +203,8 @@ Once declared, external functions can be called like regular functions:
 ```c
 extern int printf(char format, int value)
 
-void printNumber(int n) {
+void printNumber(int n)
+{
     printf("%d\n", n)
     return
 }
@@ -252,7 +258,8 @@ Functions are visible from their point of declaration:
 
 ```c
 // Forward declaration not required
-int factorial(int n) {
+int factorial(int n)
+{
     if n <= 1 { return 1 }
     return n * factorial(n - 1)  // Recursive call OK
 }
@@ -263,7 +270,8 @@ int factorial(int n) {
 Variables declared within functions are local to that function:
 
 ```c
-int example() {
+int example()
+{
     int local = 10  // Only visible within example()
     return local
 }
@@ -276,7 +284,8 @@ Functions can access global variables:
 ```c
 int globalCounter = 0
 
-int incrementCounter() {
+int incrementCounter()
+{
     globalCounter = globalCounter + 1
     return globalCounter
 }

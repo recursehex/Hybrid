@@ -25,11 +25,26 @@ TEST_PATTERN=""
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
 echo "==============================="
 
-# Check if hybrid executable exists
-if [ ! -f "./hybrid" ]; then
-    echo -e "${RED}Error: hybrid executable not found. Run 'make' first.${NC}"
+# Check for hybrid executable - try multiple locations
+HYBRID_EXEC=""
+if [ -f "./build/hybrid" ]; then
+    HYBRID_EXEC="./build/hybrid"
+elif [ -f "./hybrid" ]; then
+    HYBRID_EXEC="./hybrid"
+elif [ -f "./cmake-build-debug/hybrid" ]; then
+    HYBRID_EXEC="./cmake-build-debug/hybrid"
+elif [ -f "./cmake-build-release/hybrid" ]; then
+    HYBRID_EXEC="./cmake-build-release/hybrid"
+else
+    echo -e "${RED}Error: hybrid executable not found.${NC}"
+    echo -e "${RED}Build the project first using:${NC}"
+    echo -e "${RED}  cmake -B build && cmake --build build${NC}"
+    echo -e "${RED}Or use the build script:${NC}"
+    echo -e "${RED}  ./build.sh${NC}"
     exit 1
 fi
+
+echo "Using executable: $HYBRID_EXEC"
 
 # Find all test files in test/ directory and subdirectories
 TEST_FILES=$(find test/ -name "*.hy" -type f | sort)
@@ -63,7 +78,7 @@ run_test() {
     # Run the test and capture both output and exit code
     local output
     local exit_code
-    output=$(./hybrid < "$test_file" 2>&1)
+    output=$($HYBRID_EXEC < "$test_file" 2>&1)
     exit_code=$?
     
     # Check for error patterns in output
@@ -151,7 +166,7 @@ run_test_verbose() {
         # Run test silently to check result
         local output
         local exit_code
-        output=$(./hybrid < "$test_file" 2>&1)
+        output=$($HYBRID_EXEC < "$test_file" 2>&1)
         exit_code=$?
         
         # Check for error patterns in output
@@ -207,7 +222,7 @@ run_test_verbose() {
     cat "$test_file"
     echo
     echo "Output:"
-    if ./hybrid < "$test_file"; then
+    if $HYBRID_EXEC < "$test_file"; then
         echo -e "${GREEN}✓ Test completed${NC}"
     else
         local exit_code=$?
@@ -309,7 +324,7 @@ if [ $VERBOSE_MODE -eq 1 ]; then
         TOTAL_TESTS=$((TOTAL_TESTS + 1))
         # For verbose mode, we need to check if the test passed or failed
         # Run it again silently to check the result
-        output=$(./hybrid < "$test_file" 2>&1)
+        output=$($HYBRID_EXEC < "$test_file" 2>&1)
         exit_code=$?
         test_name=$(basename "$test_file" .hy)
         
