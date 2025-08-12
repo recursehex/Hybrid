@@ -336,4 +336,4 @@ Contributions are welcome! Please ensure all tests pass and add tests for new fe
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License - see [LICENSE](LICENSE) file for details.
