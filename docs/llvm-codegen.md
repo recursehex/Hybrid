@@ -33,7 +33,7 @@ Hybrid types map directly to LLVM types:
 | `float` | `float` | 32-bit IEEE floating point |
 | `double` | `double` | 64-bit IEEE floating point |
 | `char` | `i8` | 8-bit integer |
-| `bool` | `i1` | 1-bit integer |
+| `bool` | `i8` | 8-bit integer |
 | `void` | `void` | No value |
 | `string` | `ptr` | Pointer to i8 |
 | `T[]` | `{ ptr, i32 }` | Struct with pointer and size |

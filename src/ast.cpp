@@ -94,7 +94,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   else if (TypeStr == "char")
     return llvm::Type::getInt16Ty(*TheContext);
   else if (TypeStr == "bool")
-    return llvm::Type::getInt1Ty(*TheContext);
+    return llvm::Type::getInt8Ty(*TheContext);
   else if (TypeStr == "void")
     return llvm::Type::getVoidTy(*TheContext);
   else if (TypeStr == "string")
@@ -159,6 +159,7 @@ void ForEachStmtAST::print() const {
 // Expression Code Generation
 //===----------------------------------------------------------------------===//
 
+// Generate code for number expressions
 llvm::Value *NumberExprAST::codegen() {
   // Check if the number is a whole number that could be an integer
   double val = getValue();
@@ -173,23 +174,27 @@ llvm::Value *NumberExprAST::codegen() {
   }
 }
 
+// Generate code for boolean expressions
 llvm::Value *BoolExprAST::codegen() {
   setTypeName("bool");
-  return llvm::ConstantInt::get(*TheContext, llvm::APInt(1, getValue() ? 1 : 0));
+  return llvm::ConstantInt::get(*TheContext, llvm::APInt(8, getValue() ? 1 : 0));
 }
 
+// Generate code for null expressions
 llvm::Value *NullExprAST::codegen() {
   // Create a null pointer for string type (char*)
   llvm::Type *StringType = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
   return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(StringType));
 }
 
+// Generate code for string literals
 llvm::Value *StringExprAST::codegen() {
   // Create a global string constant
   setTypeName("string");
   return Builder->CreateGlobalString(getValue(), "str");
 }
 
+// Generate code for character literals
 llvm::Value *CharExprAST::codegen() {
   uint32_t val = getValue();
   
@@ -236,6 +241,7 @@ bool areTypesCompatible(llvm::Type* type1, llvm::Type* type2) {
   return false;
 }
 
+// Generate code for array literals
 llvm::Value *ArrayExprAST::codegen() {
   // Get the element type
   llvm::Type *ElemType = getTypeFromString(getElementType());
@@ -283,6 +289,7 @@ llvm::Value *ArrayExprAST::codegen() {
   return Builder->CreateLoad(ArrayStructType, ArrayStruct, "arrayStructVal");
 }
 
+// Generate code for array indexing
 llvm::Value *ArrayIndexExprAST::codegen() {
   // Generate code for the array expression
   llvm::Value *ArrayVal = getArray()->codegen();
@@ -370,7 +377,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
           } else if (elemTypeStr == "char") {
             ElemType = llvm::Type::getInt16Ty(*TheContext);
           } else if (elemTypeStr == "bool") {
-            ElemType = llvm::Type::getInt1Ty(*TheContext);
+            ElemType = llvm::Type::getInt8Ty(*TheContext);
           }
         }
       }
@@ -389,6 +396,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
 }
 
+// Variable pointer code generation for increment/decrement
 llvm::Value *VariableExprAST::codegen_ptr() {
   llvm::Value *V = NamedValues[getName()];
   if (V) return V;
@@ -399,6 +407,7 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   return LogErrorV("Unknown variable name for increment/decrement");
 }
 
+// Array index pointer code generation for increment/decrement
 llvm::Value *ArrayIndexExprAST::codegen_ptr() {
   llvm::Value *ArrayVal = getArray()->codegen();
   if (!ArrayVal)
@@ -418,6 +427,7 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
     }
   }
 
+  // Extract the pointer from the array struct
   llvm::Value *ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayptr");
   
   // For now, we'll determine the element type based on the array expression type
@@ -439,6 +449,7 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
   return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
 }
 
+// Generate code for variable expressions
 llvm::Value *VariableExprAST::codegen() {
   // First look this variable up in the local function scope
   llvm::Value *V = NamedValues[getName()];
@@ -664,6 +675,7 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
   return {L, R};
 }
 
+// Generate code for binary expressions like +, -, *, /, <, >
 llvm::Value *BinaryExprAST::codegen() {
   llvm::Value *L = getLHS()->codegen();
   llvm::Value *R = getRHS()->codegen();
@@ -729,8 +741,8 @@ llvm::Value *BinaryExprAST::codegen() {
       } else {
         L = Builder->CreateICmpSLT(L, R, "cmptmp");
       }
-      // Return the boolean result as i1
-      return L;
+      // Zero-extend i1 to i8 for bool type
+      return Builder->CreateZExt(L, llvm::Type::getInt8Ty(*TheContext), "booltmp");
     case '>':
       setTypeName("bool");
       if (isFloat) {
@@ -738,8 +750,8 @@ llvm::Value *BinaryExprAST::codegen() {
       } else {
         L = Builder->CreateICmpSGT(L, R, "cmptmp");
       }
-      // Return the boolean result as i1
-      return L;
+      // Zero-extend i1 to i8 for bool type
+      return Builder->CreateZExt(L, llvm::Type::getInt8Ty(*TheContext), "booltmp");
     case '=':
       // Assignment operator - LHS must be a variable or array element
       if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
@@ -854,28 +866,36 @@ llvm::Value *BinaryExprAST::codegen() {
   // Handle multi-character operators
   if (Op == "==") {
     setTypeName("bool");
+    llvm::Value *Cmp;
     if (isFloat)
-      return Builder->CreateFCmpOEQ(L, R, "eqtmp");
+      Cmp = Builder->CreateFCmpOEQ(L, R, "eqtmp");
     else
-      return Builder->CreateICmpEQ(L, R, "eqtmp");
+      Cmp = Builder->CreateICmpEQ(L, R, "eqtmp");
+    return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "!=") {
     setTypeName("bool");
+    llvm::Value *Cmp;
     if (isFloat)
-      return Builder->CreateFCmpONE(L, R, "netmp");
+      Cmp = Builder->CreateFCmpONE(L, R, "netmp");
     else
-      return Builder->CreateICmpNE(L, R, "netmp");
+      Cmp = Builder->CreateICmpNE(L, R, "netmp");
+    return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "<=") {
     setTypeName("bool");
+    llvm::Value *Cmp;
     if (isFloat)
-      return Builder->CreateFCmpOLE(L, R, "letmp");
+      Cmp = Builder->CreateFCmpOLE(L, R, "letmp");
     else
-      return Builder->CreateICmpSLE(L, R, "letmp");
+      Cmp = Builder->CreateICmpSLE(L, R, "letmp");
+    return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == ">=") {
     setTypeName("bool");
+    llvm::Value *Cmp;
     if (isFloat)
-      return Builder->CreateFCmpOGE(L, R, "getmp");
+      Cmp = Builder->CreateFCmpOGE(L, R, "getmp");
     else
-      return Builder->CreateICmpSGE(L, R, "getmp");
+      Cmp = Builder->CreateICmpSGE(L, R, "getmp");
+    return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "+=" || Op == "-=" || Op == "*=" || Op == "/=" || Op == "%=") {
     // Compound assignment operators: a += b is equivalent to a = a + b
     if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
@@ -1051,37 +1071,51 @@ llvm::Value *BinaryExprAST::codegen() {
       return LogErrorV("destination of compound assignment must be a variable or array element");
     }
   } else if (Op == "&&") {
-    // Convert operands to booleans if needed
-    if (!L->getType()->isIntegerTy(1)) {
+    // Convert operands to i1 booleans if needed
+    if (L->getType()->isIntegerTy(8)) {
+      // Truncate i8 bool to i1
+      L = Builder->CreateTrunc(L, llvm::Type::getInt1Ty(*TheContext), "tobool");
+    } else if (!L->getType()->isIntegerTy(1)) {
       if (L->getType()->isFloatingPointTy())
         L = Builder->CreateFCmpONE(L, llvm::ConstantFP::get(L->getType(), 0.0), "tobool");
       else if (L->getType()->isIntegerTy())
         L = Builder->CreateICmpNE(L, llvm::ConstantInt::get(L->getType(), 0), "tobool");
     }
-    if (!R->getType()->isIntegerTy(1)) {
+    if (R->getType()->isIntegerTy(8)) {
+      // Truncate i8 bool to i1
+      R = Builder->CreateTrunc(R, llvm::Type::getInt1Ty(*TheContext), "tobool");
+    } else if (!R->getType()->isIntegerTy(1)) {
       if (R->getType()->isFloatingPointTy())
         R = Builder->CreateFCmpONE(R, llvm::ConstantFP::get(R->getType(), 0.0), "tobool");
       else if (R->getType()->isIntegerTy())
         R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
     }
     setTypeName("bool");
-    return Builder->CreateAnd(L, R, "andtmp");
+    llvm::Value *Result = Builder->CreateAnd(L, R, "andtmp");
+    return Builder->CreateZExt(Result, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "||") {
-    // Convert operands to booleans if needed
-    if (!L->getType()->isIntegerTy(1)) {
+    // Convert operands to i1 booleans if needed
+    if (L->getType()->isIntegerTy(8)) {
+      // Truncate i8 bool to i1
+      L = Builder->CreateTrunc(L, llvm::Type::getInt1Ty(*TheContext), "tobool");
+    } else if (!L->getType()->isIntegerTy(1)) {
       if (L->getType()->isFloatingPointTy())
         L = Builder->CreateFCmpONE(L, llvm::ConstantFP::get(L->getType(), 0.0), "tobool");
       else if (L->getType()->isIntegerTy())
         L = Builder->CreateICmpNE(L, llvm::ConstantInt::get(L->getType(), 0), "tobool");
     }
-    if (!R->getType()->isIntegerTy(1)) {
+    if (R->getType()->isIntegerTy(8)) {
+      // Truncate i8 bool to i1
+      R = Builder->CreateTrunc(R, llvm::Type::getInt1Ty(*TheContext), "tobool");
+    } else if (!R->getType()->isIntegerTy(1)) {
       if (R->getType()->isFloatingPointTy())
         R = Builder->CreateFCmpONE(R, llvm::ConstantFP::get(R->getType(), 0.0), "tobool");
       else if (R->getType()->isIntegerTy())
         R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
     }
     setTypeName("bool");
-    return Builder->CreateOr(L, R, "ortmp");
+    llvm::Value *Result = Builder->CreateOr(L, R, "ortmp");
+    return Builder->CreateZExt(Result, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "&") {
     // Bitwise AND - only works on integers
     if (isFloat)
@@ -1246,6 +1280,7 @@ llvm::Value *BinaryExprAST::codegen() {
   return LogErrorV("invalid binary operator");
 }
 
+// Generate code for unary expressions like -, !, ++, --
 llvm::Value *UnaryExprAST::codegen() {
   if (Op == "++" || Op == "--") {
     llvm::Value *Ptr = Operand->codegen_ptr();
@@ -1294,12 +1329,19 @@ llvm::Value *UnaryExprAST::codegen() {
   if (Op == "-") {
     return Builder->CreateNeg(OperandV, "negtmp");
   } else if (Op == "!") {
+    // For bool type (i8), truncate to i1, apply NOT, then zero-extend back to i8
+    if (OperandV->getType()->isIntegerTy(8)) {
+      llvm::Value *Truncated = Builder->CreateTrunc(OperandV, llvm::Type::getInt1Ty(*TheContext), "tobool");
+      llvm::Value *Negated = Builder->CreateNot(Truncated, "nottmp");
+      return Builder->CreateZExt(Negated, llvm::Type::getInt8Ty(*TheContext), "booltmp");
+    }
     return Builder->CreateNot(OperandV, "nottmp");
   }
 
   return LogErrorV("invalid unary operator");
 }
 
+// Generate code for type casting expressions
 llvm::Value *CastExprAST::codegen() {
   // Get the operand value
   llvm::Value *OperandV = getOperand()->codegen();
@@ -1373,6 +1415,7 @@ llvm::Value *CastExprAST::codegen() {
   return LogErrorV("Invalid cast between incompatible types");
 }
 
+// Generate code for function calls, including struct constructors
 llvm::Value *CallExprAST::codegen() {
   // Check if this is a struct constructor call
   if (StructTypes.find(getCallee()) != StructTypes.end()) {
@@ -1433,6 +1476,7 @@ llvm::Value *CallExprAST::codegen() {
 // Statement Code Generation
 //===----------------------------------------------------------------------===//
 
+// Generate code for return statements
 llvm::Value *ReturnStmtAST::codegen() {
   if (getReturnValue()) {
     llvm::Value *Val = getReturnValue()->codegen();
@@ -1446,8 +1490,10 @@ llvm::Value *ReturnStmtAST::codegen() {
   return llvm::Constant::getNullValue(llvm::Type::getDoubleTy(*TheContext));
 }
 
+// Generate code for block statements
 llvm::Value *BlockStmtAST::codegen() {
   llvm::Value *Last = nullptr;
+  // Generate code for each statement in the block
   for (auto &Stmt : getStatements()) {
     Last = Stmt->codegen();
     if (!Last)
@@ -1555,11 +1601,13 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   }
 }
 
+// Generate code for expression statements
 llvm::Value *ExpressionStmtAST::codegen() {
   // Just generate code for the expression
   return getExpression()->codegen();
 }
 
+// Generate code for for each statements
 llvm::Value *ForEachStmtAST::codegen() {
   // Get the collection (array) to iterate over
   llvm::Value *CollectionVal = Collection->codegen();
@@ -1692,13 +1740,18 @@ llvm::Value *ForEachStmtAST::codegen() {
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
+// Generate code for if statements
 llvm::Value *IfStmtAST::codegen() {
   llvm::Value *CondV = getCondition()->codegen();
   if (!CondV)
     return nullptr;
   
-  // Convert condition to a bool
-  if (!CondV->getType()->isIntegerTy(1)) {
+  // Convert condition to i1 bool
+  if (CondV->getType()->isIntegerTy(8)) {
+    // For i8 bool, compare with 0 (any non-zero is true)
+    CondV = Builder->CreateICmpNE(CondV, 
+      llvm::ConstantInt::get(CondV->getType(), 0), "ifcond");
+  } else if (!CondV->getType()->isIntegerTy(1)) {
     if (CondV->getType()->isFloatingPointTy()) {
       // For floating point, compare with 0.0
       CondV = Builder->CreateFCmpONE(CondV, 
@@ -1762,6 +1815,7 @@ llvm::Value *IfStmtAST::codegen() {
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
+// Generate code for while statements
 llvm::Value *WhileStmtAST::codegen() {
   llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
   
@@ -1781,8 +1835,12 @@ llvm::Value *WhileStmtAST::codegen() {
   if (!CondV)
     return nullptr;
   
-  // Convert condition to a bool
-  if (!CondV->getType()->isIntegerTy(1)) {
+  // Convert condition to i1 bool
+  if (CondV->getType()->isIntegerTy(8)) {
+    // For i8 bool, compare with 0 (any non-zero is true)
+    CondV = Builder->CreateICmpNE(CondV, 
+      llvm::ConstantInt::get(CondV->getType(), 0), "whilecond");
+  } else if (!CondV->getType()->isIntegerTy(1)) {
     if (CondV->getType()->isFloatingPointTy()) {
       // For floating point, compare with 0.0
       CondV = Builder->CreateFCmpONE(CondV, 
@@ -1882,6 +1940,7 @@ llvm::Value *SkipStmtAST::codegen() {
 // Function and Prototype Code Generation
 //===----------------------------------------------------------------------===//
 
+// Generate code for function prototypes
 llvm::Function *PrototypeAST::codegen() {
   // Convert parameter types
   std::vector<llvm::Type*> ParamTypes;
@@ -1911,6 +1970,7 @@ llvm::Function *PrototypeAST::codegen() {
   return F;
 }
 
+// Generate code for function definitions
 llvm::Function *FunctionAST::codegen() {
   // First, check for an existing function from a previous 'extern' declaration
   llvm::Function *TheFunction = TheModule->getFunction(getProto()->getName());
@@ -1977,6 +2037,7 @@ llvm::Function *FunctionAST::codegen() {
 // Struct Code Generation
 //===----------------------------------------------------------------------===//
 
+// Generate code for struct definitions
 llvm::Type *StructAST::codegen() {
   // Check if this struct type already exists
   if (StructTypes.find(Name) != StructTypes.end()) {
@@ -2090,6 +2151,7 @@ llvm::Type *StructAST::codegen() {
   return StructType;
 }
 
+// Generate code for member access expressions
 llvm::Value *MemberAccessExprAST::codegen() {
   // Get the type name of the object BEFORE codegen (might be empty for nested access)
   std::string ObjectTypeNameBefore = Object->getTypeName();
@@ -2213,6 +2275,7 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
   return Builder->CreateGEP(StructIt->second, ObjectPtr, Indices, MemberName + "_ptr");
 }
 
+// Generate code for 'this' expressions
 llvm::Value *ThisExprAST::codegen() {
   // Look up 'this' in the named values
   auto It = NamedValues.find("this");
@@ -2229,6 +2292,7 @@ llvm::Value *ThisExprAST::codegen() {
   return It->second;
 }
 
+// Generate pointer code for 'this' expressions
 llvm::Value *ThisExprAST::codegen_ptr() {
   // 'this' is already a pointer
   return codegen();

@@ -16,7 +16,7 @@ Hybrid uses a static type system with explicit type declarations. All variables 
 | `float` | 32-bit floating point | `float` | `float pi = 3.14f` |
 | `double` | 64-bit floating point | `double` | `double e = 2.71828` |
 | `char` | 16-bit Unicode character | `i16` | `char ch = 'A'` |
-| `bool` | 8-bit boolean value | `i1` | `bool flag = true` |
+| `bool` | 8-bit boolean value | `i8` | `bool flag = true` |
 | `void` | No value (functions only) | `void` | `void func() { }` |
 | `string` | String type | `ptr` | `string s = "hello"` |
 
@@ -195,7 +195,7 @@ Hybrid types map directly to LLVM types:
 | `char` | `i16` | 16-bit Unicode character |
 | `schar` | `i8` | 8-bit signed character |
 | `lchar` | `i32` | 32-bit Unicode character |
-| `bool` | `i1` | 1-bit integer |
+| `bool` | `i8` | 8-bit integer |
 | `void` | `void` | No value |
 | `string` | `ptr` | Pointer to i8 |
 | `T[]` | `struct {ptr, i32}` | Array struct with pointer and size |

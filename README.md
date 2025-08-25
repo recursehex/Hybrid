@@ -136,7 +136,7 @@ Comprehensive documentation is available in the `docs/` directory:
 ## Language Overview
 
 ### Types
-- Basic primitives: `int` (32-bit), `float` (32-bit), `double` (64-bit), `char` (16-bit), `bool` (1-bit), `string` (pointer), `void`
+- Basic primitives: `int` (32-bit), `float` (32-bit), `double` (64-bit), `char` (16-bit), `bool` (8-bit), `string` (pointer), `void`
 - Sized integers: 
   - Unsigned: `byte` (8-bit), `ushort` (16-bit), `uint` (32-bit), `ulong` (64-bit)
   - Signed: `sbyte` (8-bit), `short` (16-bit), `long` (64-bit)
