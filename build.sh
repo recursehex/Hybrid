@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Hybrid Compiler Build Script
-# Provides convenient build commands for CMake
+# Provides build commands for CMake
 
 set -e
 

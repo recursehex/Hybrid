@@ -109,6 +109,33 @@ public:
   llvm::Value *codegen() override;
 };
 
+/// ForLoopStmtAST - Statement class for C-style for loops with 'to' syntax.
+class ForLoopStmtAST : public StmtAST {
+  std::string Type;
+  std::string VarName;
+  std::unique_ptr<ExprAST> InitExpr;
+  std::unique_ptr<ExprAST> LimitExpr;  // Either a limit value or null if using CondExpr
+  std::unique_ptr<ExprAST> CondExpr;   // Optional condition expression (for i < size)
+  std::unique_ptr<ExprAST> StepExpr;   // Optional step expression
+  char StepOp;  // Step operation: '+' (default), '*', '/', '%', '-'
+  std::unique_ptr<BlockStmtAST> Body;
+
+public:
+  ForLoopStmtAST(const std::string &Type, const std::string &VarName,
+                 std::unique_ptr<ExprAST> InitExpr,
+                 std::unique_ptr<ExprAST> LimitExpr,
+                 std::unique_ptr<BlockStmtAST> Body,
+                 std::unique_ptr<ExprAST> StepExpr = nullptr,
+                 char StepOp = '+',
+                 std::unique_ptr<ExprAST> CondExpr = nullptr)
+      : Type(Type), VarName(VarName), InitExpr(std::move(InitExpr)),
+        LimitExpr(std::move(LimitExpr)), CondExpr(std::move(CondExpr)),
+        StepExpr(std::move(StepExpr)), StepOp(StepOp), Body(std::move(Body)) {}
+  
+  void print() const;
+  llvm::Value *codegen() override;
+};
+
 /// IfStmtAST - Statement class for if-else statements.
 class IfStmtAST : public StmtAST {
   std::unique_ptr<ExprAST> Condition;

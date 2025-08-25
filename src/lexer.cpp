@@ -30,6 +30,10 @@ int gettok() {
       return tok_for;
     if (IdentifierStr == "in")
       return tok_in;
+    if (IdentifierStr == "to")
+      return tok_to;
+    if (IdentifierStr == "by")
+      return tok_by;
     if (IdentifierStr == "int")
       return tok_int;
     if (IdentifierStr == "float")

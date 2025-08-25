@@ -17,93 +17,95 @@ enum Token {
   // control flow
   tok_for = -5,
   tok_in = -6,
-  tok_if = -7,
-  tok_else = -8,
-  tok_while = -9,
-  tok_break = -10,
-  tok_skip = -11,
-  tok_struct = -94,
-  tok_this = -95,
+  tok_to = -7,
+  tok_by = -8,
+  tok_if = -9,
+  tok_else = -10,
+  tok_while = -11,
+  tok_break = -12,
+  tok_skip = -13,
+  tok_struct = -14,
+  tok_this = -15,
 
   // types
-  tok_int = -12,
-  tok_float = -13,
-  tok_double = -14,
-  tok_char = -15,
-  tok_void = -16,
-  tok_bool = -17,
-  tok_string = -18,
+  tok_int = -16,
+  tok_float = -17,
+  tok_double = -18,
+  tok_char = -19,
+  tok_void = -20,
+  tok_bool = -21,
+  tok_string = -22,
   
   // sized integer types
-  tok_byte = -85,
-  tok_short = -86,
-  tok_long = -87,
-  tok_sbyte = -88,
-  tok_ushort = -89,
-  tok_uint = -90,
-  tok_ulong = -91,
+  tok_byte = -23,
+  tok_short = -24,
+  tok_long = -25,
+  tok_sbyte = -26,
+  tok_ushort = -27,
+  tok_uint = -28,
+  tok_ulong = -29,
   
   // sized character types
-  tok_schar = -92,
-  tok_lchar = -93,
+  tok_schar = -30,
+  tok_lchar = -31,
 
   // primary
-  tok_identifier = -19,
-  tok_number = -20,
-  tok_string_literal = -21,
-  tok_char_literal = -22,
+  tok_identifier = -32,
+  tok_number = -33,
+  tok_string_literal = -34,
+  tok_char_literal = -35,
   
   // boolean literals
-  tok_true = -23,
-  tok_false = -24,
-  tok_null = -25,
+  tok_true = -36,
+  tok_false = -37,
+  tok_null = -38,
   
   // delimiters
-  tok_newline = -26,
+  tok_newline = -39,
   
   // comparison operators
-  tok_eq = -27,        // ==
-  tok_ne = -28,        // !=
-  tok_le = -29,        // <=
-  tok_ge = -30,        // >=
-  tok_lt = -31,        // <
-  tok_gt = -32,        // >
+  tok_eq = -40,        // ==
+  tok_ne = -41,        // !=
+  tok_le = -42,        // <=
+  tok_ge = -43,        // >=
+  tok_lt = -44,        // <
+  tok_gt = -45,        // >
   
   // boolean operators
-  tok_and = -33,       // &&
-  tok_or = -34,        // ||
-  tok_not = -35,       // !
+  tok_and = -46,       // &&
+  tok_or = -47,        // ||
+  tok_not = -48,       // !
   
   // compound assignment operators
-  tok_plus_eq = -36,   // +=
-  tok_minus_eq = -37,  // -=
-  tok_mult_eq = -38,   // *=
-  tok_div_eq = -39,    // /=
-  tok_mod_eq = -40,    // %=
+  tok_plus_eq = -49,   // +=
+  tok_minus_eq = -50,  // -=
+  tok_mult_eq = -51,   // *=
+  tok_div_eq = -52,    // /=
+  tok_mod_eq = -53,    // %=
   
   // bitwise operators
-  tok_bitwise_and = -41,     // &
-  tok_bitwise_or = -42,      // |
-  tok_bitwise_xor = -43,     // ^
-  tok_left_shift = -44,      // <<
-  tok_right_shift = -45,     // >>
+  tok_bitwise_and = -54,     // &
+  tok_bitwise_or = -55,      // |
+  tok_bitwise_xor = -56,     // ^
+  tok_left_shift = -57,      // <<
+  tok_right_shift = -58,     // >>
   
   // bitwise compound assignment operators
-  tok_and_eq = -46,          // &=
-  tok_or_eq = -47,           // |=
-  tok_xor_eq = -48,          // ^=
-  tok_left_shift_eq = -49,   // <<=
-  tok_right_shift_eq = -50,  // >>=
+  tok_and_eq = -59,          // &=
+  tok_or_eq = -60,           // |=
+  tok_xor_eq = -61,          // ^=
+  tok_left_shift_eq = -62,   // <<=
+  tok_right_shift_eq = -63,  // >>=
 
   // increment/decrement
-  tok_inc = -51,             // ++
-  tok_dec = -52,             // --
+  tok_inc = -64,             // ++
+  tok_dec = -65,             // --
   
   // type casting
-  tok_colon = -53,           // :
+  tok_colon = -66,           // :
   
   // member access
-  tok_dot = -54              // .
+  tok_dot = -67              // .
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

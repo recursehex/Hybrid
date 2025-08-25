@@ -7,7 +7,7 @@ Hybrid is a modern, statically-typed programming language that interops with C++
 - **C-style syntax** with explicit type declarations
 - **LLVM backend** for optimized native code generation
 - **Static typing** with automatic type inference for literals
-- **Control flow** including if-else, while loops, and foreach
+- **Control flow** including if-else, while loops, C-style for loops, and foreach
 - **Arrays** with literals and indexing
 - **Structs** with constructors and member access
 - **Interactive REPL** with live code compilation
@@ -34,7 +34,7 @@ apt install cmake        # Ubuntu/Debian
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Or use the convenient build script
+# Or use the build script
 ./build.sh              # Release build
 ./build.sh -d           # Debug build
 ./build.sh -c -t        # Clean build and run tests
@@ -164,6 +164,14 @@ while condition {
     if skip_this { skip } // Continue to next iteration
 }
 
+// C-style for loops
+for int i = 1 to 10 { }             // Basic range
+for int i = 0 to 20 by 2 { }        // Custom step
+for int i = 1 to 100 by * 2 { }     // Multiplicative step
+for int i = 0 to i < size { }       // Custom condition
+for float f = 0.0 to 1.0 by 0.1 { } // Float support
+for 0 to 10 { }                     // Anonymous counter
+
 // Foreach loop
 for type var in collection { }
 ```
@@ -207,7 +215,7 @@ cmake --build build --target run-tests
 cmake --preset=release
 cmake --build --preset=release
 
-# Using convenience script
+# Using build script
 ./build.sh              # Release build
 ./build.sh -d           # Debug build
 ./build.sh -c -t        # Clean build and run tests
@@ -223,7 +231,7 @@ Hybrid/
 ├── docs/               # Documentation
 ├── CMakeLists.txt      # Main build configuration
 ├── CMakePresets.json   # Build presets for IDEs
-├── build.sh            # Convenience build script
+├── build.sh            # Build script
 └── run_tests.sh        # Test runner script
 ```
 
@@ -237,6 +245,13 @@ Hybrid/
 - All primitive types and arrays
 - If-else statements
 - While loops
+- C-style for loops with advanced features:
+  - Basic `for int i = 1 to 10` syntax with automatic increment/decrement
+  - Anonymous loops `for 0 to 10` without variable declarations
+  - Custom steps with `by` keyword: `by 2`, `by -3`, `by * 2`, `by / 2`
+  - Exclusive bounds: `for int i = 0 to i < size`
+  - Full float/double support: `for float f = 0.0 to 1.0 by 0.1`
+  - Complex conditions and nested loops
 - Foreach loops
 - Expression evaluation
 - Global and local variables
@@ -254,6 +269,7 @@ Hybrid/
     - `ushort` - 16 bit unsigned
     - `uint` - 32 bit unsigned
     - `ulong` - 64 bit unsigned
+- Structs with multi-level member access and constructors
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management

@@ -68,7 +68,7 @@ The following keywords are reserved:
   - Basic types: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
   - Sized integers: `byte`, `sbyte`, `short`, `ushort`, `uint`, `long`, `ulong`
   - Character types: `schar`, `lchar`
-- Control flow: `if`, `else`, `for`, `in`, `while`, `break`
+- Control flow: `if`, `else`, `for`, `in`, `to`, `by`, `while`, `break`, `skip`
 - Function keywords: `return`, `extern`
 - Boolean literals: `true`, `false`
 - Null literal: `null`

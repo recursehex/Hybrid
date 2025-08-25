@@ -155,6 +155,10 @@ void ForEachStmtAST::print() const {
   std::cout << "Parsed a foreach loop: for " << Type << " " << VarName << " in <expression>" << std::endl;
 }
 
+void ForLoopStmtAST::print() const {
+  std::cout << "Parsed a for loop: for " << Type << " " << VarName << " = <init> to <limit>" << std::endl;
+}
+
 //===----------------------------------------------------------------------===//
 // Expression Code Generation
 //===----------------------------------------------------------------------===//
@@ -1724,6 +1728,269 @@ llvm::Value *ForEachStmtAST::codegen() {
   llvm::Value *NextCounter = Builder->CreateAdd(CounterVal, 
       llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 1)), "nextcounter");
   Builder->CreateStore(NextCounter, CounterAlloca);
+  Builder->CreateBr(CondBB);
+  
+  // Emit the after-loop block
+  AfterBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(AfterBB);
+  
+  // Restore the old value
+  if (OldVal)
+    NamedValues[VarName] = OldVal;
+  else
+    NamedValues.erase(VarName);
+  
+  // Return a dummy value
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
+// Generate code for C-style for loops with 'to' syntax
+llvm::Value *ForLoopStmtAST::codegen() {
+  // Evaluate the initial value
+  llvm::Value *InitVal = InitExpr->codegen();
+  if (!InitVal)
+    return nullptr;
+  
+  // Evaluate limit if provided (may be null if using condition)
+  llvm::Value *LimitVal = nullptr;
+  if (LimitExpr) {
+    LimitVal = LimitExpr->codegen();
+    if (!LimitVal)
+      return nullptr;
+  }
+  
+  // Get the loop variable type
+  llvm::Type *VarType = getTypeFromString(Type);
+  if (!VarType)
+    return LogErrorV("Unknown type in for loop");
+  
+  // Ensure values match the variable type
+  if (VarType->isFloatingPointTy()) {
+    // Convert init to float type if needed
+    if (InitVal->getType()->isIntegerTy()) {
+      InitVal = Builder->CreateSIToFP(InitVal, VarType, "initcast");
+    } else if (InitVal->getType() != VarType) {
+      InitVal = Builder->CreateFPCast(InitVal, VarType, "initcast");
+    }
+    
+    // Convert limit to float type if needed
+    if (LimitVal) {
+      if (LimitVal->getType()->isIntegerTy()) {
+        LimitVal = Builder->CreateSIToFP(LimitVal, VarType, "limitcast");
+      } else if (LimitVal->getType() != VarType) {
+        LimitVal = Builder->CreateFPCast(LimitVal, VarType, "limitcast");
+      }
+    }
+  } else if (VarType->isIntegerTy()) {
+    // Convert init to int type if needed
+    if (InitVal->getType()->isFloatingPointTy()) {
+      InitVal = Builder->CreateFPToSI(InitVal, VarType, "initcast");
+    } else if (InitVal->getType() != VarType) {
+      InitVal = Builder->CreateIntCast(InitVal, VarType, true, "initcast");
+    }
+    
+    // Convert limit to int type if needed
+    if (LimitVal) {
+      if (LimitVal->getType()->isFloatingPointTy()) {
+        LimitVal = Builder->CreateFPToSI(LimitVal, VarType, "limitcast");
+      } else if (LimitVal->getType() != VarType) {
+        LimitVal = Builder->CreateIntCast(LimitVal, VarType, true, "limitcast");
+      }
+    }
+  }
+  
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  
+  // Create blocks for the loop
+  llvm::BasicBlock *InitBB = Builder->GetInsertBlock();
+  llvm::BasicBlock *CondBB = llvm::BasicBlock::Create(*TheContext, "forcond", TheFunction);
+  llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(*TheContext, "forbody");
+  llvm::BasicBlock *IncBB = llvm::BasicBlock::Create(*TheContext, "forinc");
+  llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(*TheContext, "forcont");
+  
+  // Create an alloca for the loop variable
+  llvm::AllocaInst *VarAlloca = Builder->CreateAlloca(VarType, nullptr, VarName);
+  Builder->CreateStore(InitVal, VarAlloca);
+  
+  // Determine if we're incrementing or decrementing based on init vs limit
+  bool isIncrementing = true;
+  if (LimitVal) {
+    if (llvm::ConstantFP *InitFP = llvm::dyn_cast<llvm::ConstantFP>(InitVal)) {
+      if (llvm::ConstantFP *LimitFP = llvm::dyn_cast<llvm::ConstantFP>(LimitVal)) {
+        isIncrementing = InitFP->getValueAPF().convertToDouble() <= LimitFP->getValueAPF().convertToDouble();
+      }
+    } else if (llvm::ConstantInt *InitInt = llvm::dyn_cast<llvm::ConstantInt>(InitVal)) {
+      if (llvm::ConstantInt *LimitInt = llvm::dyn_cast<llvm::ConstantInt>(LimitVal)) {
+        isIncrementing = InitInt->getSExtValue() <= LimitInt->getSExtValue();
+      }
+    }
+  }
+  
+  // Jump to the condition check
+  Builder->CreateBr(CondBB);
+  
+  // Emit the condition check
+  Builder->SetInsertPoint(CondBB);
+  llvm::Value *VarVal = Builder->CreateLoad(VarType, VarAlloca, VarName);
+  llvm::Value *CondV;
+  
+  if (CondExpr) {
+    // Use the custom condition expression
+    // First, make sure the loop variable is available for the condition
+    llvm::Value *OldVal = NamedValues[VarName];
+    NamedValues[VarName] = VarAlloca;
+    
+    CondV = CondExpr->codegen();
+    
+    // Restore old value (in case it shadows something)
+    if (OldVal)
+      NamedValues[VarName] = OldVal;
+    
+    if (!CondV)
+      return nullptr;
+    
+    // Convert to boolean if needed
+    if (!CondV->getType()->isIntegerTy(1)) {
+      if (CondV->getType()->isIntegerTy(8)) {
+        // For i8 bool, compare with 0
+        CondV = Builder->CreateICmpNE(CondV, 
+          llvm::ConstantInt::get(CondV->getType(), 0), "loopcond");
+      } else if (CondV->getType()->isFloatingPointTy()) {
+        CondV = Builder->CreateFCmpONE(CondV,
+          llvm::ConstantFP::get(CondV->getType(), 0.0), "loopcond");
+      } else if (CondV->getType()->isIntegerTy()) {
+        CondV = Builder->CreateICmpNE(CondV,
+          llvm::ConstantInt::get(CondV->getType(), 0), "loopcond");
+      }
+    }
+  } else if (LimitVal) {
+    // Use the standard limit-based condition
+    if (VarType->isFloatingPointTy()) {
+      if (isIncrementing) {
+        CondV = Builder->CreateFCmpOLE(VarVal, LimitVal, "loopcond");
+      } else {
+        CondV = Builder->CreateFCmpOGE(VarVal, LimitVal, "loopcond");
+      }
+    } else {
+      if (isIncrementing) {
+        CondV = Builder->CreateICmpSLE(VarVal, LimitVal, "loopcond");
+      } else {
+        CondV = Builder->CreateICmpSGE(VarVal, LimitVal, "loopcond");
+      }
+    }
+  } else {
+    return LogErrorV("For loop must have either a limit or condition expression");
+  }
+  
+  Builder->CreateCondBr(CondV, LoopBB, AfterBB);
+  
+  // Emit the loop body
+  LoopBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(LoopBB);
+  
+  // Add the loop variable to the symbol table
+  llvm::Value *OldVal = NamedValues[VarName];
+  NamedValues[VarName] = VarAlloca;
+  
+  // Push the exit and continue blocks for break/skip statements
+  LoopExitBlocks.push_back(AfterBB);
+  LoopContinueBlocks.push_back(IncBB);
+  
+  // Generate code for the body
+  llvm::Value *BodyV = Body->codegen();
+  
+  // Pop the exit and continue blocks
+  LoopExitBlocks.pop_back();
+  LoopContinueBlocks.pop_back();
+  
+  if (!BodyV) {
+    // Restore the old value
+    if (OldVal)
+      NamedValues[VarName] = OldVal;
+    else
+      NamedValues.erase(VarName);
+    return nullptr;
+  }
+  
+  // Branch to increment block (unless body contains break/return)
+  if (!Builder->GetInsertBlock()->getTerminator())
+    Builder->CreateBr(IncBB);
+  
+  // Emit the increment block
+  IncBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(IncBB);
+  
+  // Increment or decrement the loop variable
+  VarVal = Builder->CreateLoad(VarType, VarAlloca, VarName);
+  llvm::Value *NextVal;
+  
+  if (StepExpr) {
+    // Use custom step expression
+    llvm::Value *StepVal = StepExpr->codegen();
+    if (!StepVal)
+      return nullptr;
+    
+    // Ensure step has same type as variable
+    if (StepVal->getType() != VarType) {
+      if (VarType->isFloatingPointTy() && StepVal->getType()->isIntegerTy()) {
+        StepVal = Builder->CreateSIToFP(StepVal, VarType, "stepcast");
+      } else if (VarType->isIntegerTy() && StepVal->getType()->isDoubleTy()) {
+        StepVal = Builder->CreateFPToSI(StepVal, VarType, "stepcast");
+      }
+    }
+    
+    // Apply the appropriate step operation
+    switch (StepOp) {
+    case '+':
+      if (VarType->isFloatingPointTy()) {
+        NextVal = Builder->CreateFAdd(VarVal, StepVal, "nextval");
+      } else {
+        NextVal = Builder->CreateAdd(VarVal, StepVal, "nextval");
+      }
+      break;
+    case '-':
+      if (VarType->isFloatingPointTy()) {
+        NextVal = Builder->CreateFSub(VarVal, StepVal, "nextval");
+      } else {
+        NextVal = Builder->CreateSub(VarVal, StepVal, "nextval");
+      }
+      break;
+    case '*':
+      if (VarType->isFloatingPointTy()) {
+        NextVal = Builder->CreateFMul(VarVal, StepVal, "nextval");
+      } else {
+        NextVal = Builder->CreateMul(VarVal, StepVal, "nextval");
+      }
+      break;
+    case '/':
+      if (VarType->isFloatingPointTy()) {
+        NextVal = Builder->CreateFDiv(VarVal, StepVal, "nextval");
+      } else {
+        NextVal = Builder->CreateSDiv(VarVal, StepVal, "nextval");
+      }
+      break;
+    case '%':
+      if (VarType->isFloatingPointTy()) {
+        NextVal = Builder->CreateFRem(VarVal, StepVal, "nextval");
+      } else {
+        NextVal = Builder->CreateSRem(VarVal, StepVal, "nextval");
+      }
+      break;
+    default:
+      return LogErrorV("Unknown step operation in for loop");
+    }
+  } else {
+    // Default step of 1 or -1
+    if (VarType->isFloatingPointTy()) {
+      llvm::Value *Step = llvm::ConstantFP::get(VarType, isIncrementing ? 1.0 : -1.0);
+      NextVal = Builder->CreateFAdd(VarVal, Step, "nextval");
+    } else {
+      llvm::Value *Step = llvm::ConstantInt::get(VarType, isIncrementing ? 1 : -1);
+      NextVal = Builder->CreateAdd(VarVal, Step, "nextval");
+    }
+  }
+  
+  Builder->CreateStore(NextVal, VarAlloca);
   Builder->CreateBr(CondBB);
   
   // Emit the after-loop block
