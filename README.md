@@ -1,6 +1,10 @@
+<h1 align="center">
+ <img src="docs/img/hybrid_logo.svg" alt="Hybrid logo"/>
+</h1>
+
 # Hybrid Programming Language
 
-Hybrid is a modern, statically-typed programming language that interops with C++ while being memory-safe. It combines the familiar syntax of C/C++ with the high-level features and feel of Python. It will feature automatic reference counting (ARC) and support AOT and JIT compilation.
+Hybrid is a performant, statically-typed programming language that combines the power of C/C++ with the flexibility of Python. It features a modern, expressive syntax, interoperating with C/C++ while being memory-safe.
 
 ## Features
 
@@ -22,7 +26,7 @@ Hybrid is a modern, statically-typed programming language that interops with C++
 brew install llvm        # macOS
 apt install llvm-dev     # Ubuntu/Debian
 
-# Install CMake (if not already installed)
+# Install CMake
 brew install cmake       # macOS
 apt install cmake        # Ubuntu/Debian
 ```
@@ -42,7 +46,11 @@ cmake --build build
 # Or use CMake presets
 cmake --preset=release
 cmake --build --preset=release
+```
 
+### Running
+
+```bash
 # Run interactive mode
 ./build/hybrid          # or ./build/release/hybrid with presets
 
@@ -136,14 +144,31 @@ Comprehensive documentation is available in the `docs/` directory:
 ## Language Overview
 
 ### Types
-- Basic primitives: `int` (32-bit), `float` (32-bit), `double` (64-bit), `char` (16-bit), `bool` (8-bit), `string` (pointer), `void`
-- Sized integers: 
-  - Unsigned: `byte` (8-bit), `ushort` (16-bit), `uint` (32-bit), `ulong` (64-bit)
-  - Signed: `sbyte` (8-bit), `short` (16-bit), `long` (64-bit)
-- Character types: `char` (16-bit Unicode), `schar` (8-bit), `lchar` (32-bit Unicode)
-- Arrays: `int[]`, `float[]`, `byte[]`, etc.
+- Basic primitives
+    - `int` 32-bit integer
+    - `float` 32-bit floating-point number
+    - `double` 64-bit floating-point number
+    - `char` 16-bit Unicode character
+    - `bool` 8-bit boolean value
+    - `string` pointer to `char` array
+    - `void` for functions returning nothing
+- Sized integers
+    - Unsigned
+        - `byte` 8-bit unsigned integer
+        - `ushort` 16-bit unsigned integer
+        - `uint` 32-bit unsigned integer
+        - `ulong` 64-bit unsigned integer
+    - Signed
+        - `sbyte` 8-bit integer
+        - `short` 16-bit integer
+        - `long` 64-bit integer
+- Sized characters
+    - `schar` 8-bit character
+    - `lchar` 32-bit Unicode character
+- Arrays
+    - e.g. `int[]`, `float[]`, `byte[]`, etc.
 - All variables must be initialized at declaration
-- Strict type checking: no implicit conversions between different sized types
+- Variables of types with different sizes must be explicitly converted
 
 ### Functions
 ```c
@@ -156,24 +181,25 @@ return_type function_name(type1 param1, type2 param2) {
 ### Control Flow
 ```c
 // If-else
-if condition { } else { }
+if i == 10 { } else { }
 
 // While loop with break/skip
-while condition {
-    if done { break }     // Exit loop
-    if skip_this { skip } // Continue to next iteration
+while i < 10 {
+    if j > 5 { break }     // Exit loop
+    j++
+    if i + j == 20 { skip } // Continue to next iteration
 }
 
-// C-style for loops
-for int i = 1 to 10 { }             // Basic range
-for int i = 0 to 20 by 2 { }        // Custom step
+// For loops
+for int i = 1 to 10 { }             // Basic range, increments by 1
+for int i = 0 to 20 by 2 { }        // Custom additive step
 for int i = 1 to 100 by * 2 { }     // Multiplicative step
 for int i = 0 to i < size { }       // Custom condition
 for float f = 0.0 to 1.0 by 0.1 { } // Float support
 for 0 to 10 { }                     // Anonymous counter
 
 // Foreach loop
-for type var in collection { }
+for int i in nums { }
 ```
 
 ### Operators
@@ -182,7 +208,7 @@ for type var in collection { }
 - Boolean: `&&`, `||`, `!`
 - Assignment: `=`, `+=`, `-=`, `*=`, `/=`, `%=`
 - Increment/Decrement: `++`, `--` (both prefix and postfix)
-- Type Casting: `:` (e.g., `int: floatVar`, `byte: 100`)
+- Type Casting: `:` (e.g., `int: floatVar`)
 
 ## Build System
 
@@ -202,24 +228,6 @@ The project uses CMake for cross-platform builds.
 - **Parallel builds**: Efficient multi-core compilation
 - **Installation support**: Standard CMake install targets
 - **Package generation**: CPack support for distribution
-
-### Build Commands
-
-```bash
-# Standard CMake
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-cmake --build build --target run-tests
-
-# Using CMake Presets
-cmake --preset=release
-cmake --build --preset=release
-
-# Using build script
-./build.sh              # Release build
-./build.sh -d           # Debug build
-./build.sh -c -t        # Clean build and run tests
-```
 
 ## Project Structure
 

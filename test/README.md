@@ -6,13 +6,13 @@ This directory contains the comprehensive test suite for the Hybrid programming 
 
 Tests are organized into the following categories:
 
-### arrays/
+### `arrays/`
 Tests for array functionality including:
 - Array declarations and initialization
 - Array indexing and access
 - Global arrays
 
-### basic/
+### `basic/`
 Basic language features:
 - Expressions and evaluation
 - Comments
@@ -20,7 +20,7 @@ Basic language features:
 - Variable initialization
 - Module usage (use statements)
 
-### control_flow/
+### `control_flow/`
 Control flow constructs:
 - If-else statements
 - While loops
@@ -28,19 +28,19 @@ Control flow constructs:
 - Break statements
 - Skip (continue) statements
 
-### errors/
+### `errors/`
 Tests that are expected to fail (negative tests):
 - Uninitialized variable errors
 - Type errors
 - Other compilation failures
 
-### functions/
+### `functions/`
 Function-related tests:
 - Function definitions
 - Parameters and arguments
 - Code generation
 
-### operators/
+### `operators/`
 Operator tests:
 - Arithmetic operators
 - Bitwise operators
@@ -49,12 +49,12 @@ Operator tests:
 - Increment/decrement operators
 - Modulo operator
 
-### structs/
+### `structs/`
 Struct (user-defined type) tests:
 - Basic struct definitions
 - Advanced struct features (nested structs, member access)
 
-### types/
+### `types/`
 Type system tests:
 - Boolean types
 - Character types
