@@ -203,7 +203,7 @@ llvm::Value *CharExprAST::codegen() {
   uint32_t val = getValue();
   
   // Determine the appropriate type based on the context
-  // For now, we'll use the default char (16-bit) unless the value requires more
+  // For now, use the default char (16-bit) unless the value requires more
   if (val > 0xFFFF) {
     // Value requires 32-bit (lchar)
     setTypeName("lchar");
@@ -352,7 +352,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
         }
       }
       
-      // Default to int if we can't determine
+      // Default to int if can't determine
       if (!ElemType) {
         ElemType = llvm::Type::getInt32Ty(*TheContext);
       }
@@ -361,7 +361,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
     // Old array representation: direct pointer
     ArrayPtr = ArrayVal;
     
-    // For arrays, we need to infer the element type from context
+    // For arrays, infer the element type from context
     ElemType = llvm::Type::getInt32Ty(*TheContext); // default
     
     // If the array is from a variable, check its type
@@ -434,19 +434,19 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
   // Extract the pointer from the array struct
   llvm::Value *ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayptr");
   
-  // For now, we'll determine the element type based on the array expression type
-  // In a real implementation, we'd track this information in the AST
+  // For now, determine the element type based on the array expression type
+  // In a real implementation, track this information in the AST
   llvm::Type *ElemTy = llvm::Type::getInt32Ty(*TheContext); // Default to i32
   
   // Try to infer the actual element type from the array
   if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
     // Look up the variable's type information
-    // For now, we'll use a simple heuristic
+    // For now, use a simple heuristic
     llvm::Value *V = NamedValues[VarExpr->getName()];
     if (!V) V = GlobalValues[VarExpr->getName()];
     if (V && V->getType()->isPointerTy()) {
       // Assume it's a pointer to the element type
-      // In practice, we'd need proper type tracking
+      // In practice, need proper type tracking
     }
   }
 
@@ -529,7 +529,7 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
   
   // Check if types are compatible for implicit casting
   if (!areTypesCompatible(sourceType, targetType)) {
-    // For explicit casts in the future, we might allow this
+    // For explicit casts in the future, might allow this
     // For now, implicit casts must follow compatibility rules
     return value; // Return original value, let the caller handle the error
   }
@@ -553,7 +553,7 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
     }
   }
   
-  // If we can't cast, return the original value
+  // Can't cast, return the original value
   return value;
 }
 
@@ -601,7 +601,7 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::s
           inRange = (v >= 0 && v <= UINT32_MAX);
         }
       } else if (targetBits == 64) {
-        // For 64-bit, we can always fit a 32-bit source
+        // For 64-bit, always can fit a 32-bit source
         inRange = true;
       }
       
@@ -695,7 +695,7 @@ llvm::Value *BinaryExprAST::codegen() {
   L = promoted.first;
   R = promoted.second;
 
-  // Check if we're working with floating point or integer types
+  // Check if working with floating point or integer types
   bool isFloat = L->getType()->isFloatingPointTy();
   
   // Set result type name based on the promoted type
@@ -854,7 +854,7 @@ llvm::Value *BinaryExprAST::codegen() {
           return nullptr;
         
         // Cast RHS to the field type if necessary
-        // We need to determine the field type from the struct definition
+        // Need to determine the field type from the struct definition
         // For now, trust that R has the correct type
         // TODO: Add proper type checking
         // R = castToType(R, FieldType);
@@ -1075,47 +1075,31 @@ llvm::Value *BinaryExprAST::codegen() {
       return LogErrorV("destination of compound assignment must be a variable or array element");
     }
   } else if (Op == "&&") {
-    // Convert operands to i1 booleans if needed
+    // Check that both operands are boolean types
+    if (leftTypeName != "bool" || rightTypeName != "bool") {
+      return LogErrorV("Boolean AND operator '&&' can only be used with bool types");
+    }
+    // Convert i8 bool operands to i1 for logical operations
     if (L->getType()->isIntegerTy(8)) {
-      // Truncate i8 bool to i1
       L = Builder->CreateTrunc(L, llvm::Type::getInt1Ty(*TheContext), "tobool");
-    } else if (!L->getType()->isIntegerTy(1)) {
-      if (L->getType()->isFloatingPointTy())
-        L = Builder->CreateFCmpONE(L, llvm::ConstantFP::get(L->getType(), 0.0), "tobool");
-      else if (L->getType()->isIntegerTy())
-        L = Builder->CreateICmpNE(L, llvm::ConstantInt::get(L->getType(), 0), "tobool");
     }
     if (R->getType()->isIntegerTy(8)) {
-      // Truncate i8 bool to i1
       R = Builder->CreateTrunc(R, llvm::Type::getInt1Ty(*TheContext), "tobool");
-    } else if (!R->getType()->isIntegerTy(1)) {
-      if (R->getType()->isFloatingPointTy())
-        R = Builder->CreateFCmpONE(R, llvm::ConstantFP::get(R->getType(), 0.0), "tobool");
-      else if (R->getType()->isIntegerTy())
-        R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
     }
     setTypeName("bool");
     llvm::Value *Result = Builder->CreateAnd(L, R, "andtmp");
     return Builder->CreateZExt(Result, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "||") {
-    // Convert operands to i1 booleans if needed
+    // Check that both operands are boolean types
+    if (leftTypeName != "bool" || rightTypeName != "bool") {
+      return LogErrorV("Boolean OR operator '||' can only be used with bool types");
+    }
+    // Convert i8 bool operands to i1 for logical operations
     if (L->getType()->isIntegerTy(8)) {
-      // Truncate i8 bool to i1
       L = Builder->CreateTrunc(L, llvm::Type::getInt1Ty(*TheContext), "tobool");
-    } else if (!L->getType()->isIntegerTy(1)) {
-      if (L->getType()->isFloatingPointTy())
-        L = Builder->CreateFCmpONE(L, llvm::ConstantFP::get(L->getType(), 0.0), "tobool");
-      else if (L->getType()->isIntegerTy())
-        L = Builder->CreateICmpNE(L, llvm::ConstantInt::get(L->getType(), 0), "tobool");
     }
     if (R->getType()->isIntegerTy(8)) {
-      // Truncate i8 bool to i1
       R = Builder->CreateTrunc(R, llvm::Type::getInt1Ty(*TheContext), "tobool");
-    } else if (!R->getType()->isIntegerTy(1)) {
-      if (R->getType()->isFloatingPointTy())
-        R = Builder->CreateFCmpONE(R, llvm::ConstantFP::get(R->getType(), 0.0), "tobool");
-      else if (R->getType()->isIntegerTy())
-        R = Builder->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0), "tobool");
     }
     setTypeName("bool");
     llvm::Value *Result = Builder->CreateOr(L, R, "ortmp");
@@ -1333,6 +1317,12 @@ llvm::Value *UnaryExprAST::codegen() {
   if (Op == "-") {
     return Builder->CreateNeg(OperandV, "negtmp");
   } else if (Op == "!") {
+    // Check that operand is boolean type
+    std::string operandTypeName = Operand->getTypeName();
+    if (operandTypeName != "bool") {
+      return LogErrorV("Boolean NOT operator '!' can only be used with bool type");
+    }
+    setTypeName("bool");
     // For bool type (i8), truncate to i1, apply NOT, then zero-extend back to i8
     if (OperandV->getType()->isIntegerTy(8)) {
       llvm::Value *Truncated = Builder->CreateTrunc(OperandV, llvm::Type::getInt1Ty(*TheContext), "tobool");
@@ -1375,7 +1365,7 @@ llvm::Value *CastExprAST::codegen() {
     unsigned TargetBits = TargetLLVMType->getIntegerBitWidth();
     
     if (SourceBits < TargetBits) {
-      // Determine if we should use sign or zero extension based on source type
+      // Use sign or zero extension based on source type
       if (!sourceTypeName.empty() && isUnsignedType(sourceTypeName)) {
         return Builder->CreateZExt(OperandV, TargetLLVMType, "casttmp");
       } else {
@@ -1389,7 +1379,7 @@ llvm::Value *CastExprAST::codegen() {
   
   // Integer to float
   if (SourceType->isIntegerTy() && TargetLLVMType->isFloatingPointTy()) {
-    // Use the source type name to determine if we should use signed or unsigned conversion
+    // Use the source type name to use either signed or unsigned conversion
     if (!sourceTypeName.empty() && isUnsignedType(sourceTypeName)) {
       return Builder->CreateUIToFP(OperandV, TargetLLVMType, "casttmp");
     } else {
@@ -1512,7 +1502,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   if (!VarType)
     return LogErrorV("Unknown type name");
   
-  // Check if we're at global scope
+  // Check if at global scope
   llvm::Function *TheFunction = nullptr;
   bool isGlobal = false;
   
@@ -1520,7 +1510,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     TheFunction = Builder->GetInsertBlock()->getParent();
     isGlobal = (TheFunction->getName() == "__anon_var_decl");
   } else {
-    // No insertion point means we're at top level
+    // No insertion point means at top level
     isGlobal = true;
     
     // Create or get the __anon_var_decl function for global variable initialization
@@ -1552,7 +1542,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     
     // Generate the initializer
     if (getInitializer()) {
-      // For globals, we need constant initializers
+      // For globals, need constant initializers
       // For now, create a zero initializer and store the actual value
       llvm::Constant *ZeroInit = llvm::Constant::getNullValue(VarType);
       GV->setInitializer(ZeroInit);
@@ -1744,7 +1734,7 @@ llvm::Value *ForEachStmtAST::codegen() {
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
-// Generate code for C-style for loops with 'to' syntax
+// Generate code for for loops with 'to' syntax
 llvm::Value *ForLoopStmtAST::codegen() {
   // Evaluate the initial value
   llvm::Value *InitVal = InitExpr->codegen();
@@ -1781,6 +1771,7 @@ llvm::Value *ForLoopStmtAST::codegen() {
         LimitVal = Builder->CreateFPCast(LimitVal, VarType, "limitcast");
       }
     }
+  // For integer types
   } else if (VarType->isIntegerTy()) {
     // Convert init to int type if needed
     if (InitVal->getType()->isFloatingPointTy()) {
@@ -1812,7 +1803,7 @@ llvm::Value *ForLoopStmtAST::codegen() {
   llvm::AllocaInst *VarAlloca = Builder->CreateAlloca(VarType, nullptr, VarName);
   Builder->CreateStore(InitVal, VarAlloca);
   
-  // Determine if we're incrementing or decrementing based on init vs limit
+  // Determine if incrementing or decrementing based on init vs limit
   bool isIncrementing = true;
   if (LimitVal) {
     if (llvm::ConstantFP *InitFP = llvm::dyn_cast<llvm::ConstantFP>(InitVal)) {
@@ -2162,7 +2153,7 @@ llvm::Value *UseStmtAST::codegen() {
 }
 
 llvm::Value *BreakStmtAST::codegen() {
-  // Check if we're inside a loop
+  // Check if inside a loop
   if (LoopExitBlocks.empty())
     return LogErrorV("'break' statement not within a loop");
   
@@ -2183,7 +2174,7 @@ llvm::Value *BreakStmtAST::codegen() {
 }
 
 llvm::Value *SkipStmtAST::codegen() {
-  // Check if we're inside a loop
+  // Check if inside a loop
   if (LoopContinueBlocks.empty())
     return LogErrorV("'skip' statement not within a loop");
   
@@ -2312,7 +2303,7 @@ llvm::Type *StructAST::codegen() {
     return nullptr;
   }
   
-  // Save the current insertion point so we can restore it after generating constructors
+  // Save the current insertion point to restore it after generating constructors
   auto SavedInsertBlock = Builder->GetInsertBlock();
   
   // Create the struct type
@@ -2343,9 +2334,9 @@ llvm::Type *StructAST::codegen() {
   
   // Generate constructor and other methods
   for (const auto &Method : Methods) {
-    // For constructors, we need to handle them specially
+    // For constructors, need to handle them specially
     if (Method->getProto()->getName() == Name) {
-      // This is a constructor - we'll generate it as a static method that returns a new instance
+      // This is a constructor, generate it as a static method that returns a new instance
       std::string ConstructorName = Name + "_new";
       auto ConstructorProto = std::make_unique<PrototypeAST>(
           Name, ConstructorName, Method->getProto()->getArgs());
@@ -2406,11 +2397,11 @@ llvm::Type *StructAST::codegen() {
     }
   }
   
-  // Restore the insertion point if we had one, otherwise clear it
+  // Restore the insertion point if had one, otherwise clear it
   if (SavedInsertBlock) {
     Builder->SetInsertPoint(SavedInsertBlock);
   } else {
-    // No previous insertion point - we're at top level
+    // No previous insertion point, at top level
     // Clear the insertion point so next top-level code creates its own context
     Builder->ClearInsertionPoint();
   }
@@ -2433,11 +2424,11 @@ llvm::Value *MemberAccessExprAST::codegen() {
   std::string ObjectTypeName = Object->getTypeName();
   
   
-  // If ObjectTypeName is empty but we have a valid pointer, it might be a nested struct access
+  // If ObjectTypeName is empty but have a valid pointer, it might be a nested struct access
   // In that case, the ObjectPtr is already a pointer to a struct
   if (ObjectTypeName.empty() && ObjectPtr->getType()->isPointerTy()) {
-    // In newer LLVM, pointers are opaque, so we need to track the type differently
-    // For now, we'll rely on the type name being set correctly by the previous member access
+    // In newer LLVM, pointers are opaque, so track the type differently
+    // For now, rely on the type name being set correctly by the previous member access
     // This is a limitation that needs a better solution
   }
   

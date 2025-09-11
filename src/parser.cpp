@@ -18,6 +18,24 @@ std::map<std::string, int> BinopPrecedence;
 /// StructNames - Track struct names as valid types
 std::set<std::string> StructNames;
 
+/// Helper function to check if current token is a built-in type
+bool IsBuiltInType()
+{
+  return CurTok == tok_int || CurTok == tok_float || CurTok == tok_double ||
+         CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool ||
+         CurTok == tok_string || CurTok == tok_byte || CurTok == tok_short ||
+         CurTok == tok_long || CurTok == tok_sbyte || CurTok == tok_ushort ||
+         CurTok == tok_uint || CurTok == tok_ulong || CurTok == tok_schar ||
+         CurTok == tok_lchar;
+}
+
+/// Helper function to check if current token is a valid type (built-in or struct)
+bool IsValidType()
+{
+  return IsBuiltInType() || 
+         (CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end());
+}
+
 /// GetTokPrecedence - Get the precedence of the pending binary operator token.
 int GetTokPrecedence() {
   // Handle comparison operator tokens
@@ -187,8 +205,8 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
     return LogError("Expected ']' to close array literal");
   getNextToken(); // eat ]
   
-  // For now, we'll infer the element type from the elements
-  // In a real implementation, we might want to check all elements have compatible types
+  // For now, infer the element type from the elements
+  // In a real implementation, might want to check all elements have compatible types
   std::string ElementType = "int"; // Default to int, will be improved with type inference
   
   return std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
@@ -252,11 +270,7 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
 ///   ::= arrayexpr
 std::unique_ptr<ExprAST> ParsePrimary() {
   // Check for type casting: type: expr
-  if (CurTok == tok_int || CurTok == tok_float || CurTok == tok_double || 
-      CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool || CurTok == tok_string ||
-      CurTok == tok_byte || CurTok == tok_short || CurTok == tok_long || CurTok == tok_sbyte ||
-      CurTok == tok_ushort || CurTok == tok_uint || CurTok == tok_ulong ||
-      CurTok == tok_schar || CurTok == tok_lchar) {
+  if (IsBuiltInType()) {
     std::string TypeName = IdentifierStr;
     int SavedTok = CurTok;
     getNextToken(); // consume type
@@ -322,16 +336,16 @@ std::unique_ptr<ExprAST> ParsePrimary() {
 ///   ::= ('+' primary)*
 std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
                                               std::unique_ptr<ExprAST> LHS) {
-  // If this is a binop, find its precedence.
+  // If this is a binop, find its precedence
   while (true) {
     int TokPrec = GetTokPrecedence();
 
     // If this is a binop that binds at least as tightly as the current binop,
-    // consume it, otherwise we are done.
+    // Consume it, otherwise done
     if (TokPrec < ExprPrec)
       return LHS;
 
-    // Okay, we know this is a binop.
+    // Now know this is a binop
     std::string BinOp;
     
     // Convert token to operator string
@@ -459,11 +473,7 @@ std::unique_ptr<ExprAST> ParseExpression() {
 ///   ::= id id '(' (id id (',' id id)*)? ')'  // C-style: returntype name(type param, type param, ...)
 std::unique_ptr<PrototypeAST> ParsePrototype() {
   // Parse return type
-  if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-      CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
-      CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
-      CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
-      CurTok != tok_schar && CurTok != tok_lchar)
+  if (!IsValidType())
     return LogErrorP("Expected return type in prototype");
 
   std::string ReturnType = IdentifierStr;
@@ -489,11 +499,7 @@ std::unique_ptr<PrototypeAST> ParsePrototype() {
   
   // Parse first parameter
   while (true) {
-    if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-        CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
-        CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
-        CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
-        CurTok != tok_schar && CurTok != tok_lchar)
+    if (!IsValidType())
       return LogErrorP("Expected parameter type");
     
     std::string ParamType = IdentifierStr;
@@ -577,11 +583,7 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
 
 /// variabledecl ::= type identifier '=' expression
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration() {
-  if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double && 
-      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
-      CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
-      CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
-      CurTok != tok_schar && CurTok != tok_lchar)
+  if (!IsBuiltInType())
     return nullptr;
     
   std::string Type = IdentifierStr;
@@ -626,11 +628,7 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
     getNextToken();
   
   // Parse type
-  if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double &&
-      CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
-      CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
-      CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
-      CurTok != tok_schar && CurTok != tok_lchar) {
+  if (!IsBuiltInType()) {
     LogError("Expected type after 'for'");
     return nullptr;
   }
@@ -820,12 +818,7 @@ std::unique_ptr<StmtAST> ParseForStatement() {
     getNextToken();
   
   // Check if it's a type or something else
-  bool hasType = (CurTok == tok_int || CurTok == tok_float || CurTok == tok_double ||
-                  CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool || 
-                  CurTok == tok_string || CurTok == tok_byte || CurTok == tok_short || 
-                  CurTok == tok_long || CurTok == tok_sbyte || CurTok == tok_ushort || 
-                  CurTok == tok_uint || CurTok == tok_ulong || CurTok == tok_schar || 
-                  CurTok == tok_lchar);
+  bool hasType = IsBuiltInType();
   
   if (hasType) {
     std::string type = IdentifierStr;
@@ -847,8 +840,8 @@ std::unique_ptr<StmtAST> ParseForStatement() {
       
       // Now check what comes next: 'in' for foreach, '=' for for-to
       if (CurTok == tok_in) {
-        // It's a foreach loop, put tokens back and call ParseForEachStatement
-        // Since we've already consumed tokens, we need to continue parsing here
+        // Foreach loop, put tokens back and call ParseForEachStatement
+        // Since already consumed tokens, need to continue parsing here
         getNextToken(); // eat 'in'
         
         // Parse collection expression
@@ -944,7 +937,7 @@ std::unique_ptr<StmtAST> ParseForStatement() {
   
   // Check for anonymous loop: for <expr> to <expr>
   // Reset to parse as anonymous loop
-  // We need to re-parse from after 'for'
+  // Need to re-parse from after 'for'
   // Current token should be the first expression
   
   // Parse initial expression (could be a number or identifier)
@@ -1024,28 +1017,14 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseBreakStatement();
   case tok_skip:
     return ParseSkipStatement();
-  case tok_int:
-  case tok_float:
-  case tok_double:
-  case tok_char:
-  case tok_void:
-  case tok_bool:
-  case tok_string:
-  case tok_byte:
-  case tok_short:
-  case tok_long:
-  case tok_sbyte:
-  case tok_ushort:
-  case tok_uint:
-  case tok_ulong:
-  case tok_schar:
-  case tok_lchar:
-    return ParseVariableDeclaration();
   case '}':
     // End of block - not a statement, but not an error either
     // Let the caller (ParseBlock) handle this
     return nullptr;
   default:
+    // Check for built-in types for variable declarations
+    if (IsBuiltInType())
+      return ParseVariableDeclaration();
     // Try to parse as an expression statement
     auto Expr = ParseExpression();
     if (!Expr)
@@ -1080,7 +1059,7 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
     
     auto Stmt = ParseStatement();
     if (!Stmt) {
-      // Check if we hit the closing brace
+      // Check if hit closing brace
       if (CurTok == '}')
         break;  // Normal end of block
       return nullptr;  // Actual error
@@ -1134,7 +1113,7 @@ bool ParseTypeIdentifier() {
   // Check what follows
   if (CurTok == '(') {
     // It's a function definition
-    // We need to parse the full prototype and then the body
+    // Need to parse the full prototype and then the body
     getNextToken(); // eat '('
     
     std::vector<Parameter> Args;
@@ -1142,11 +1121,7 @@ bool ParseTypeIdentifier() {
     // Parse parameters
     if (CurTok != ')') {
       while (true) {
-        if (CurTok != tok_identifier && CurTok != tok_int && CurTok != tok_float && 
-            CurTok != tok_double && CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
-            CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
-            CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
-            CurTok != tok_schar && CurTok != tok_lchar) {
+        if (!IsValidType()) {
           fprintf(stderr, "Error: Expected parameter type\n");
           return false;
         }
@@ -1298,7 +1273,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       break;
     
     // Check if this is a field or method
-    // We need to look ahead to distinguish between field declarations and methods
+    // Need to look ahead to distinguish between field declarations and methods
     // Methods have the struct name as their identifier (constructor)
     if (CurTok == tok_identifier && IdentifierStr == StructName) {
       // This is a constructor
@@ -1315,12 +1290,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       std::vector<Parameter> Args;
       while (CurTok != ')' && CurTok != tok_eof) {
         // Parse parameter type
-        if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double &&
-            CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
-            CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
-            CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
-            CurTok != tok_schar && CurTok != tok_lchar &&
-            !(CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end())) {
+        if (!IsValidType()) {
           LogError("Expected parameter type");
           return nullptr;
         }
@@ -1373,12 +1343,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
       Methods.push_back(std::move(Constructor));
       
-    } else if (CurTok == tok_int || CurTok == tok_float || CurTok == tok_double ||
-               CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool || CurTok == tok_string ||
-               CurTok == tok_byte || CurTok == tok_short || CurTok == tok_long || CurTok == tok_sbyte ||
-               CurTok == tok_ushort || CurTok == tok_uint || CurTok == tok_ulong ||
-               CurTok == tok_schar || CurTok == tok_lchar || 
-               (CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end())) {
+    } else if (IsValidType()) {
       // This might be a field or a method
       std::string Type = IdentifierStr;
       getNextToken(); // eat type
@@ -1406,20 +1371,15 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       while (CurTok == tok_newline)
         getNextToken();
       
-      // If we see '(', this is a method
+      // If '(', this is a method
       if (CurTok == '(') {
-        // Parse method - similar to ParsePrototype but we already have the return type and name
+        // Parse method, similar to ParsePrototype but with return type and name
         getNextToken(); // eat '('
         
         std::vector<Parameter> Args;
         while (CurTok != ')' && CurTok != tok_eof) {
           // Parse parameter type
-          if (CurTok != tok_int && CurTok != tok_float && CurTok != tok_double &&
-              CurTok != tok_char && CurTok != tok_void && CurTok != tok_bool && CurTok != tok_string &&
-              CurTok != tok_byte && CurTok != tok_short && CurTok != tok_long && CurTok != tok_sbyte &&
-              CurTok != tok_ushort && CurTok != tok_uint && CurTok != tok_ulong &&
-              CurTok != tok_schar && CurTok != tok_lchar &&
-              !(CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end())) {
+          if (!IsValidType()) {
             LogError("Expected parameter type");
             return nullptr;
           }
