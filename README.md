@@ -4,14 +4,14 @@
 
 # Hybrid Programming Language
 
-Hybrid is a performant, statically-typed programming language that combines the power of C/C++ with the flexibility of Python. It features a modern, expressive syntax, interoperating with C/C++ while being memory-safe.
+Hybrid is a performant, statically-typed programming language that combines the power of C/C++ with the flexibility of Python. It has a modern, expressive syntax, interoperating with C/C++ while being memory-safe.
 
 ## Features
 
-- **C-style syntax** with explicit type declarations
+- **Modern syntax** with explicit type declarations
 - **LLVM backend** for optimized native code generation
 - **Static typing** with automatic type inference for literals
-- **Control flow** including if-else, while loops, C-style for loops, and foreach
+- **Control flow** including if-else, while, for, and foreach
 - **Arrays** with literals and indexing
 - **Structs** with constructors and member access
 - **Interactive REPL** with live code compilation
@@ -133,7 +133,7 @@ Comprehensive documentation is available in the `docs/` directory:
 - [Language Reference](docs/language-reference.md) - Syntax and language basics
 - [Type System](docs/type-system.md) - Types and type safety
 - [Functions](docs/functions.md) - Function definitions and calls
-- [Control Flow](docs/control-flow.md) - If-else, while, and foreach loops
+- [Control Flow](docs/control-flow.md) - Statements and loops
 - [Arrays](docs/arrays.md) - Array types and operations
 - [Expressions](docs/expressions.md) - Operators and expressions
 - [Examples](docs/examples.md) - Complete example programs
@@ -166,9 +166,10 @@ Comprehensive documentation is available in the `docs/` directory:
     - `schar` 8-bit character
     - `lchar` 32-bit Unicode character
 - Arrays
-    - e.g. `int[]`, `float[]`, `byte[]`, etc.
-- All variables must be initialized at declaration
-- Variables of types with different sizes must be explicitly converted
+    - e.g. `int[]`, `float[]`, `byte[]`
+
+> [!NOTE]
+> All variables must be initialized at declaration. Variables of differently sized types must be explicitly converted
 
 ### Functions
 ```c
@@ -253,7 +254,7 @@ Hybrid/
 - All primitive types and arrays
 - If-else statements
 - While loops
-- C-style for loops with advanced features:
+- For loops with advanced features:
   - Basic `for int i = 1 to 10` syntax with automatic increment/decrement
   - Anonymous loops `for 0 to 10` without variable declarations
   - Custom steps with `by` keyword: `by 2`, `by -3`, `by * 2`, `by / 2`
