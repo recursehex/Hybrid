@@ -14,7 +14,8 @@ int idx = 2
 int value_at_idx = global_numbers[idx]
 
 // Test 2: Arrays in functions
-int test_local_arrays() {
+int test_local_arrays()
+{
     // Local array declaration
     int[] local_nums = [10, 20, 30, 40, 50]
     
@@ -31,9 +32,14 @@ int test_local_arrays() {
 }
 
 // Test 3: Arrays as function parameters
-int sum_array(int[] arr) {
-    // Manual sum since foreach isn't implemented
-    return arr[0] + arr[1] + arr[2] + arr[3] + arr[4]
+int sum_array(int[] arr)
+{
+    int sum = 0
+    for int i in arr
+    {
+        sum += arr[i]
+    }
+    return sum
 }
 
 void double_elements(int[] arr) {
@@ -46,12 +52,14 @@ void double_elements(int[] arr) {
 }
 
 // Test 4: Float arrays
-float average_temps(float[] temps) {
+float average_temps(float[] temps)
+{
     float sum = temps[0] + temps[1] + temps[2]
     return sum / 3.0
 }
 
-float test_float_arrays() {
+float test_float_arrays()
+{
     float[] temperatures = [98.6, 99.1, 97.5]
     float avg = average_temps(temperatures)
     
@@ -63,11 +71,13 @@ float test_float_arrays() {
 }
 
 // Test 5: Char arrays
-char get_first_vowel(char[] vowels) {
+char get_first_vowel(char[] vowels)
+{
     return vowels[0]
 }
 
-char test_char_arrays() {
+char test_char_arrays()
+{
     char[] vowels = ['a', 'e', 'i', 'o', 'u']
     char first = get_first_vowel(vowels)
     
@@ -79,11 +89,13 @@ char test_char_arrays() {
 }
 
 // Test 6: Bool arrays
-bool all_true_first_three(bool[] flags) {
+bool all_true_first_three(bool[] flags)
+{
     return flags[0] && flags[1] && flags[2]
 }
 
-bool test_bool_arrays() {
+bool test_bool_arrays()
+{
     bool[] flags = [true, true, false, true, false]
     bool result = all_true_first_three(flags)
     
@@ -94,7 +106,8 @@ bool test_bool_arrays() {
 }
 
 // Test 7: Array operations with mixed expressions
-int test_complex_operations() {
+int test_complex_operations()
+{
     int[] data = [5, 10, 15, 20, 25]
     
     // Complex indexing
