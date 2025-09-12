@@ -98,7 +98,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   else if (TypeStr == "void")
     return llvm::Type::getVoidTy(*TheContext);
   else if (TypeStr == "string")
-    return llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0); // Strings as char*
+    return llvm::PointerType::get(llvm::Type::getInt16Ty(*TheContext), 0); // Strings as 16-bit char*
   // New sized integer types
   else if (TypeStr == "byte")
     return llvm::Type::getInt8Ty(*TheContext);   // 8-bit unsigned
@@ -186,16 +186,41 @@ llvm::Value *BoolExprAST::codegen() {
 
 // Generate code for null expressions
 llvm::Value *NullExprAST::codegen() {
-  // Create a null pointer for string type (char*)
-  llvm::Type *StringType = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  // Create a null pointer for string type (16-bit char*)
+  llvm::Type *StringType = llvm::PointerType::get(llvm::Type::getInt16Ty(*TheContext), 0);
   return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(StringType));
 }
 
 // Generate code for string literals
 llvm::Value *StringExprAST::codegen() {
-  // Create a global string constant
+  // Create a global 16-bit Unicode character array constant
   setTypeName("string");
-  return Builder->CreateGlobalString(getValue(), "str");
+  
+  const std::string &str = getValue();
+  std::vector<llvm::Constant*> CharValues;
+  
+  // TODO: Proper UTF-8 to UTF-16 conversion should be implemented here
+  // For now, we'll treat each byte as a separate 16-bit character
+  // This allows for proper Unicode support when the lexer is updated
+  for (unsigned char c : str) {
+    CharValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 
+                                                static_cast<uint16_t>(c)));
+  }
+  
+  // Add null terminator
+  CharValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 0));
+  
+  // Create array type and constant
+  llvm::ArrayType *ArrayType = llvm::ArrayType::get(llvm::Type::getInt16Ty(*TheContext), CharValues.size());
+  llvm::Constant *StringArray = llvm::ConstantArray::get(ArrayType, CharValues);
+  
+  // Create global variable
+  llvm::GlobalVariable *GlobalStr = new llvm::GlobalVariable(
+    *TheModule, ArrayType, true, llvm::GlobalValue::PrivateLinkage, StringArray, "str");
+  
+  // Return pointer to the first element
+  llvm::Value *Zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+  return Builder->CreateInBoundsGEP(ArrayType, GlobalStr, {Zero, Zero}, "strptr");
 }
 
 // Generate code for character literals
