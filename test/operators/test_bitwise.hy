@@ -1,7 +1,8 @@
 // Test bitwise operators
 
 // Test bitwise AND
-int testAnd() {
+int testAnd()
+{
     int a = 12    // 1100 in binary
     int b = 10    // 1010 in binary
     int result = a & b  // Should be 8 (1000)
@@ -9,7 +10,8 @@ int testAnd() {
 }
 
 // Test bitwise OR
-int testOr() {
+int testOr()
+{
     int a = 12    // 1100 in binary
     int b = 10    // 1010 in binary
     int result = a | b  // Should be 14 (1110)
@@ -17,7 +19,8 @@ int testOr() {
 }
 
 // Test bitwise XOR
-int testXor() {
+int testXor()
+{
     int a = 12    // 1100 in binary
     int b = 10    // 1010 in binary
     int result = a ^ b  // Should be 6 (0110)
@@ -25,21 +28,24 @@ int testXor() {
 }
 
 // Test left shift
-int testLeftShift() {
+int testLeftShift()
+{
     int a = 5     // 0101 in binary
     int result = a << 2  // Should be 20 (10100)
     return result
 }
 
 // Test right shift
-int testRightShift() {
+int testRightShift()
+{
     int a = 20    // 10100 in binary
     int result = a >> 2  // Should be 5 (00101)
     return result
 }
 
 // Test compound assignment operators
-int testCompoundAssignments() {
+int testCompoundAssignments()
+{
     int x = 15    // 1111 in binary
     
     // Test &=
@@ -61,7 +67,8 @@ int testCompoundAssignments() {
 }
 
 // Test bitwise operations with arrays
-int testBitwiseArrays() {
+int testBitwiseArrays()
+{
     int[] values = [255, 128, 64, 32]
     
     // Test array element with bitwise operations

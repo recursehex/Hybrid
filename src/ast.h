@@ -109,7 +109,7 @@ public:
   llvm::Value *codegen() override;
 };
 
-/// ForLoopStmtAST - Statement class for C-style for loops with 'to' syntax.
+/// ForLoopStmtAST - Statement class for for loops with 'to' syntax.
 class ForLoopStmtAST : public StmtAST {
   std::string Type;
   std::string VarName;

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Hybrid provides four main control flow constructs: if-else statements, while loops, C-style for loops, and foreach loops. All control flow statements use curly braces `{}` for their bodies and support nesting. Loops support `break` and `skip` statements for flow control.
+Hybrid provides four main control flow constructs: if-else statements, while loops, for loops, and foreach loops. All control flow statements use curly braces `{}` for their bodies and support nesting. Loops support `break` and `skip` statements for flow control.
 
 ## If-Else Statements
 
@@ -336,9 +336,9 @@ int nestedSkip()
 - In nested loops, both statements only affect the innermost enclosing loop
 - Using `break` or `skip` outside of a loop results in a compilation error
 
-## C-Style For Loops
+## For Loops
 
-C-style for loops provide flexible iteration with initialization, condition, and step control using Hybrid's `to` syntax.
+For loops provide flexible iteration with initialization, condition, and step control using Hybrid's `to` syntax.
 
 ### Basic Syntax
 
@@ -603,7 +603,7 @@ for int i = 0 to 1
 
 ### Break and Skip in For Loops
 
-Control flow statements work in C-style for loops:
+Control flow statements work in for loops:
 
 ```c
 // Break example
@@ -728,13 +728,12 @@ for int i in outerList
 
 ## Implementation Details
 
-- All conditions are evaluated to boolean values
-- Numeric values can be used as conditions (0 is false, non-zero is true)
+- Non-boolean conditions cannot be used and will result in a compilation error
 - Block statements create new scopes for local variables
 - Control flow statements can be nested to any depth
 - LLVM IR uses phi nodes and basic blocks for control flow
 - Foreach loops use internal counters and array indexing for iteration
-- C-style for loops create separate AST nodes (`ForLoopStmtAST`) from foreach loops (`ForEachStmtAST`)
+- For loops create separate AST nodes (`ForLoopStmtAST`) from foreach loops (`ForEachStmtAST`)
 - For loops automatically detect increment vs decrement based on initial and limit values
 - Anonymous for loops generate internal variable names (`__anon_loop_var_N`)
 - Custom conditions in for loops bypass automatic limit checking

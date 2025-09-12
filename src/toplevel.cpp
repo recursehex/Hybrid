@@ -157,14 +157,14 @@ void MainLoop() {
         extern int CurTok;
         
         if (StructNames.find(IdentifierStr) != StructNames.end()) {
-          // It's a struct type, we need to look ahead to determine what it is
+          // It's a struct type, need to look ahead to determine what it is
           std::string structName = IdentifierStr;
           getNextToken(); // consume the struct name
           
           if (CurTok == '(') {
-            // It's a struct constructor call - treat as expression
-            // We need to put the tokens back for expression parsing
-            // Since we can't easily "unget" tokens, we'll create a CallExprAST directly
+            // Struct constructor call
+            // Put the tokens back for expression parsing
+            // Since can't easily "unget" tokens, create a CallExprAST directly
             getNextToken(); // eat '('
             std::vector<std::unique_ptr<ExprAST>> Args;
             if (CurTok != ')') {
@@ -202,7 +202,7 @@ void MainLoop() {
               }
             }
           } else {
-            // It's a variable declaration - we need to handle it properly
+            // Variable declaration
             // The struct name has been consumed, current token should be the variable name
             if (CurTok == tok_identifier) {
               std::string varName = IdentifierStr;
@@ -225,8 +225,7 @@ void MainLoop() {
               }
             } else if (CurTok == '[') {
               // Array type - put back the struct name processing
-              // This is getting complex, let's use the original ParseTypeIdentifier approach
-              // We need to restore the state
+              // Need to restore the state
               IdentifierStr = structName;
               CurTok = tok_identifier;
               if (!ParseTypeIdentifier()) {

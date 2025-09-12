@@ -33,7 +33,8 @@ arr[3] /= 4   // arr[3] = 10
 arr[4] %= 7   // arr[4] = 1
 
 // Function using compound assignments
-int compound_test(int val) {
+int compound_test(int val)
+{
     val += 10
     val *= 2
     val %= 15

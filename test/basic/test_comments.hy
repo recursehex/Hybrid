@@ -4,13 +4,15 @@ int global_x = 5
 // Another comment
 float global_y = 3.14
 
-int add(int a, int b) {
+int add(int a, int b)
+{
     // Comment inside function
     return a + b
 }
 
 // Test expressions with comments in function context
-int testExpressions() {
+int testExpressions()
+{
     int x = 5
     float y = 3.14
     
@@ -19,7 +21,8 @@ int testExpressions() {
     return result
 }
 
-int main() {
+int main()
+{
     int sum = add(5, 3)
     int expr_result = testExpressions()
     return sum + expr_result

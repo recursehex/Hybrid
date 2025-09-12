@@ -4,7 +4,8 @@ use List
 use Map
 use Set
 
-int main() {
+int main()
+{
     // Using imported modules
     return 0
 }

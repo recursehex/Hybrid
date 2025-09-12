@@ -123,7 +123,8 @@ int test_complex_operations()
 }
 
 // Test 8: Main test function that exercises all features
-int main() {
+int main()
+{
     // Test global array operations
     int global_sum = first_global + last_global + value_at_idx
     

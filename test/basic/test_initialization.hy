@@ -6,7 +6,8 @@ bool flag = true
 char c = 'a'
 
 // Test in functions
-void testInit() {
+void testInit()
+{
     int count = 0
     bool done = false
     float value = 1.5

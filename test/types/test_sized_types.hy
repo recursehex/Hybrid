@@ -46,15 +46,18 @@ short s_elem = shorts[1]
 long l_elem = longs[2]
 
 // Test functions with sized types
-byte identity_byte(byte x) {
+byte identity_byte(byte x)
+{
     return x
 }
 
-short add_shorts(short a, short b) {
+short add_shorts(short a, short b)
+{
     return a + b
 }
 
-long multiply_long(long x, long y) {
+long multiply_long(long x, long y)
+{
     return x * y
 }
 
@@ -72,15 +75,18 @@ float f_result = i1 + f1
 double d_result = i2 + d1
 
 // Test character operations
-char char_test(char c) {
+char char_test(char c)
+{
     return c
 }
 
-schar schar_test(schar sc) {
+schar schar_test(schar sc)
+{
     return sc
 }
 
-lchar lchar_test(lchar lc) {
+lchar lchar_test(lchar lc)
+{
     return lc
 }
 

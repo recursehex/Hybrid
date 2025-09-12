@@ -1,8 +1,7 @@
-// Test that boolean operators fail with non-bool types
+// Test that should fail - boolean operators with non-bool types
 
 int testFailWith(int x, int y)
 {
-    // This should fail - boolean operators with non-bool types
     if x && y
     {
         return 1
@@ -12,7 +11,6 @@ int testFailWith(int x, int y)
 
 int testFailOr(int a, int b)
 {
-    // This should also fail
     if a || b
     {
         return 1
@@ -22,7 +20,6 @@ int testFailOr(int a, int b)
 
 int testFailNot(int value)
 {
-    // This should fail
     if !value
     {
         return 1

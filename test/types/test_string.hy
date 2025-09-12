@@ -12,29 +12,36 @@ string quote_test = "He said \"Hello\" to me"
 string backslash_test = "C:\\Users\\test\\file.txt"
 
 // Function that returns a string
-string getMessage() {
-  return "Hello from function"
+string getMessage()
+{
+    return "Hello from function"
 }
 
 // Function that takes strings as parameters
-bool compareStrings(string a, string b) {
-  return a == b
+bool compareStrings(string a, string b)
+{
+    return a == b
 }
 
 // Test string operations
-int testStringOps() {
-  string local_greeting = "Hello"
-  string message = getMessage()
-  bool same = compareStrings(local_greeting, "Hello")
-  
-  if same {
-    return 1
-  } else {
-    return 0
-  }
+int testStringOps()
+{
+    string local_greeting = "Hello"
+    string message = getMessage()
+    bool same = compareStrings(local_greeting, "Hello")
+    
+    if same
+    {
+        return 1
+    }
+    else
+    {
+        return 0
+    }
 }
 
-int main() {
-  int result = testStringOps()
-  return result
+int main()
+{
+    int result = testStringOps()
+    return result
 }

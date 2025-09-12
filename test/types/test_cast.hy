@@ -21,7 +21,8 @@ int asciiValue = int: letter
 char backToChar = char: 65
 
 // Function to test casting in expressions
-int testCasting() {
+int testCasting()
+{
     int a = 10
     float b = 2.5
     
@@ -35,7 +36,8 @@ int testCasting() {
 }
 
 // Test casting with different sized types
-void testSizedCasting() {
+void testSizedCasting()
+{
     long bigValue = 1234567890
     int medValue = int: bigValue
     short smallValue = short: medValue
@@ -48,12 +50,13 @@ void testSizedCasting() {
 }
 
 // Test signed/unsigned casting
-void testSignedUnsigned() {
+void testSignedUnsigned()
+{
     sbyte signedByte = -10
     int signedInt = int: signedByte  // Should sign-extend
     
     byte unsignedByte = 250
-    int unsignedInt = int: unsignedByte  // Should zero-extend (we assume)
+    int unsignedInt = int: unsignedByte  // Should zero-extend
     
     // Cast between different character types
     schar smallChar = 'x'

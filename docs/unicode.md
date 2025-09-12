@@ -19,10 +19,10 @@ Hybrid provides comprehensive Unicode support across all character types and str
 You can directly type or paste Unicode characters in your source code:
 
 ```c
-char euro = '€'          // Euro sign
-char omega = 'Ω'         // Greek capital omega
-char chinese = '中'       // Chinese character
-lchar emoji = '😀'       // Emoji (requires lchar for > U+FFFF)
+char euro = '€'         // Euro sign
+char omega = 'Ω'        // Greek capital omega
+char chinese = '中'     // Chinese character
+lchar emoji = '😀'      // Emoji (requires lchar for > U+FFFF)
 ```
 
 ### 2. Unicode Escape Sequences
@@ -32,9 +32,9 @@ lchar emoji = '😀'       // Emoji (requires lchar for > U+FFFF)
 For characters in the Basic Multilingual Plane (U+0000 to U+FFFF):
 
 ```c
-char omega = '\u03a9'    // Ω (Greek capital omega)
-char euro = '\u20ac'     // € (Euro sign)
-char chinese = '\u4e2d'  // 中 (Chinese character)
+char omega = '\u03a9'       // Ω (Greek capital omega)
+char euro = '\u20ac'        // € (Euro sign)
+char chinese = '\u4e2d'     // 中 (Chinese character)
 ```
 
 #### 32-bit Unicode Escapes (`\UXXXXXXXX`)
@@ -42,7 +42,7 @@ char chinese = '\u4e2d'  // 中 (Chinese character)
 For characters beyond the BMP, including emoji and rare scripts:
 
 ```c
-lchar emoji = '\U0001f600'  // 😀 (Grinning face)
+lchar emoji = '\U0001f600'      // 😀 (Grinning face)
 lchar cuneiform = '\U00012000'  // 𒀀 (Cuneiform sign)
 ```
 
@@ -51,9 +51,9 @@ lchar cuneiform = '\U00012000'  // 𒀀 (Cuneiform sign)
 Strings support both direct UTF-8 and Unicode escapes:
 
 ```c
-string greeting = "Hello, 世界!"  // Direct UTF-8
-string escaped = "Greek: \u03a9\u03b1\u03b2"  // Using escapes
-string mixed = "Symbol: € Price: ¥100"  // Mixed content
+string greeting = "Hello, 世界!"                // Direct UTF-8
+string escaped = "Greek: \u03a9\u03b1\u03b2"    // Using escapes
+string mixed = "Symbol: € Price: ¥100"          // Mixed content
 ```
 
 ## Character Literal Rules
@@ -73,9 +73,9 @@ When using character literals without explicit type declaration, the compiler au
 You can explicitly specify the character type:
 
 ```c
-schar ascii_only = 'A'    // 8-bit, ASCII only
-char bmp_char = '中'       // 16-bit, BMP characters
-lchar full_unicode = '🎨'  // 32-bit, full Unicode
+schar ascii_only = 'A'      // 8-bit, ASCII only
+char bmp_char = '中'        // 16-bit, BMP characters
+lchar full_unicode = '🎨'   // 32-bit, full Unicode
 ```
 
 ## String Handling

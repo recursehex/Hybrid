@@ -209,7 +209,7 @@ run_test_verbose() {
             fi
         fi
         
-        # Skip showing this test if it passed and we're in failures-only mode
+        # Skip showing this test if it passed and in failures-only mode
         if [ $test_passed -eq 1 ]; then
             return
         fi
@@ -322,7 +322,7 @@ if [ $VERBOSE_MODE -eq 1 ]; then
     for test_file in $TEST_FILES; do
         run_test_verbose "$test_file"
         TOTAL_TESTS=$((TOTAL_TESTS + 1))
-        # For verbose mode, we need to check if the test passed or failed
+        # For verbose mode, check if the test passed or failed
         # Run it again silently to check the result
         output=$($HYBRID_EXEC < "$test_file" 2>&1)
         exit_code=$?
