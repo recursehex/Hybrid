@@ -583,7 +583,7 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
 
 /// variabledecl ::= type identifier '=' expression
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration() {
-  if (!IsBuiltInType())
+  if (!IsValidType())
     return nullptr;
     
   std::string Type = IdentifierStr;
@@ -1022,8 +1022,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     // Let the caller (ParseBlock) handle this
     return nullptr;
   default:
-    // Check for built-in types for variable declarations
-    if (IsBuiltInType())
+    // Check for valid types (built-in and struct) for variable declarations
+    if (IsValidType())
       return ParseVariableDeclaration();
     // Try to parse as an expression statement
     auto Expr = ParseExpression();

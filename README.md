@@ -284,6 +284,11 @@ Hybrid/
 - Automatic Reference Counting (ARC) memory management
 - Standard library integration
 - Module system and imports
+- Mulitidimensional arrays
+- Binary literals e.g. `0b1010`
+- Hexadecimal literals e.g. `0xABCD`
+- Floating point literals with scientific notation e.g. `1.23e4`
+- Multiline literals
 - Stuctures
     - `class`
     - `struct`
