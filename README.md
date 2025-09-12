@@ -201,6 +201,20 @@ for 0 to 10 { }                     // Anonymous counter
 
 // Foreach loop
 for int i in nums { }
+
+// Switch statements (block-style)
+switch num {
+    case 1 { int result = 10 }
+    case 2 { int result = 20 }
+    default { int result = 0 }
+}
+
+// Switch expressions (arrow-style)  
+string message = switch letter {
+    'a' => "Alpha"
+    'b' => "Beta"
+    default => "Unknown"
+}
 ```
 
 ### Operators
@@ -279,6 +293,11 @@ Hybrid/
     - `uint` - 32 bit unsigned
     - `ulong` - 64 bit unsigned
 - Structs with multi-level member access and constructors
+- Switch statements and expressions
+    - Block-style switch statements: `switch num { case 1 { ... } default { ... } }`
+    - Arrow-syntax switch expressions: `switch letter { 'a' => "Alpha" default => "Unknown" }`
+    - Multiple case values: `case 1, 2 => 10`
+    - Full LLVM optimization with native switch instructions
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management
@@ -334,10 +353,6 @@ Hybrid/
     - `(type1, type2) var`
 - String interpolation
     - $"Hello, \`name\`!"
-- Switch case statements
-    - `switch`
-    - `case`
-    - `default`
 - Generics
     - `<type>`
 - Type checking

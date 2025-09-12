@@ -7,6 +7,7 @@ void HandleExtern();
 void HandleTopLevelExpression();
 void HandleVariableDeclaration();
 void HandleStructDefinition();
+void HandleSwitchStatement();
 void MainLoop();
 
 #endif // TOPLEVEL_H

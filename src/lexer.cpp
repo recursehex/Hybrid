@@ -86,6 +86,12 @@ int gettok() {
       return tok_struct;
     if (IdentifierStr == "this")
       return tok_this;
+    if (IdentifierStr == "switch")
+      return tok_switch;
+    if (IdentifierStr == "case")
+      return tok_case;
+    if (IdentifierStr == "default")
+      return tok_default;
     return tok_identifier;
   }
 
@@ -327,8 +333,11 @@ char_literal_end:
     if (NextChar == '=') {
       LastChar = getchar();
       return tok_eq;  // ==
+    } else if (NextChar == '>') {
+      LastChar = getchar();
+      return tok_lambda;  // =>
     } else {
-      // Not ==, put the character back
+      // Not == or =>, put the character back
       ungetc(NextChar, stdin);
     }
   }

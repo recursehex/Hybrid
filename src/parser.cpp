@@ -329,6 +329,8 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case tok_inc:
   case tok_dec:
     return ParseUnaryExpr();
+  case tok_switch:
+    return ParseSwitchExpression();
   }
 }
 
@@ -804,6 +806,239 @@ std::unique_ptr<SkipStmtAST> ParseSkipStatement() {
   return std::make_unique<SkipStmtAST>();
 }
 
+/// switchstmt ::= 'switch' expression '{' case* '}'
+std::unique_ptr<SwitchStmtAST> ParseSwitchStatement() {
+  getNextToken(); // eat 'switch'
+  
+  // Skip newlines after 'switch'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse switch expression
+  auto Condition = ParseExpression();
+  if (!Condition) {
+    LogError("Expected expression after 'switch'");
+    return nullptr;
+  }
+  
+  // Skip newlines before '{'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  if (CurTok != '{') {
+    LogError("Expected '{' after switch condition");
+    return nullptr;
+  }
+  
+  getNextToken(); // eat '{'
+  
+  // Parse cases
+  std::vector<std::unique_ptr<CaseAST>> Cases;
+  
+  // Skip newlines after opening brace
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  while (CurTok != '}' && CurTok != tok_eof) {
+    // Skip newlines between cases
+    if (CurTok == tok_newline) {
+      getNextToken();
+      continue;
+    }
+    
+    if (CurTok == tok_case || CurTok == tok_default) {
+      auto Case = ParseCase(false); // false = statement case
+      if (!Case)
+        return nullptr;
+      Cases.push_back(std::move(Case));
+    } else {
+      LogError("Expected 'case' or 'default' in switch statement");
+      return nullptr;
+    }
+    
+    // Skip newlines after case
+    while (CurTok == tok_newline)
+      getNextToken();
+  }
+  
+  if (CurTok != '}') {
+    LogError("Expected '}' at end of switch statement");
+    return nullptr;
+  }
+  
+  getNextToken(); // eat '}'
+  
+  return std::make_unique<SwitchStmtAST>(std::move(Condition), std::move(Cases));
+}
+
+/// switchexpr ::= 'switch' expression '{' caseexpr* '}'
+std::unique_ptr<SwitchExprAST> ParseSwitchExpression() {
+  getNextToken(); // eat 'switch'
+  
+  // Skip newlines after 'switch'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  // Parse switch expression
+  auto Condition = ParseExpression();
+  if (!Condition) {
+    LogError("Expected expression after 'switch'");
+    return nullptr;
+  }
+  
+  // Skip newlines before '{'
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  if (CurTok != '{') {
+    LogError("Expected '{' after switch condition");
+    return nullptr;
+  }
+  
+  getNextToken(); // eat '{'
+  
+  // Parse cases
+  std::vector<std::unique_ptr<CaseAST>> Cases;
+  
+  // Skip newlines after opening brace
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  while (CurTok != '}' && CurTok != tok_eof) {
+    // Skip newlines between cases
+    if (CurTok == tok_newline) {
+      getNextToken();
+      continue;
+    }
+    
+    // For expression switches, we expect value => expr format or default => expr
+    if (CurTok == tok_default) {
+      auto Case = ParseCase(true); // true = expression case
+      if (!Case)
+        return nullptr;
+      Cases.push_back(std::move(Case));
+    } else {
+      // Parse value(s) => expression
+      auto Case = ParseCase(true); // true = expression case
+      if (!Case)
+        return nullptr;
+      Cases.push_back(std::move(Case));
+    }
+    
+    // Skip newlines after case
+    while (CurTok == tok_newline)
+      getNextToken();
+  }
+  
+  if (CurTok != '}') {
+    LogError("Expected '}' at end of switch expression");
+    return nullptr;
+  }
+  
+  getNextToken(); // eat '}'
+  
+  return std::make_unique<SwitchExprAST>(std::move(Condition), std::move(Cases));
+}
+
+/// case ::= 'case' values '{' statements '}' | value* '=>' expression
+/// default ::= 'default' '{' statements '}' | 'default' '=>' expression
+std::unique_ptr<CaseAST> ParseCase(bool isExpression) {
+  bool isDefault = false;
+  std::vector<std::unique_ptr<ExprAST>> Values;
+  
+  if (CurTok == tok_default) {
+    isDefault = true;
+    getNextToken(); // eat 'default'
+  } else if (CurTok == tok_case) {
+    getNextToken(); // eat 'case'
+    
+    // Parse comma-separated values for the case
+    do {
+      // Skip newlines
+      while (CurTok == tok_newline)
+        getNextToken();
+        
+      auto Value = ParseExpression();
+      if (!Value) {
+        LogError("Expected case value");
+        return nullptr;
+      }
+      Values.push_back(std::move(Value));
+      
+      // Check for comma (multiple values)
+      if (CurTok == ',') {
+        getNextToken(); // eat ','
+      } else {
+        break;
+      }
+    } while (true);
+  } else {
+    // In switch expressions, we might have direct values without 'case'
+    if (isExpression) {
+      do {
+        // Skip newlines
+        while (CurTok == tok_newline)
+          getNextToken();
+          
+        auto Value = ParseExpression();
+        if (!Value) {
+          LogError("Expected case value");
+          return nullptr;
+        }
+        Values.push_back(std::move(Value));
+        
+        // Check for comma (multiple values)
+        if (CurTok == ',') {
+          getNextToken(); // eat ','
+        } else {
+          break;
+        }
+      } while (true);
+    } else {
+      LogError("Expected 'case' or 'default'");
+      return nullptr;
+    }
+  }
+  
+  // Skip newlines
+  while (CurTok == tok_newline)
+    getNextToken();
+  
+  if (isExpression) {
+    // Expression case: expect => expression
+    if (CurTok != tok_lambda) {
+      LogError("Expected '=>' in switch expression case");
+      return nullptr;
+    }
+    
+    getNextToken(); // eat '=>'
+    
+    // Skip newlines after '=>'
+    while (CurTok == tok_newline)
+      getNextToken();
+    
+    auto Expression = ParseExpression();
+    if (!Expression) {
+      LogError("Expected expression after '=>'");
+      return nullptr;
+    }
+    
+    return std::make_unique<CaseAST>(std::move(Values), std::move(Expression), isDefault);
+  } else {
+    // Statement case: expect { statements }
+    if (CurTok != '{') {
+      LogError("Expected '{' after case in switch statement");
+      return nullptr;
+    }
+    
+    auto Body = ParseBlock();
+    if (!Body)
+      return nullptr;
+    
+    return std::make_unique<CaseAST>(std::move(Values), std::move(Body), isDefault);
+  }
+}
+
 /// Helper to determine which type of for loop and parse accordingly
 std::unique_ptr<StmtAST> ParseForStatement() {
   // Save position to peek ahead
@@ -1017,6 +1252,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseBreakStatement();
   case tok_skip:
     return ParseSkipStatement();
+  case tok_switch:
+    return ParseSwitchStatement();
   case '}':
     // End of block - not a statement, but not an error either
     // Let the caller (ParseBlock) handle this

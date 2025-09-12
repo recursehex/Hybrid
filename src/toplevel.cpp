@@ -103,6 +103,23 @@ void HandleStructDefinition() {
   }
 }
 
+void HandleSwitchStatement() {
+  if (auto SwitchAST = ParseSwitchStatement()) {
+    fprintf(stderr, "Parsed switch statement successfully, generating code...\n");
+    if (auto SwitchIR = SwitchAST->codegen()) {
+      fprintf(stderr, "Generated switch statement IR:\n");
+      SwitchIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    } else {
+      fprintf(stderr, "Error: Failed to generate IR for switch statement\n");
+    }
+  } else {
+    fprintf(stderr, "Error: Failed to parse switch statement\n");
+    // Skip token for error recovery.
+    getNextToken();
+  }
+}
+
 
 /// top ::= definition | external | expression | variabledecl | foreachstmt | usestmt | ';' | '\n'
 void MainLoop() {
@@ -126,6 +143,9 @@ void MainLoop() {
       break;
     case tok_struct:
       HandleStructDefinition();
+      break;
+    case tok_switch:
+      HandleSwitchStatement();
       break;
     case tok_int:
     case tok_float:

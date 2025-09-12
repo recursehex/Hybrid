@@ -2589,3 +2589,212 @@ llvm::Value *ThisExprAST::codegen_ptr() {
   // 'this' is already a pointer
   return codegen();
 }
+
+// Generate code for switch statements
+llvm::Value *SwitchStmtAST::codegen() {
+  // Evaluate the switch condition
+  llvm::Value *CondV = getCondition()->codegen();
+  if (!CondV)
+    return nullptr;
+  
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  
+  // Create basic blocks for each case and the exit block
+  llvm::BasicBlock *ExitBB = llvm::BasicBlock::Create(*TheContext, "switch_end");
+  
+  // Create a switch instruction
+  llvm::SwitchInst *Switch = nullptr;
+  llvm::BasicBlock *DefaultBB = nullptr;
+  
+  // First pass: collect all case values and create basic blocks
+  std::vector<std::pair<llvm::BasicBlock*, const CaseAST*>> CaseBlocks;
+  
+  for (const auto &Case : getCases()) {
+    llvm::BasicBlock *CaseBB = llvm::BasicBlock::Create(*TheContext, 
+        Case->isDefault() ? "default" : "case", TheFunction);
+    CaseBlocks.push_back({CaseBB, Case.get()});
+    
+    if (Case->isDefault()) {
+      DefaultBB = CaseBB;
+    }
+  }
+  
+  // Create switch instruction with default case or exit block
+  llvm::BasicBlock *SwitchDefaultBB = DefaultBB ? DefaultBB : ExitBB;
+  Switch = Builder->CreateSwitch(CondV, SwitchDefaultBB, getCases().size());
+  
+  // Add case values to switch instruction
+  for (size_t i = 0; i < getCases().size(); ++i) {
+    const auto &Case = getCases()[i];
+    llvm::BasicBlock *CaseBB = CaseBlocks[i].first;
+    
+    if (!Case->isDefault()) {
+      // Add each case value
+      for (const auto &Value : Case->getValues()) {
+        llvm::Value *CaseVal = Value->codegen();
+        if (!CaseVal)
+          return nullptr;
+        
+        // Convert to constant integer for switch
+        if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(CaseVal)) {
+          Switch->addCase(CI, CaseBB);
+        } else {
+          return LogErrorV("Case values must be compile-time constants");
+        }
+      }
+    }
+  }
+  
+  // Second pass: generate code for each case body
+  for (size_t i = 0; i < CaseBlocks.size(); ++i) {
+    llvm::BasicBlock *CaseBB = CaseBlocks[i].first;
+    const CaseAST *Case = CaseBlocks[i].second;
+    
+    // Only add the block to function if it's not already added (default case might be)
+    if (CaseBB->getParent() == nullptr) {
+      CaseBB->insertInto(TheFunction);
+    }
+    
+    Builder->SetInsertPoint(CaseBB);
+    
+    // Generate case body
+    if (Case->getBody()) {
+      llvm::Value *BodyV = Case->getBody()->codegen();
+      if (!BodyV)
+        return nullptr;
+    }
+    
+    // No fall-through - always branch to exit (unless there's a return/break)
+    if (!Builder->GetInsertBlock()->getTerminator()) {
+      Builder->CreateBr(ExitBB);
+    }
+  }
+  
+  // Add exit block and set it as insertion point
+  ExitBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(ExitBB);
+  
+  // Switch statements don't return a value
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
+// Generate code for switch expressions
+llvm::Value *SwitchExprAST::codegen() {
+  // Evaluate the switch condition
+  llvm::Value *CondV = getCondition()->codegen();
+  if (!CondV)
+    return nullptr;
+  
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  
+  // Create basic blocks for each case and the exit block
+  llvm::BasicBlock *ExitBB = llvm::BasicBlock::Create(*TheContext, "switch_expr_end");
+  
+  // Create a PHI node to collect the result values
+  // We'll determine the result type from the first case
+  llvm::Type *ResultType = nullptr;
+  std::vector<std::pair<llvm::BasicBlock*, const CaseAST*>> CaseBlocks;
+  
+  // First pass: create basic blocks and determine result type
+  for (const auto &Case : getCases()) {
+    llvm::BasicBlock *CaseBB = llvm::BasicBlock::Create(*TheContext, 
+        Case->isDefault() ? "expr_default" : "expr_case", TheFunction);
+    CaseBlocks.push_back({CaseBB, Case.get()});
+  }
+  
+  // Create switch instruction
+  llvm::BasicBlock *DefaultBB = nullptr;
+  for (size_t i = 0; i < getCases().size(); ++i) {
+    if (getCases()[i]->isDefault()) {
+      DefaultBB = CaseBlocks[i].first;
+      break;
+    }
+  }
+  
+  if (!DefaultBB) {
+    return LogErrorV("Switch expressions must have a default case");
+  }
+  
+  llvm::SwitchInst *Switch = Builder->CreateSwitch(CondV, DefaultBB, getCases().size());
+  
+  // Add case values to switch instruction
+  for (size_t i = 0; i < getCases().size(); ++i) {
+    const auto &Case = getCases()[i];
+    llvm::BasicBlock *CaseBB = CaseBlocks[i].first;
+    
+    if (!Case->isDefault()) {
+      // Add each case value
+      for (const auto &Value : Case->getValues()) {
+        llvm::Value *CaseVal = Value->codegen();
+        if (!CaseVal)
+          return nullptr;
+        
+        // Convert to constant integer for switch
+        if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(CaseVal)) {
+          Switch->addCase(CI, CaseBB);
+        } else {
+          return LogErrorV("Case values must be compile-time constants");
+        }
+      }
+    }
+  }
+  
+  // Generate code for each case expression and collect results
+  std::vector<std::pair<llvm::Value*, llvm::BasicBlock*>> PhiValues;
+  
+  for (size_t i = 0; i < CaseBlocks.size(); ++i) {
+    llvm::BasicBlock *CaseBB = CaseBlocks[i].first;
+    const CaseAST *Case = CaseBlocks[i].second;
+    
+    Builder->SetInsertPoint(CaseBB);
+    
+    // Generate case expression
+    llvm::Value *CaseResult = Case->getExpression()->codegen();
+    if (!CaseResult)
+      return nullptr;
+    
+    // Determine result type from first case
+    if (ResultType == nullptr) {
+      ResultType = CaseResult->getType();
+      
+      // Set the expression's type name based on result type
+      if (ResultType->isIntegerTy(32)) {
+        setTypeName("int");
+      } else if (ResultType->isDoubleTy()) {
+        setTypeName("double");
+      } else if (ResultType->isFloatTy()) {
+        setTypeName("float");
+      } else if (ResultType->isIntegerTy(8)) {
+        setTypeName("bool");
+      } else if (ResultType->isPointerTy()) {
+        setTypeName("string");
+      }
+    }
+    
+    // Type-cast case result to match result type if needed
+    if (CaseResult->getType() != ResultType) {
+      // Simple type promotions for switch expressions
+      if (ResultType->isDoubleTy() && CaseResult->getType()->isIntegerTy(32)) {
+        CaseResult = Builder->CreateSIToFP(CaseResult, ResultType, "int_to_double");
+      } else if (ResultType->isFloatTy() && CaseResult->getType()->isIntegerTy(32)) {
+        CaseResult = Builder->CreateSIToFP(CaseResult, ResultType, "int_to_float");
+      } else if (ResultType != CaseResult->getType()) {
+        return LogErrorV("All switch expression cases must return the same type");
+      }
+    }
+    
+    PhiValues.push_back({CaseResult, CaseBB});
+    Builder->CreateBr(ExitBB);
+  }
+  
+  // Add exit block and create PHI node
+  ExitBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(ExitBB);
+  
+  llvm::PHINode *Result = Builder->CreatePHI(ResultType, PhiValues.size(), "switch_result");
+  for (const auto &PhiVal : PhiValues) {
+    Result->addIncoming(PhiVal.first, PhiVal.second);
+  }
+  
+  return Result;
+}

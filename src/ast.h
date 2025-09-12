@@ -186,6 +186,58 @@ public:
   llvm::Value *codegen() override;
 };
 
+/// CaseAST - Represents a single case clause in a switch.
+class CaseAST {
+  std::vector<std::unique_ptr<ExprAST>> Values;  // Multiple values for same case
+  std::unique_ptr<StmtAST> Body;                 // Block for statement switch
+  std::unique_ptr<ExprAST> Expression;           // Expression for expression switch
+  bool IsDefault;
+
+public:
+  // Constructor for statement cases
+  CaseAST(std::vector<std::unique_ptr<ExprAST>> Values, std::unique_ptr<StmtAST> Body, bool IsDefault = false)
+      : Values(std::move(Values)), Body(std::move(Body)), IsDefault(IsDefault) {}
+  
+  // Constructor for expression cases
+  CaseAST(std::vector<std::unique_ptr<ExprAST>> Values, std::unique_ptr<ExprAST> Expression, bool IsDefault = false)
+      : Values(std::move(Values)), Expression(std::move(Expression)), IsDefault(IsDefault) {}
+  
+  const std::vector<std::unique_ptr<ExprAST>> &getValues() const { return Values; }
+  StmtAST *getBody() const { return Body.get(); }
+  ExprAST *getExpression() const { return Expression.get(); }
+  bool isDefault() const { return IsDefault; }
+};
+
+/// SwitchStmtAST - Statement class for switch statements with block syntax.
+class SwitchStmtAST : public StmtAST {
+  std::unique_ptr<ExprAST> Condition;
+  std::vector<std::unique_ptr<CaseAST>> Cases;
+
+public:
+  SwitchStmtAST(std::unique_ptr<ExprAST> Condition,
+                std::vector<std::unique_ptr<CaseAST>> Cases)
+      : Condition(std::move(Condition)), Cases(std::move(Cases)) {}
+  
+  llvm::Value *codegen() override;
+  ExprAST *getCondition() const { return Condition.get(); }
+  const std::vector<std::unique_ptr<CaseAST>> &getCases() const { return Cases; }
+};
+
+/// SwitchExprAST - Expression class for switch expressions with arrow syntax.
+class SwitchExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Condition;
+  std::vector<std::unique_ptr<CaseAST>> Cases;
+
+public:
+  SwitchExprAST(std::unique_ptr<ExprAST> Condition,
+                std::vector<std::unique_ptr<CaseAST>> Cases)
+      : Condition(std::move(Condition)), Cases(std::move(Cases)) {}
+  
+  llvm::Value *codegen() override;
+  ExprAST *getCondition() const { return Condition.get(); }
+  const std::vector<std::unique_ptr<CaseAST>> &getCases() const { return Cases; }
+};
+
 /// UseStmtAST - Statement class for use (import) statements.
 class UseStmtAST : public StmtAST {
   std::string Module;
