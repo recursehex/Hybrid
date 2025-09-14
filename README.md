@@ -65,8 +65,12 @@ cmake --build --preset=release
 
 ```c
 // Function definition
-int fibonacci(int n) {
-    if n <= 1 { return n }
+int fibonacci(int n)
+{
+    if n <= 1
+    {
+        return n
+    }
     return fibonacci(n - 1) + fibonacci(n - 2)
 }
 
@@ -75,29 +79,39 @@ int[] numbers = [1, 2, 3, 4, 5]
 int counter = 0
 
 // Control flow with new operators
-int findMax(int[] arr, int len) {
+int findMax(int[] arr, int len)
+{
     int max = arr[0]
     int i = 1
-    while i < len {
-        if arr[i] > max {
-            max = arr[i]
-        }
-        i++       // Postfix increment  
+    while i < len
+    {
+        max = arr[i] if arr[i] > max else max  // Ternary operator
+        i++       // Postfix increment
         counter++ // Could also use: ++counter
     }
     return max
 }
 
 // Modulo operator example
-int checkEven(int n) {
+int checkEven(int n)
+{
     return n % 2
 }
 
+// Ternary operator example
+int absolute(int n)
+{
+    return n if n >= 0 else -n
+}
+
 // Foreach loop with skip
-int sumOddNumbers(int[] nums) {
+int sumOddNumbers(int[] nums)
+{
     int sum = 0
-    for int n in nums {
-        if checkEven(n) == 0 {
+    for int n in nums
+    {
+        if checkEven(n) == 0
+        {
             skip
         }
         sum += n
@@ -106,11 +120,13 @@ int sumOddNumbers(int[] nums) {
 }
 
 // Struct definition
-struct Point {
+struct Point
+{
     int x
     int y
     
-    Point(int x, int y) {
+    Point(int x, int y)
+    {
         this.x = x
         this.y = y
     }
@@ -123,6 +139,7 @@ int distance = p.x + p.y  // 30
 // Call the functions
 findMax(numbers, 5)    // Returns 5
 checkEven(17)          // Returns 1
+absolute(-42)          // Returns 42
 sumOddNumbers(numbers) // Returns 9 (1+3+5)
 ```
 
@@ -173,8 +190,8 @@ Comprehensive documentation is available in the `docs/` directory:
 
 ### Functions
 ```c
-return_type function_name(type1 param1, type2 param2) {
-    // function body
+return_type function_name(type1 param1, type2 param2)
+{
     return expression
 }
 ```
@@ -182,13 +199,27 @@ return_type function_name(type1 param1, type2 param2) {
 ### Control Flow
 ```c
 // If-else
-if i == 10 { } else { }
+if i == 10
+{ 
+    return 'a'
+}
+else
+{
+    return 'b'
+}
 
 // While loop with break/skip
-while i < 10 {
-    if j > 5 { break }     // Exit loop
+while i < 10
+{
+    if j > 5
+    {
+        break   // Exit loop
+    }
     j++
-    if i + j == 20 { skip } // Continue to next iteration
+    if i + j == 20
+    {
+        skip    // Continue to next iteration
+    }
 }
 
 // For loops
@@ -200,17 +231,22 @@ for float f = 0.0 to 1.0 by 0.1 { } // Float support
 for 0 to 10 { }                     // Anonymous counter
 
 // Foreach loop
-for int i in nums { }
+for int i in nums
+{
+    sum += i
+}
 
 // Switch statements (block-style)
-switch num {
+switch num
+{
     case 1 { int result = 10 }
     case 2 { int result = 20 }
     default { int result = 0 }
 }
 
-// Switch expressions (arrow-style)  
-string message = switch letter {
+// Switch expressions (arrow-style)
+string message = switch letter
+{
     'a' => "Alpha"
     'b' => "Beta"
     default => "Unknown"
@@ -298,6 +334,11 @@ Hybrid/
     - Arrow-syntax switch expressions: `switch letter { 'a' => "Alpha" default => "Unknown" }`
     - Multiple case values: `case 1, 2 => 10`
     - Full LLVM optimization with native switch instructions
+- Ternary operator with Python-style syntax
+    - Conditional expressions: `value_if_true if condition else value_if_false`
+    - Examples: `int max = a if a > b else b`, `return n if n >= 0 else -n`
+    - Automatic type promotion: `double mixed = 3.14 if false else 42`
+    - Right-associative with proper precedence handling
 
 **Planned Features**
 - Automatic Reference Counting (ARC) memory management

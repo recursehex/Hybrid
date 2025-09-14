@@ -19,6 +19,7 @@ Operators are evaluated according to precedence rules (higher numbers bind tight
 | 7 | `|` | Left-to-right |
 | 6 | `&&` | Left-to-right |
 | 5 | `||` | Left-to-right |
+| 4 | `if...else` (ternary) | Right-to-left |
 | 2 | `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` | Right-to-left |
 
 ## Arithmetic Operators
@@ -175,6 +176,230 @@ if x > 0 && expensive_check(x) {
 // If x == 0, the second part is not evaluated
 if x == 0 || risky_operation(x) {
     // ...
+}
+```
+
+## Ternary Operator (Conditional Expression)
+
+The ternary operator provides a concise way to write conditional expressions. It uses the syntax `value_if_true if condition else value_if_false`, similar to Python's ternary syntax.
+
+### Basic Syntax
+
+```c
+// Basic ternary expression
+int max = a if a > b else b
+
+// Equivalent to:
+int max
+if a > b {
+    max = a
+} else {
+    max = b
+}
+```
+
+### Common Use Cases
+
+#### Simple Conditional Assignment
+
+```c
+// Choose between two values
+int x = 10
+int y = 5
+int maximum = x if x > y else y  // maximum = 10
+
+// With boolean conditions
+bool isReady = true
+int status = 1 if isReady else 0  // status = 1
+
+// Absolute value implementation
+int absolute(int n) {
+    return n if n >= 0 else -n
+}
+```
+
+#### Default Values
+
+```c
+// Provide default when condition fails
+int count = userInput if userInput > 0 else 1
+
+// String-like behavior with null checks
+string name = userName if userName != null else "Unknown"
+```
+
+#### Complex Expressions
+
+```c
+// Both branches can be complex expressions
+int result = x * 2 + 1 if x > threshold else y * 3 - 2
+
+// Condition can be complex
+int value = primary if isValid && count > 0 else fallback
+
+// Nested in function calls
+print(positive if number >= 0 else negative)
+```
+
+### Type System Integration
+
+The ternary operator integrates with Hybrid's type system, supporting automatic type promotion:
+
+#### Automatic Type Promotion
+
+```c
+// Integer to double promotion
+double mixed = 3.14 if useFloat else 42  // 42 promoted to 42.0
+
+// Integer to float promotion
+float value = 2.5 if condition else 10   // 10 promoted to 10.0
+```
+
+#### Type Compatibility Rules
+
+```c
+// Valid: same types
+int same = 10 if condition else 20
+
+// Valid: compatible numeric types (with promotion)
+double promoted = 5.5 if condition else 42  // int promoted to double
+
+// Invalid: incompatible types
+int invalid = "hello" if condition else 42  // Compilation error
+```
+
+### Precedence and Associativity
+
+The ternary operator has precedence level 4, which means:
+
+```c
+// Higher precedence than logical OR/AND
+int result = a if x || y else b  // Parsed as: a if (x || y) else b
+
+// Lower precedence than comparisons
+int value = x if y > z else w    // Parsed as: x if (y > z) else w
+
+// Right-associative for multiple ternary operators
+int nested = a if cond1 else b if cond2 else c
+// Parsed as: a if cond1 else (b if cond2 else c)
+```
+
+### Usage in Different Contexts
+
+#### Variable Declarations
+
+```c
+int x = 10
+int y = 20
+int max = x if x > y else y
+bool flag = true if x > 0 else false
+```
+
+#### Function Returns
+
+```c
+int sign(int n) {
+    return 1 if n > 0 else -1 if n < 0 else 0
+}
+
+double safeDivide(double a, double b) {
+    return a / b if b != 0.0 else 0.0
+}
+```
+
+#### Function Arguments
+
+```c
+// Pass conditional values to functions
+print(x if x > 0 else 0)
+process(primary if isValid else backup)
+
+// Complex argument expressions
+result = calculate(
+    x * 2 if mode == 1 else x + 10,
+    y if y > threshold else defaultY
+)
+```
+
+#### Array Indexing
+
+```c
+int[] arr = [10, 20, 30]
+int index = 1 if useSecond else 0
+int value = arr[index if index < 3 else 0]
+```
+
+### Error Handling
+
+The compiler provides clear error messages for ternary operator issues:
+
+```c
+// Missing else clause
+int invalid1 = 10 if true  // Error: Expected 'else' after condition
+
+// Invalid condition type
+string text = "hello"
+int invalid2 = 5 if text else 10  // Error: Ternary condition must be numeric
+
+// Incompatible branch types
+int invalid3 = "hello" if true else 42  // Error: Branches must have compatible types
+```
+
+### LLVM Code Generation
+
+The ternary operator generates efficient LLVM IR using conditional branches and PHI nodes:
+
+```llvm
+; For: int result = a if condition else b
+%cond = load i1, ptr %condition
+br i1 %cond, label %ternary_then, label %ternary_else
+
+ternary_then:
+  %then_val = load i32, ptr %a
+  br label %ternary_merge
+
+ternary_else:
+  %else_val = load i32, ptr %b
+  br label %ternary_merge
+
+ternary_merge:
+  %result = phi i32 [ %then_val, %ternary_then ], [ %else_val, %ternary_else ]
+```
+
+This generates optimal machine code with proper control flow and type handling.
+
+### Best Practices
+
+#### When to Use Ternary
+
+- **Simple conditional assignments**: `int max = a if a > b else b`
+- **Default value selection**: `int count = input if input > 0 else 1`
+- **Function return shortcuts**: `return x if x > 0 else 0`
+
+#### When to Avoid Ternary
+
+- **Complex logic**: Use if-else statements for multiple conditions
+- **Side effects**: Avoid when branches have important side effects
+- **Nested ternary**: Limit nesting for readability
+
+#### Readability Guidelines
+
+```c
+// Good: simple and clear
+int max = a if a > b else b
+
+// Good: meaningful variable names make intent clear
+int clampedValue = value if value <= maxValue else maxValue
+
+// Avoid: too complex for ternary
+int result = (x * 2 + calculateOffset()) if (mode == ADVANCED && isEnabled) else (y / 2 - getDefault())
+
+// Better: use if-else for complex cases
+int result
+if mode == ADVANCED && isEnabled {
+    result = x * 2 + calculateOffset()
+} else {
+    result = y / 2 - getDefault()
 }
 ```
 

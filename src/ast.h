@@ -232,10 +232,29 @@ public:
   SwitchExprAST(std::unique_ptr<ExprAST> Condition,
                 std::vector<std::unique_ptr<CaseAST>> Cases)
       : Condition(std::move(Condition)), Cases(std::move(Cases)) {}
-  
+
   llvm::Value *codegen() override;
   ExprAST *getCondition() const { return Condition.get(); }
   const std::vector<std::unique_ptr<CaseAST>> &getCases() const { return Cases; }
+};
+
+/// TernaryExprAST - Expression class for ternary conditional expressions (a if b else c).
+class TernaryExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> ThenExpr;
+  std::unique_ptr<ExprAST> Condition;
+  std::unique_ptr<ExprAST> ElseExpr;
+
+public:
+  TernaryExprAST(std::unique_ptr<ExprAST> ThenExpr,
+                 std::unique_ptr<ExprAST> Condition,
+                 std::unique_ptr<ExprAST> ElseExpr)
+      : ThenExpr(std::move(ThenExpr)), Condition(std::move(Condition)),
+        ElseExpr(std::move(ElseExpr)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getThenExpr() const { return ThenExpr.get(); }
+  ExprAST *getCondition() const { return Condition.get(); }
+  ExprAST *getElseExpr() const { return ElseExpr.get(); }
 };
 
 /// UseStmtAST - Statement class for use (import) statements.

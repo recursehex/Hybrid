@@ -2798,3 +2798,107 @@ llvm::Value *SwitchExprAST::codegen() {
   
   return Result;
 }
+
+// Generate code for ternary expressions (a if b else c)
+llvm::Value *TernaryExprAST::codegen() {
+  // Evaluate the condition
+  llvm::Value *CondV = getCondition()->codegen();
+  if (!CondV)
+    return nullptr;
+
+  // Convert condition to i1 bool
+  if (CondV->getType()->isIntegerTy(8)) {
+    // For i8 bool, compare with 0 (any non-zero is true)
+    CondV = Builder->CreateICmpNE(CondV,
+      llvm::ConstantInt::get(CondV->getType(), 0), "ternarycond");
+  } else if (!CondV->getType()->isIntegerTy(1)) {
+    if (CondV->getType()->isFloatingPointTy()) {
+      // For floating point, compare with 0.0
+      CondV = Builder->CreateFCmpONE(CondV,
+        llvm::ConstantFP::get(CondV->getType(), 0.0), "ternarycond");
+    } else if (CondV->getType()->isIntegerTy()) {
+      // For integers, compare with 0
+      CondV = Builder->CreateICmpNE(CondV,
+        llvm::ConstantInt::get(CondV->getType(), 0), "ternarycond");
+    } else {
+      return LogErrorV("Ternary condition must be a numeric type");
+    }
+  }
+
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+
+  // Create blocks for the then and else branches, and merge block
+  llvm::BasicBlock *ThenBB = llvm::BasicBlock::Create(*TheContext, "ternary_then", TheFunction);
+  llvm::BasicBlock *ElseBB = llvm::BasicBlock::Create(*TheContext, "ternary_else");
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "ternary_merge");
+
+  Builder->CreateCondBr(CondV, ThenBB, ElseBB);
+
+  // Emit then expression
+  Builder->SetInsertPoint(ThenBB);
+  llvm::Value *ThenV = getThenExpr()->codegen();
+  if (!ThenV)
+    return nullptr;
+
+  Builder->CreateBr(MergeBB);
+  // Codegen of 'Then' can change the current block, update ThenBB for the PHI
+  ThenBB = Builder->GetInsertBlock();
+
+  // Emit else expression
+  ElseBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(ElseBB);
+  llvm::Value *ElseV = getElseExpr()->codegen();
+  if (!ElseV)
+    return nullptr;
+
+  Builder->CreateBr(MergeBB);
+  // Codegen of 'Else' can change the current block, update ElseBB for the PHI
+  ElseBB = Builder->GetInsertBlock();
+
+  // Emit merge block
+  MergeBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(MergeBB);
+
+  // Determine result type and handle type promotion
+  llvm::Type *ResultType = ThenV->getType();
+
+  // Type-cast expressions to match if needed
+  if (ThenV->getType() != ElseV->getType()) {
+    // Handle type promotion for numeric types
+    if (ThenV->getType()->isDoubleTy() && ElseV->getType()->isIntegerTy(32)) {
+      ElseV = Builder->CreateSIToFP(ElseV, ThenV->getType(), "int_to_double");
+      ResultType = ThenV->getType();
+    } else if (ElseV->getType()->isDoubleTy() && ThenV->getType()->isIntegerTy(32)) {
+      ThenV = Builder->CreateSIToFP(ThenV, ElseV->getType(), "int_to_double");
+      ResultType = ElseV->getType();
+    } else if (ThenV->getType()->isFloatTy() && ElseV->getType()->isIntegerTy(32)) {
+      ElseV = Builder->CreateSIToFP(ElseV, ThenV->getType(), "int_to_float");
+      ResultType = ThenV->getType();
+    } else if (ElseV->getType()->isFloatTy() && ThenV->getType()->isIntegerTy(32)) {
+      ThenV = Builder->CreateSIToFP(ThenV, ElseV->getType(), "int_to_float");
+      ResultType = ElseV->getType();
+    } else {
+      return LogErrorV("Ternary expression branches must have compatible types");
+    }
+  }
+
+  // Set the expression's type name based on result type
+  if (ResultType->isIntegerTy(32)) {
+    setTypeName("int");
+  } else if (ResultType->isDoubleTy()) {
+    setTypeName("double");
+  } else if (ResultType->isFloatTy()) {
+    setTypeName("float");
+  } else if (ResultType->isIntegerTy(8)) {
+    setTypeName("bool");
+  } else if (ResultType->isPointerTy()) {
+    setTypeName("string");
+  }
+
+  // Create PHI node to merge the results
+  llvm::PHINode *Result = Builder->CreatePHI(ResultType, 2, "ternary_result");
+  Result->addIncoming(ThenV, ThenBB);
+  Result->addIncoming(ElseV, ElseBB);
+
+  return Result;
+}

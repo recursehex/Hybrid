@@ -47,6 +47,7 @@ std::unique_ptr<BreakStmtAST> ParseBreakStatement();
 std::unique_ptr<SkipStmtAST> ParseSkipStatement();
 std::unique_ptr<SwitchStmtAST> ParseSwitchStatement();
 std::unique_ptr<SwitchExprAST> ParseSwitchExpression();
+std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> ThenExpr);
 std::unique_ptr<CaseAST> ParseCase(bool isExpression);
 
 // Top-level parsing that can handle both variable declarations and function definitions

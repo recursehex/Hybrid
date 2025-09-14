@@ -85,8 +85,10 @@ int GetTokPrecedence() {
     return BinopPrecedence["<<="];
   } else if (CurTok == tok_right_shift_eq) {
     return BinopPrecedence[">>="];
+  } else if (CurTok == tok_if) {
+    return 4; // Ternary operator precedence (higher than assignment, lower than logical OR)
   }
-  
+
   // Handle single character operators
   if (isascii(CurTok)) {
     std::string Op(1, (char)CurTok);
@@ -346,6 +348,11 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     // Consume it, otherwise done
     if (TokPrec < ExprPrec)
       return LHS;
+
+    // Check for ternary operator (special case)
+    if (CurTok == tok_if) {
+      return ParseTernaryExpression(std::move(LHS));
+    }
 
     // Now know this is a binop
     std::string BinOp;
@@ -938,6 +945,47 @@ std::unique_ptr<SwitchExprAST> ParseSwitchExpression() {
   getNextToken(); // eat '}'
   
   return std::make_unique<SwitchExprAST>(std::move(Condition), std::move(Cases));
+}
+
+/// ternaryexpr ::= thenexpr 'if' condition 'else' elseexpr
+std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> ThenExpr) {
+  getNextToken(); // eat 'if'
+
+  // Skip newlines after 'if'
+  while (CurTok == tok_newline)
+    getNextToken();
+
+  // Parse condition expression
+  auto Condition = ParseExpression();
+  if (!Condition) {
+    LogError("Expected condition after 'if' in ternary expression");
+    return nullptr;
+  }
+
+  // Skip newlines before 'else'
+  while (CurTok == tok_newline)
+    getNextToken();
+
+  // Expect 'else'
+  if (CurTok != tok_else) {
+    LogError("Expected 'else' after condition in ternary expression");
+    return nullptr;
+  }
+
+  getNextToken(); // eat 'else'
+
+  // Skip newlines after 'else'
+  while (CurTok == tok_newline)
+    getNextToken();
+
+  // Parse else expression
+  auto ElseExpr = ParseExpression();
+  if (!ElseExpr) {
+    LogError("Expected expression after 'else' in ternary expression");
+    return nullptr;
+  }
+
+  return std::make_unique<TernaryExprAST>(std::move(ThenExpr), std::move(Condition), std::move(ElseExpr));
 }
 
 /// case ::= 'case' values '{' statements '}' | value* '=>' expression
