@@ -425,6 +425,29 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       if (!RHS)
         return nullptr;
     }
+    // For right-associative operators with equal precedence, also recurse
+    else if (TokPrec == NextPrec && TokPrec == 2) { // Assignment precedence is 2
+      RHS = ParseBinOpRHS(TokPrec, std::move(RHS));
+      if (!RHS)
+        return nullptr;
+    }
+
+    // Check for chained assignment - not allowed in Hybrid
+    // Also check compound assignments on the LHS
+    if ((BinOp == "=" || BinOp == "+=" || BinOp == "-=" || BinOp == "*=" ||
+         BinOp == "/=" || BinOp == "%=" || BinOp == "&=" || BinOp == "|=" ||
+         BinOp == "^=" || BinOp == "<<=" || BinOp == ">>=")) {
+      if (BinaryExprAST *RHSBinary = dynamic_cast<BinaryExprAST*>(RHS.get())) {
+        if (RHSBinary->getOp() == "=" || RHSBinary->getOp() == "+=" ||
+            RHSBinary->getOp() == "-=" || RHSBinary->getOp() == "*=" ||
+            RHSBinary->getOp() == "/=" || RHSBinary->getOp() == "%=" ||
+            RHSBinary->getOp() == "&=" || RHSBinary->getOp() == "|=" ||
+            RHSBinary->getOp() == "^=" || RHSBinary->getOp() == "<<=" ||
+            RHSBinary->getOp() == ">>=") {
+          return LogError("Chained assignment is not allowed - variables must be assigned one at a time");
+        }
+      }
+    }
 
     // Merge LHS/RHS.
     LHS =

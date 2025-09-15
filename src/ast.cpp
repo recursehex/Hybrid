@@ -802,6 +802,7 @@ llvm::Value *BinaryExprAST::codegen() {
           R = castToType(R, VarType);
           Builder->CreateStore(R, Variable);
           // Return a void value to indicate this is a statement, not an expression
+          setTypeName("void");
           return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
         }
         
@@ -813,6 +814,7 @@ llvm::Value *BinaryExprAST::codegen() {
           R = castToType(R, VarType);
           Builder->CreateStore(R, GV);
           // Return a void value to indicate this is a statement, not an expression
+          setTypeName("void");
           return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
         }
         
@@ -883,6 +885,7 @@ llvm::Value *BinaryExprAST::codegen() {
         llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
         Builder->CreateStore(R, ElemPtr);
         // Return a void value to indicate this is a statement, not an expression
+        setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
         // Member access assignment (e.g., this.x = value)
@@ -898,6 +901,7 @@ llvm::Value *BinaryExprAST::codegen() {
         
         Builder->CreateStore(R, FieldPtr);
         // Return a void value to indicate this is a statement, not an expression
+        setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       } else {
         return LogErrorV("destination of '=' must be a variable, array element, or struct member");
@@ -1007,6 +1011,7 @@ llvm::Value *BinaryExprAST::codegen() {
       // Store the result back
       Builder->CreateStore(Result, Variable);
       // Return a void value to indicate this is a statement, not an expression
+      setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
@@ -1109,6 +1114,7 @@ llvm::Value *BinaryExprAST::codegen() {
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
       // Return a void value to indicate this is a statement, not an expression
+      setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else {
@@ -1218,6 +1224,7 @@ llvm::Value *BinaryExprAST::codegen() {
       // Store the result back
       Builder->CreateStore(Result, Variable);
       // Return a void value to indicate this is a statement, not an expression
+      setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
@@ -1300,6 +1307,7 @@ llvm::Value *BinaryExprAST::codegen() {
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
       // Return a void value to indicate this is a statement, not an expression
+      setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else {
