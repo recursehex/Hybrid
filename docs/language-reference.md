@@ -128,6 +128,35 @@ null      // Used for string initialization
 [true, false, true]    // Boolean array
 ```
 
+## Language Safety Features
+
+Hybrid includes several safety features designed to prevent common programming errors:
+
+### Assignment Safety
+
+Assignments cannot be used as conditions in control flow statements. This prevents common bugs where assignment (`=`) is mistakenly used instead of comparison (`==`):
+
+```c
+// Compilation error - prevents accidental assignment
+if x = 0 { /* ... */ }
+
+// Correct - forces explicit comparison
+if x == 0 { /* ... */ }
+```
+
+### Mandatory Variable Initialization
+
+All variables must be initialized when declared, preventing use of uninitialized variables:
+
+```c
+int x = 10    // Valid - initialization required
+int y         // Compilation error - no initialization
+```
+
+### Static Type Checking
+
+All types are checked at compile time, preventing type-related runtime errors.
+
 ## Supported Constructs
 
 - Variable declarations with mandatory initialization

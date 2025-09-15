@@ -109,10 +109,40 @@ if (x > 0 && y > 0) || override
 ### Operator Precedence
 
 Boolean operators have the following precedence (lowest to highest):
-1. `||` (OR) - precedence 5
-2. `&&` (AND) - precedence 6
-3. Comparison operators - precedence 10
-4. Arithmetic operators - precedence 20, 40
+1. `||` (OR)
+2. `&&` (AND)
+3. Comparison operators (`>`, `<`, `>=`, `<=`, `==`, `!=`)
+4. Arithmetic operators (`+`, `-`, `*`, `/`, `%`)
+
+### Assignment Safety in Conditions
+
+Assignments cannot be used as conditions in control flow statements. This prevents common bugs where assignment (`=`) is mistakenly used instead of comparison (`==`):
+
+```c
+// Compilation error - assignment in if condition
+if x = 0 {
+    print("This won't compile")
+}
+
+// Correct - use comparison for conditions
+if x == 0 {
+    print("This works correctly")
+}
+
+// Compilation error - assignment in while condition
+while status = getStatus() {
+    // This won't compile
+}
+
+// Correct - separate assignment and condition
+status = getStatus()
+while status != 0 {
+    // Process status
+    status = getStatus()
+}
+```
+
+This safety feature applies to all control flow statements that use conditions (`if`, `while`, etc.).
 
 ## While Loops
 

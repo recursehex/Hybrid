@@ -514,20 +514,12 @@ double y = 5.0 << 2    // Error: Left shift requires integer operands
 
 ### Basic Assignment
 
-The assignment operator (`=`) modifies variables and returns the assigned value:
+The assignment operator (`=`) assigns the value of the right-hand expression to the left-hand variable. Chained assignments are not supported.
 
 ```c
 // Simple assignment
 x = 10
 y = x + 5
-
-// Chained assignment (right-associative)
-a = b = c = 0
-
-// Assignment in expressions
-while (n = getNext()) > 0 {
-    // Process n
-}
 ```
 
 ### Compound Assignment

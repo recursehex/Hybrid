@@ -801,7 +801,8 @@ llvm::Value *BinaryExprAST::codegen() {
           llvm::Type *VarType = Alloca->getAllocatedType();
           R = castToType(R, VarType);
           Builder->CreateStore(R, Variable);
-          return R;
+          // Return a void value to indicate this is a statement, not an expression
+          return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
         }
         
         // Check global scope
@@ -811,7 +812,8 @@ llvm::Value *BinaryExprAST::codegen() {
           llvm::Type *VarType = GV->getValueType();
           R = castToType(R, VarType);
           Builder->CreateStore(R, GV);
-          return R;
+          // Return a void value to indicate this is a statement, not an expression
+          return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
         }
         
         return LogErrorV(("Unknown variable name: " + LHSE->getName()).c_str());
@@ -880,7 +882,8 @@ llvm::Value *BinaryExprAST::codegen() {
         // Calculate the address and store
         llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
         Builder->CreateStore(R, ElemPtr);
-        return R;
+        // Return a void value to indicate this is a statement, not an expression
+        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
         // Member access assignment (e.g., this.x = value)
         llvm::Value *FieldPtr = LHSMA->codegen_ptr();
@@ -894,7 +897,8 @@ llvm::Value *BinaryExprAST::codegen() {
         // R = castToType(R, FieldType);
         
         Builder->CreateStore(R, FieldPtr);
-        return R;
+        // Return a void value to indicate this is a statement, not an expression
+        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       } else {
         return LogErrorV("destination of '=' must be a variable, array element, or struct member");
       }
@@ -1002,7 +1006,8 @@ llvm::Value *BinaryExprAST::codegen() {
       
       // Store the result back
       Builder->CreateStore(Result, Variable);
-      return Result;
+      // Return a void value to indicate this is a statement, not an expression
+      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
       // Array element compound assignment: arr[i] += val
@@ -1103,7 +1108,8 @@ llvm::Value *BinaryExprAST::codegen() {
       
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
-      return Result;
+      // Return a void value to indicate this is a statement, not an expression
+      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else {
       return LogErrorV("destination of compound assignment must be a variable or array element");
@@ -1211,7 +1217,8 @@ llvm::Value *BinaryExprAST::codegen() {
       
       // Store the result back
       Builder->CreateStore(Result, Variable);
-      return Result;
+      // Return a void value to indicate this is a statement, not an expression
+      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
       // Array element compound assignment: arr[i] &= val
@@ -1292,7 +1299,8 @@ llvm::Value *BinaryExprAST::codegen() {
       
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
-      return Result;
+      // Return a void value to indicate this is a statement, not an expression
+      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else {
       return LogErrorV("destination of bitwise compound assignment must be a variable or array element");
@@ -1631,8 +1639,17 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
 // Generate code for expression statements
 llvm::Value *ExpressionStmtAST::codegen() {
-  // Just generate code for the expression
-  return getExpression()->codegen();
+  // Generate code for the expression
+  llvm::Value *V = getExpression()->codegen();
+  if (!V)
+    return nullptr;
+
+  // For void expressions (like assignments), return a dummy value
+  if (V->getType()->isVoidTy()) {
+    return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+  }
+
+  return V;
 }
 
 // Generate code for for each statements
@@ -2038,19 +2055,24 @@ llvm::Value *IfStmtAST::codegen() {
   if (!CondV)
     return nullptr;
   
+  // Check if condition is void (from assignment) - reject it
+  if (CondV->getType()->isVoidTy()) {
+    return LogErrorV("Cannot use assignment as condition in if statement (use == for comparison)");
+  }
+
   // Convert condition to i1 bool
   if (CondV->getType()->isIntegerTy(8)) {
     // For i8 bool, compare with 0 (any non-zero is true)
-    CondV = Builder->CreateICmpNE(CondV, 
+    CondV = Builder->CreateICmpNE(CondV,
       llvm::ConstantInt::get(CondV->getType(), 0), "ifcond");
   } else if (!CondV->getType()->isIntegerTy(1)) {
     if (CondV->getType()->isFloatingPointTy()) {
       // For floating point, compare with 0.0
-      CondV = Builder->CreateFCmpONE(CondV, 
+      CondV = Builder->CreateFCmpONE(CondV,
         llvm::ConstantFP::get(CondV->getType(), 0.0), "ifcond");
     } else if (CondV->getType()->isIntegerTy()) {
       // For integers, compare with 0
-      CondV = Builder->CreateICmpNE(CondV, 
+      CondV = Builder->CreateICmpNE(CondV,
         llvm::ConstantInt::get(CondV->getType(), 0), "ifcond");
     } else {
       return LogErrorV("Condition must be a numeric type");
