@@ -2253,8 +2253,60 @@ llvm::Value *SkipStmtAST::codegen() {
   llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
   llvm::BasicBlock *DeadBB = llvm::BasicBlock::Create(*TheContext, "afterskip", TheFunction);
   Builder->SetInsertPoint(DeadBB);
-  
+
   // Return a dummy value
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
+llvm::Value *AssertStmtAST::codegen() {
+  // Generate code for the condition expression
+  llvm::Value *CondValue = Condition->codegen();
+  if (!CondValue)
+    return nullptr;
+
+  // Convert condition to boolean if necessary
+  if (CondValue->getType() != llvm::Type::getInt8Ty(*TheContext)) {
+    // For numeric types, check if != 0
+    if (CondValue->getType()->isIntegerTy()) {
+      llvm::Value *Zero = llvm::Constant::getNullValue(CondValue->getType());
+      CondValue = Builder->CreateICmpNE(CondValue, Zero, "assertcond");
+    } else if (CondValue->getType()->isFloatingPointTy()) {
+      llvm::Value *Zero = llvm::ConstantFP::get(CondValue->getType(), 0.0);
+      CondValue = Builder->CreateFCmpONE(CondValue, Zero, "assertcond");
+    }
+    // Convert to i8 for consistency
+    CondValue = Builder->CreateIntCast(CondValue, llvm::Type::getInt8Ty(*TheContext), false, "assertbool");
+  }
+
+  // Create basic blocks for assertion success and failure
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *SuccessBB = llvm::BasicBlock::Create(*TheContext, "assert_success", TheFunction);
+  llvm::BasicBlock *FailBB = llvm::BasicBlock::Create(*TheContext, "assert_fail", TheFunction);
+
+  // Convert condition to i1 for branch
+  llvm::Value *BoolCond = Builder->CreateICmpNE(CondValue, llvm::ConstantInt::get(llvm::Type::getInt8Ty(*TheContext), 0), "asserttest");
+
+  // Branch based on condition
+  Builder->CreateCondBr(BoolCond, SuccessBB, FailBB);
+
+  // Generate failure block - call abort() to terminate program
+  Builder->SetInsertPoint(FailBB);
+
+  // Declare abort() function if not already declared
+  llvm::Function *AbortFunc = TheModule->getFunction("abort");
+  if (!AbortFunc) {
+    llvm::FunctionType *AbortType = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+    AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage, "abort", TheModule.get());
+  }
+
+  // Call abort() and create unreachable instruction
+  Builder->CreateCall(AbortFunc);
+  Builder->CreateUnreachable();
+
+  // Continue with success block
+  Builder->SetInsertPoint(SuccessBB);
+
+  // Return a dummy value indicating successful assertion
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 

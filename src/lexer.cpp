@@ -92,6 +92,8 @@ int gettok() {
       return tok_case;
     if (IdentifierStr == "default")
       return tok_default;
+    if (IdentifierStr == "assert")
+      return tok_assert;
     return tok_identifier;
   }
 

@@ -711,3 +711,115 @@ int count = 10
 double rate = 0.5
 double total = count * rate + 1.5  // 10 promoted to 10.0, result is 6.5
 ```
+
+## Constant Expression Evaluation
+
+Hybrid supports compile-time evaluation of constant expressions. This allows the compiler to detect errors early and optimize code generation.
+
+### What Are Constant Expressions?
+
+Constant expressions are expressions that can be evaluated at compile time because they consist only of:
+- Literal values (numbers, booleans, strings)
+- Arithmetic operations on constants
+- Comparison operations on constants
+- Boolean operations on constants
+- Unary operations on constants
+
+### Compile-Time Evaluation
+
+The compiler evaluates constant expressions during parsing, which provides several benefits:
+
+1. **Early Error Detection** - Errors in constant expressions are caught at compile time
+2. **Optimization** - Constant values are computed once during compilation
+3. **Type Safety** - Range checking for sized types happens at compile time
+
+### Examples of Constant Expressions
+
+```c
+// Arithmetic constants
+int x = 2 + 3 * 4        // Evaluated to 14 at compile time
+float y = 10.0 / 3.0     // Evaluated to 3.333... at compile time
+
+// Comparison constants
+bool a = 10 > 5          // Evaluated to true at compile time
+bool b = 2 + 2 == 5      // Evaluated to false at compile time
+
+// Boolean logic constants
+bool c = true && true    // Evaluated to true at compile time
+bool d = false || true   // Evaluated to true at compile time
+
+// Unary operations
+int neg = -(5 + 3)       // Evaluated to -8 at compile time
+bool not = !false        // Evaluated to true at compile time
+```
+
+### Constant Expression in Control Flow
+
+Constant expressions are particularly useful for compile-time validation in assert statements:
+
+```c
+// Compile-time assertion checking
+assert 2 + 2 == 4        // OK - evaluates to true
+assert sizeof(int) > 0   // OK - evaluates to true
+assert 1 == 2            // Error: Assert condition evaluates to false at compile time
+
+// Constant conditions in if statements
+if true {
+    // This block is always executed
+}
+
+if false {
+    // This block is never executed (dead code)
+}
+```
+
+### Type Inference in Constant Expressions
+
+The compiler properly infers types during constant evaluation:
+
+```c
+// Integer constants remain integers
+int whole = 10 / 3              // 3 (integer division)
+
+// Float constants maintain precision
+float precise = 10.0 / 3.0      // 3.333...
+
+// Mixed type promotion
+double mixed = 5 + 2.5          // 7.5 (5 promoted to 5.0)
+```
+
+### Range Checking for Sized Types
+
+Constant expressions enable compile-time range checking:
+
+```c
+// Valid assignments - values within range
+byte b = 255                    // OK - maximum byte value
+sbyte sb = -128                 // OK - minimum sbyte value
+
+// Invalid assignments - caught at compile time
+byte bad1 = 256                 // Error: 256 exceeds byte range [0-255]
+sbyte bad2 = 128                // Error: 128 exceeds sbyte range [-128-127]
+short bad3 = 100000             // Error: 100000 exceeds short range
+```
+
+### Limitations
+
+Not all expressions can be evaluated at compile time:
+
+```c
+// These are NOT constant expressions:
+int x = getValue()              // Function call
+int y = userInput              // Variable reference
+int z = array[index]           // Array access with variable index
+
+// These must be evaluated at runtime
+```
+
+### Implementation Details
+
+- Constant evaluation happens in the parser during AST construction
+- The `EvaluateConstantExpression` function recursively evaluates AST nodes
+- Results are stored in a `ConstantValue` structure with type information
+- Type promotion and conversions are handled during evaluation
+- Failed assertions with constant expressions produce compile-time errors

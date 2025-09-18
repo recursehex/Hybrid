@@ -1,6 +1,7 @@
 #include "parser.h"
 #include "lexer.h"
 #include <cstdio>
+#include <cmath>
 #include <set>
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Function.h"
@@ -836,6 +837,49 @@ std::unique_ptr<SkipStmtAST> ParseSkipStatement() {
   return std::make_unique<SkipStmtAST>();
 }
 
+/// assertstmt ::= 'assert' expression
+std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
+  getNextToken(); // eat 'assert'
+
+  // Skip newlines after 'assert'
+  while (CurTok == tok_newline)
+    getNextToken();
+
+  // Parse the condition expression
+  auto Condition = ParseExpression();
+  if (!Condition) {
+    LogError("expected expression after 'assert'");
+    return nullptr;
+  }
+
+  // Try to evaluate the condition as a constant expression
+  ConstantValue constVal(false);
+  if (EvaluateConstantExpression(Condition.get(), constVal)) {
+    // Check if the condition is a boolean
+    if (constVal.type == ConstantValue::BOOLEAN) {
+      if (!constVal.boolVal) {
+        LogError("Assert condition evaluates to false at compile time");
+        return nullptr;
+      }
+    } else {
+      // Convert to boolean for evaluation
+      bool boolVal = false;
+      if (constVal.type == ConstantValue::INTEGER) {
+        boolVal = constVal.intVal != 0;
+      } else if (constVal.type == ConstantValue::FLOAT) {
+        boolVal = constVal.floatVal != 0.0;
+      }
+
+      if (!boolVal) {
+        LogError("Assert condition evaluates to false at compile time");
+        return nullptr;
+      }
+    }
+  }
+
+  return std::make_unique<AssertStmtAST>(std::move(Condition));
+}
+
 /// switchstmt ::= 'switch' expression '{' case* '}'
 std::unique_ptr<SwitchStmtAST> ParseSwitchStatement() {
   getNextToken(); // eat 'switch'
@@ -1323,6 +1367,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseBreakStatement();
   case tok_skip:
     return ParseSkipStatement();
+  case tok_assert:
+    return ParseAssertStatement();
   case tok_switch:
     return ParseSwitchStatement();
   case '}':
@@ -1763,6 +1809,166 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
   
   // Add struct name to the set of valid types
   StructNames.insert(StructName);
-  
+
   return std::make_unique<StructAST>(StructName, std::move(Fields), std::move(Methods));
+}
+
+// Evaluate constant expressions at compile time
+bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
+  if (!expr) return false;
+
+  // Handle number literals
+  if (auto numExpr = dynamic_cast<const NumberExprAST*>(expr)) {
+    double val = numExpr->getValue();
+    // Check if it's a whole number
+    if (val == floor(val)) {
+      result = ConstantValue((long long)val);
+    } else {
+      result = ConstantValue(val);
+    }
+    return true;
+  }
+
+  // Handle boolean literals
+  if (auto boolExpr = dynamic_cast<const BoolExprAST*>(expr)) {
+    result = ConstantValue(boolExpr->getValue());
+    return true;
+  }
+
+  // Handle binary operations
+  if (auto binExpr = dynamic_cast<const BinaryExprAST*>(expr)) {
+    ConstantValue lhs(0LL), rhs(0LL);
+    if (!EvaluateConstantExpression(binExpr->getLHS(), lhs) ||
+        !EvaluateConstantExpression(binExpr->getRHS(), rhs)) {
+      return false;
+    }
+
+    const std::string& op = binExpr->getOp();
+
+    // Comparison operators always return boolean
+    if (op == "<" || op == ">" || op == "==" || op == "!=" ||
+        op == "<=" || op == ">=") {
+
+      // Convert operands to same type for comparison
+      double leftVal, rightVal;
+      if (lhs.type == ConstantValue::INTEGER) {
+        leftVal = (double)lhs.intVal;
+      } else if (lhs.type == ConstantValue::FLOAT) {
+        leftVal = lhs.floatVal;
+      } else {
+        leftVal = lhs.boolVal ? 1.0 : 0.0;
+      }
+
+      if (rhs.type == ConstantValue::INTEGER) {
+        rightVal = (double)rhs.intVal;
+      } else if (rhs.type == ConstantValue::FLOAT) {
+        rightVal = rhs.floatVal;
+      } else {
+        rightVal = rhs.boolVal ? 1.0 : 0.0;
+      }
+
+      bool compResult = false;
+      if (op == "<") {
+        compResult = leftVal < rightVal;
+      } else if (op == ">") {
+        compResult = leftVal > rightVal;
+      } else if (op == "<=") {
+        compResult = leftVal <= rightVal;
+      } else if (op == ">=") {
+        compResult = leftVal >= rightVal;
+      } else if (op == "==") {
+        compResult = leftVal == rightVal;
+      } else if (op == "!=") {
+        compResult = leftVal != rightVal;
+      } else {
+        return false;
+      }
+
+      result = ConstantValue(compResult);
+      return true;
+    }
+
+    // Logical operators
+    if (op == "&&" || op == "||") {
+      if (lhs.type != ConstantValue::BOOLEAN || rhs.type != ConstantValue::BOOLEAN) {
+        return false;
+      }
+
+      bool logResult = false;
+      if (op == "&&") {
+        logResult = lhs.boolVal && rhs.boolVal;
+      } else { // ||
+        logResult = lhs.boolVal || rhs.boolVal;
+      }
+
+      result = ConstantValue(logResult);
+      return true;
+    }
+
+    // Arithmetic operators
+    if (op == "+" || op == "-" || op == "*" || op == "/") {
+      // If both are integers, keep as integer
+      if (lhs.type == ConstantValue::INTEGER && rhs.type == ConstantValue::INTEGER) {
+        long long arithResult = 0;
+        if (op == "+") {
+          arithResult = lhs.intVal + rhs.intVal;
+        } else if (op == "-") {
+          arithResult = lhs.intVal - rhs.intVal;
+        } else if (op == "*") {
+          arithResult = lhs.intVal * rhs.intVal;
+        } else if (op == "/") {
+          if (rhs.intVal == 0) return false; // Division by zero
+          arithResult = lhs.intVal / rhs.intVal;
+        }
+        result = ConstantValue(arithResult);
+        return true;
+      } else {
+        // Convert to float
+        double leftVal = (lhs.type == ConstantValue::INTEGER) ? (double)lhs.intVal : lhs.floatVal;
+        double rightVal = (rhs.type == ConstantValue::INTEGER) ? (double)rhs.intVal : rhs.floatVal;
+
+        double floatResult = 0.0;
+        if (op == "+") {
+          floatResult = leftVal + rightVal;
+        } else if (op == "-") {
+          floatResult = leftVal - rightVal;
+        } else if (op == "*") {
+          floatResult = leftVal * rightVal;
+        } else if (op == "/") {
+          if (rightVal == 0.0) return false; // Division by zero
+          floatResult = leftVal / rightVal;
+        }
+        result = ConstantValue(floatResult);
+        return true;
+      }
+    }
+  }
+
+  // Handle unary operations
+  if (auto unaryExpr = dynamic_cast<const UnaryExprAST*>(expr)) {
+    ConstantValue operand(0LL);
+    if (!EvaluateConstantExpression(unaryExpr->getOperand(), operand)) {
+      return false;
+    }
+
+    const std::string& op = unaryExpr->getOp();
+
+    if (op == "-") { // Negation
+      if (operand.type == ConstantValue::INTEGER) {
+        result = ConstantValue(-operand.intVal);
+        return true;
+      } else if (operand.type == ConstantValue::FLOAT) {
+        result = ConstantValue(-operand.floatVal);
+        return true;
+      }
+    } else if (op == "!") { // Logical NOT
+      if (operand.type == ConstantValue::BOOLEAN) {
+        result = ConstantValue(!operand.boolVal);
+        return true;
+      }
+    }
+  }
+
+  // Cannot evaluate this expression as constant
+  return false;
 }

@@ -94,7 +94,11 @@ While types must be explicitly declared, the compiler performs automatic type in
 
 ## Type Casting and Promotion
 
-Hybrid enforces strict type checking with limited automatic promotion:
+Hybrid provides both automatic type promotion and explicit type casting capabilities.
+
+### Automatic Type Promotion
+
+Limited automatic promotion occurs in specific contexts:
 
 ```c
 int x = 5
@@ -102,44 +106,197 @@ double y = 2.5
 // x is promoted to double for the addition
 double result = x + y  // Result is 7.5
 
-// Error cases - no implicit conversion between different sized integers
-short s = 100
-int i = 200
-int bad = s + i  // Error: cannot mix short and int
+float f = 3.14
+double d = f + 2.0     // float promoted to double - OK
+```
 
-// Bool is completely isolated
-bool flag = true
-int num = flag  // Error: cannot convert bool to int
+### Explicit Type Casting
+
+Hybrid supports explicit type casting using the colon (`:`) operator with the syntax `type: expression`. This allows controlled conversion between compatible types.
+
+#### Basic Syntax
+
+```c
+// Cast float to int (truncates decimal part)
+float pi = 3.14159
+int whole = int: pi        // whole = 3
+
+// Cast int to float
+int count = 42
+float precise = float: count  // precise = 42.0
+
+// Cast between sized integers
+int bigNum = 1000
+short smallNum = short: bigNum  // smallNum = 1000 (if in range)
+
+// Cast to byte with range checking
+int value = 200
+byte b = byte: value       // b = 200 (within byte range)
+```
+
+#### Numeric Type Casting
+
+Casting between numeric types follows these rules:
+
+```c
+// Integer to floating-point
+int x = 10
+double d = double: x       // d = 10.0
+float f = float: x         // f = 10.0
+
+// Floating-point to integer (truncates)
+double pi = 3.14159
+int truncated = int: pi    // truncated = 3
+long bigInt = long: pi     // bigInt = 3
+
+// Between different sized integers
+long big = 100000
+int medium = int: big      // medium = 100000
+short small = short: medium // small = 100000 (if fits)
+byte tiny = byte: small    // Will fail if value > 255
+```
+
+#### Sign Extension and Zero Extension
+
+When casting between signed and unsigned integers:
+
+```c
+// Signed to unsigned (zero-extends if needed)
+sbyte signed = -1         // 0xFF in binary
+byte unsigned = byte: signed  // unsigned = 255 (0xFF)
+
+// Unsigned to signed (sign-extends if needed)
+byte b = 200              // 0xC8 in binary
+sbyte sb = sbyte: b      // sb = -56 (interprets as signed)
+
+// Proper sign extension for larger types
+short s = -100
+int i = int: s           // i = -100 (sign extended)
+long l = long: i         // l = -100 (sign extended)
+
+// Zero extension for unsigned
+ushort us = 60000
+uint ui = uint: us       // ui = 60000 (zero extended)
+ulong ul = ulong: ui     // ul = 60000 (zero extended)
+```
+
+#### Range Checking
+
+The compiler performs range checking for literal casts:
+
+```c
+// Valid casts - values within target range
+byte b1 = byte: 255      // OK - maximum byte value
+sbyte sb1 = sbyte: 127   // OK - maximum sbyte value
+short s1 = short: 32000  // OK - within short range
+
+// Invalid casts - compile-time errors
+byte b2 = byte: 256      // Error: 256 exceeds byte range [0-255]
+sbyte sb2 = sbyte: 128   // Error: 128 exceeds sbyte range [-128-127]
+short s2 = short: 100000 // Error: 100000 exceeds short range
+
+// Runtime values are not range-checked at compile time
+int userInput = 1000
+byte result = byte: userInput  // Truncates to fit at runtime
+```
+
+#### Character Type Casting
+
+Character types can be cast to and from integers:
+
+```c
+// Character to integer
+char ch = 'A'            // Unicode 65
+int code = int: ch       // code = 65
+byte b = byte: ch        // b = 65
+
+// Integer to character
+int asciiCode = 66
+char letter = char: asciiCode  // letter = 'B'
+
+// Between character sizes
+lchar unicode = lchar: 'Ω'    // 32-bit character
+char standard = char: unicode  // 16-bit character
+schar small = schar: standard  // 8-bit character
+```
+
+#### Complex Expression Casting
+
+Type casting can be used in complex expressions:
+
+```c
+// Cast result of arithmetic
+int a = 10
+int b = 3
+float precise = float: (a / b)    // precise = 3.0 (casts after integer division)
+float better = (float: a) / b     // better = 3.333... (casts before division)
+
+// Cast in comparisons
+float x = 3.7
+if (int: x) > 3 {
+    // This won't execute because int:3.7 = 3
+}
+
+// Cast in function calls
+void processInt(int value) { /* ... */ }
+float input = 42.7
+processInt(int: input)  // Passes 42 to function
+
+// Cast array elements
+float[] floats = [1.1, 2.2, 3.3]
+int truncated = int: floats[0]    // truncated = 1
+```
+
+#### Type Casting in Assignments
+
+```c
+// Cast on right-hand side
+float source = 3.14
+int target = int: source          // target = 3
+
+// Cast complex expressions
+int x = 5
+int y = 3
+float ratio = float: x / float: y  // ratio = 1.666...
+
+// Cast with operators
+byte b = 200
+int shifted = (int: b) << 2       // shifted = 800
+
+// Cast in compound assignments
+float f = 3.7
+int i = 10
+i += int: f                       // i = 13 (10 + 3)
 ```
 
 ### Type Compatibility Rules
 
 1. **Same type operations**: Operations between values of the same type are always allowed
-2. **Integer to float promotion**: Integer types can be promoted to floating-point types
-3. **Float precision promotion**: `float` can be promoted to `double`
-4. **No integer size mixing**: Different sized integers cannot be mixed (e.g., `short + int` is an error)
-5. **Bool isolation**: `bool` cannot be converted to or from any other type
-6. **Literal constants**: Integer literals are automatically sized to fit the target type with range checking
+2. **Automatic integer to float promotion**: Integer types can be promoted to floating-point types in mixed arithmetic
+3. **Explicit casting required**: Different sized integers require explicit casting (e.g., `short + int` requires casting)
+4. **Bool isolation**: `bool` cannot be converted to or from any other type, even with explicit casting
+5. **Literal constants**: Integer literals are automatically sized to fit the target type with range checking
+6. **Sign handling**: Casting between signed and unsigned types uses proper sign/zero extension
 
 ### Examples
 
 ```c
-// Valid operations
-int i1 = 100
-int i2 = 200
-int sum = i1 + i2      // Same type - OK
-
-float f = 3.14
-double d = f + 2.0     // float promoted to double - OK
-
-byte b = 255           // Literal fits in byte range - OK
-
-// Invalid operations
+// Valid operations with casting
 short s = 100
-long l = 1000
-long bad = s + l       // Error: cannot mix short and long
+int i = 200
+int sum = (int: s) + i         // Explicit cast makes it valid
 
-byte b2 = 256          // Error: 256 out of range for byte
+long l = 1000000
+int smaller = int: l            // Explicit cast (may truncate)
+
+// Casting for precision
+int numerator = 7
+int denominator = 2
+double precise = (double: numerator) / denominator  // 3.5
+
+// Invalid operations - bool cannot be cast
+bool flag = true
+int num = int: flag            // Error: cannot cast bool to int
 ```
 
 ## Function Types

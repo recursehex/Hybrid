@@ -4,11 +4,16 @@ void testIntToFloat()
 {
     int i = 42
     float f = 3.14
-    
+
     float result1 = i + f
     float result2 = f * i
     float result3 = i / f
-    
+
+    // Assert expected results of type promotion
+    assert int: result1 == 45  // 42 + 3.14 ≈ 45.14, truncated to 45
+    assert int: result2 == 131  // 3.14 * 42 ≈ 131.88, truncated to 131
+    assert int: (result3 * 10) == 13  // 42 / 3.14 ≈ 13.375, * 10 ≈ 133.75, truncated to 133
+
     print(int: result1)
     print(int: result2)
     print(int: (result3 * 10))
@@ -47,15 +52,20 @@ void testSameTypeOperations()
     int i1 = 10
     int i2 = 20
     int i_result = i1 + i2
-    
+
     float f1 = 1.5
     float f2 = 2.5
     float f_result = f1 * f2
-    
+
     double d1 = 3.14
     double d2 = 2.718
     double d_result = d1 - d2
-    
+
+    // Assert expected results for same-type operations
+    assert i_result == 30
+    assert int: f_result == 3  // 1.5 * 2.5 = 3.75, truncated to 3
+    assert int: (d_result * 100) == 42  // (3.14 - 2.718) * 100 = 42.2, truncated to 42
+
     print(i_result)
     print(int: f_result)
     print(int: (d_result * 100))
@@ -141,11 +151,16 @@ void testPromotionInComparisons()
     int i = 5
     float f = 5.0
     double d = 5.1
-    
+
     bool eq1 = (i == f)
     bool eq2 = (f < d)
     bool eq3 = (i <= d)
-    
+
+    // Assert expected comparison results with type promotion
+    assert eq1 == true   // int 5 should equal float 5.0
+    assert eq2 == true   // float 5.0 should be less than double 5.1
+    assert eq3 == true   // int 5 should be less than or equal to double 5.1
+
     print(int: eq1)
     print(int: eq2)
     print(int: eq3)

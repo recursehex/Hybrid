@@ -182,8 +182,20 @@ public:
 class SkipStmtAST : public StmtAST {
 public:
   SkipStmtAST() {}
-  
+
   llvm::Value *codegen() override;
+};
+
+/// AssertStmtAST - Statement class for assert statements.
+class AssertStmtAST : public StmtAST {
+  std::unique_ptr<ExprAST> Condition;
+
+public:
+  AssertStmtAST(std::unique_ptr<ExprAST> Condition)
+      : Condition(std::move(Condition)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getCondition() const { return Condition.get(); }
 };
 
 /// CaseAST - Represents a single case clause in a switch.
@@ -390,6 +402,9 @@ public:
       : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix) {}
 
   llvm::Value *codegen() override;
+  const std::string &getOp() const { return Op; }
+  ExprAST *getOperand() const { return Operand.get(); }
+  bool getIsPrefix() const { return isPrefix; }
 };
 
 /// CastExprAST - Expression class for type casting.

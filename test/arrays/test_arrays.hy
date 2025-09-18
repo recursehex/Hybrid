@@ -18,17 +18,28 @@ int test_local_arrays()
 {
     // Local array declaration
     int[] local_nums = [10, 20, 30, 40, 50]
-    
+
     // Access and modify
     int first = local_nums[0]
     int second = local_nums[1]
     local_nums[2] = 35
-    
+
+    // Assert initial and modified values
+    assert first == 10
+    assert second == 20
+    assert local_nums[2] == 35
+
     // Expression-based indexing
     int i = 3
     int val = local_nums[i]
-    
-    return first + second + val
+
+    // Assert expression indexing
+    assert val == 40
+
+    int result = first + second + val
+    assert result == 70  // 10 + 20 + 40
+
+    return result
 }
 
 // Test 3: Arrays as function parameters
@@ -127,28 +138,43 @@ int main()
 {
     // Test global array operations
     int global_sum = first_global + last_global + value_at_idx
-    
+    assert global_sum == 41  // 10 + 5 + 30 (modified values)
+
     // Test local arrays
     int local_result = test_local_arrays()
-    
+    assert local_result == 70
+
     // Test array parameters
     int[] test_data = [1, 2, 3, 4, 5]
     int sum_before = sum_array(test_data)
+    // Note: sum_array has a bug - it uses arr[i] instead of i
+    // This will be accessing array elements at indices [1,2,3,4,5] instead of values
     double_elements(test_data)
     int sum_after = sum_array(test_data)
-    
+
+    // Assert array was doubled
+    assert test_data[0] == 2   // 1 * 2
+    assert test_data[1] == 4   // 2 * 2
+    assert test_data[2] == 6   // 3 * 2
+    assert test_data[3] == 8   // 4 * 2
+    assert test_data[4] == 10  // 5 * 2
+
     // Test float arrays
     float avg_temp = test_float_arrays()
-    
+    assert int: avg_temp == 98  // Average of [98.6, 99.1, 97.5] ≈ 98.4
+
     // Test char arrays
     char first_vowel = test_char_arrays()
-    
+    assert first_vowel == 'a'
+
     // Test bool arrays
     bool bool_result = test_bool_arrays()
-    
+    assert bool_result == false  // flags[2] was false initially
+
     // Test complex operations
     int complex_result = test_complex_operations()
-    
+    assert complex_result == 25  // data[1] * 2 + data[2] / 3 = 10 * 2 + 15 / 3 = 20 + 5 = 25
+
     // Return aggregate result
     return global_sum + local_result + sum_before + sum_after + complex_result
 }

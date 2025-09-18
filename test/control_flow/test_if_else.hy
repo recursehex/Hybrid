@@ -144,3 +144,49 @@ int nestedTest(int x, int y)
         }
     }
 }
+
+// Main function to test all control flow with assertions
+int main()
+{
+    // Test basic if-else
+    assert testFunc(0) == 1
+    assert testFunc(5) == 2
+
+    // Test if-else-if chain (grading function)
+    assert grade(95) == 4  // A grade
+    assert grade(85) == 3  // B grade
+    assert grade(75) == 2  // C grade
+    assert grade(65) == 1  // F grade
+
+    // Test all comparison operators
+    assert compareTest(5, 5) == 0   // Equal case (a == b)
+    assert compareTest(5, 3) == 1   // Not equal case (a != b)
+    assert compareTest(3, 5) == 2   // Less than case (a < b)
+    assert compareTest(7, 5) == 3   // Greater than case (a > b)
+    assert compareTest(5, 7) == 4   // Less or equal case (a <= b)
+    assert compareTest(8, 5) == 5   // Greater or equal case (a >= b)
+
+    // Test float comparisons
+    assert int: floatCompare(5.0, 5.0) == 1  // Equal floats
+    assert int: floatCompare(7.5, 5.0) == 2  // Greater float
+    assert int: floatCompare(3.0, 5.0) == 0  // Lesser float
+
+    // Test character comparisons
+    assert charTest('a') == true
+    assert charTest('b') == false
+    assert charTest('x') == true  // Default case
+
+    // Test boolean logic
+    assert boolTest(true, false) == 1
+    assert boolTest(true, true) == 2
+    assert boolTest(false, true) == 0
+    assert boolTest(false, false) == 0
+
+    // Test nested if statements (quadrant logic)
+    assert nestedTest(5, 10) == 1   // Both positive (quadrant I)
+    assert nestedTest(5, -10) == 2  // x positive, y negative (quadrant IV)
+    assert nestedTest(-5, 10) == 3  // x negative, y positive (quadrant II)
+    assert nestedTest(-5, -10) == 4 // Both negative (quadrant III)
+
+    return 0
+}

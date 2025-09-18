@@ -45,6 +45,7 @@ std::unique_ptr<IfStmtAST> ParseIfStatement();
 std::unique_ptr<WhileStmtAST> ParseWhileStatement();
 std::unique_ptr<BreakStmtAST> ParseBreakStatement();
 std::unique_ptr<SkipStmtAST> ParseSkipStatement();
+std::unique_ptr<AssertStmtAST> ParseAssertStatement();
 std::unique_ptr<SwitchStmtAST> ParseSwitchStatement();
 std::unique_ptr<SwitchExprAST> ParseSwitchExpression();
 std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> ThenExpr);
@@ -56,5 +57,21 @@ bool ParseTypeIdentifier();
 // Struct parsing functions
 std::unique_ptr<StructAST> ParseStructDefinition();
 std::unique_ptr<FieldAST> ParseField();
+
+// Constant expression evaluation
+struct ConstantValue {
+  enum Type { INTEGER, FLOAT, BOOLEAN } type;
+  union {
+    long long intVal;
+    double floatVal;
+    bool boolVal;
+  };
+
+  ConstantValue(long long val) : type(INTEGER), intVal(val) {}
+  ConstantValue(double val) : type(FLOAT), floatVal(val) {}
+  ConstantValue(bool val) : type(BOOLEAN), boolVal(val) {}
+};
+
+bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result);
 
 #endif // PARSER_H
