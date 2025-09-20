@@ -133,7 +133,36 @@ int test_complex_operations()
     return calc
 }
 
-// Test 8: Main test function that exercises all features
+// Test 8: Type inference and compatibility tests
+void test_type_inference()
+{
+    // Pure type arrays with automatic type inference
+    int[] pure_int = [1, 2, 3, 4, 5]
+    double[] pure_double = [1.5, 2.5, 3.5]
+    bool[] pure_bool = [true, false, true, false]
+    string[] pure_string = ["hello", "world", "test"]
+    char[] pure_char = ['x', 'y', 'z']
+
+    // Mixed numeric types promote to double
+    double[] mixed_numeric = [1, 2.5, 3, 4.7, 5]
+
+    // Empty arrays default to int
+    int[] empty = []
+
+    // Verify type inference works correctly
+    assert pure_int[0] == 1
+    assert pure_double[0] == 1.5
+    assert pure_bool[0] == true
+    assert pure_char[0] == 'x'
+
+    // Verify mixed numeric array promoted to double
+    assert mixed_numeric[0] == 1.0  // int promoted to double
+    assert mixed_numeric[1] == 2.5   // already double
+
+    return
+}
+
+// Test 9: Main test function that exercises all features
 int main()
 {
     // Test global array operations
@@ -174,6 +203,9 @@ int main()
     // Test complex operations
     int complex_result = test_complex_operations()
     assert complex_result == 25  // data[1] * 2 + data[2] / 3 = 10 * 2 + 15 / 3 = 20 + 5 = 25
+
+    // Test type inference and compatibility
+    test_type_inference()
 
     // Return aggregate result
     return global_sum + local_result + sum_before + sum_after + complex_result

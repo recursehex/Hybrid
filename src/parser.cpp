@@ -106,6 +106,9 @@ std::unique_ptr<ExprAST> LogError(const char *Str) {
   fprintf(stderr, "Error: %s\n", Str);
   return nullptr;
 }
+std::unique_ptr<ExprAST> LogError(const std::string &Str) {
+  return LogError(Str.c_str());
+}
 std::unique_ptr<PrototypeAST> LogErrorP(const char *Str) {
   LogError(Str);
   return nullptr;
@@ -113,6 +116,78 @@ std::unique_ptr<PrototypeAST> LogErrorP(const char *Str) {
 std::unique_ptr<StmtAST> LogErrorS(const char *Str) {
   LogError(Str);
   return nullptr;
+}
+
+/// InferExprType - Infer the type of an expression at parse time
+/// Returns empty string if type cannot be determined
+static std::string InferExprType(const ExprAST* expr)
+{
+  if (!expr) return "";
+
+  // Check for literal types
+  if (dynamic_cast<const NumberExprAST*>(expr))
+  {
+    // Check if it's a whole number for int vs float
+    const NumberExprAST* numExpr = static_cast<const NumberExprAST*>(expr);
+    double val = numExpr->getValue();
+    if (val == floor(val))
+    {
+      return "int";
+    }
+    return "double";
+  }
+
+  if (dynamic_cast<const BoolExprAST*>(expr))
+  {
+    return "bool";
+  }
+
+  if (dynamic_cast<const StringExprAST*>(expr))
+  {
+    return "string";
+  }
+
+  if (dynamic_cast<const CharExprAST*>(expr))
+  {
+    return "char";
+  }
+
+  if (dynamic_cast<const NullExprAST*>(expr))
+  {
+    return "string"; // null is used for string initialization
+  }
+
+  // Check for cast expressions
+  if (const CastExprAST* castExpr = dynamic_cast<const CastExprAST*>(expr))
+  {
+    return castExpr->getTargetType();
+  }
+
+  // Check for array expressions
+  if (const ArrayExprAST* arrayExpr = dynamic_cast<const ArrayExprAST*>(expr))
+  {
+    return arrayExpr->getElementType() + "[]";
+  }
+
+  // For other expressions, we can't determine type at parse time
+  return "";
+}
+
+/// AreTypesCompatible - Check if two types are compatible for array elements
+static bool AreTypesCompatible(const std::string& type1, const std::string& type2)
+{
+  if (type1.empty() || type2.empty()) return true; // Can't determine, assume compatible
+
+  if (type1 == type2) return true;
+
+  // Allow int and float to be compatible (will need casting during codegen)
+  if ((type1 == "int" || type1 == "float" || type1 == "double") &&
+      (type2 == "int" || type2 == "float" || type2 == "double"))
+  {
+    return true;
+  }
+
+  return false;
 }
 
 /// numberexpr ::= number
@@ -185,33 +260,74 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 /// arrayexpr ::= '[' expression* ']'
 std::unique_ptr<ExprAST> ParseArrayExpr() {
   getNextToken(); // eat [
-  
+
   std::vector<std::unique_ptr<ExprAST>> Elements;
-  
+
   if (CurTok != ']') {
     while (true) {
       if (auto Elem = ParseExpression())
         Elements.push_back(std::move(Elem));
       else
         return nullptr;
-      
+
       if (CurTok == ']')
         break;
-      
+
       if (CurTok != ',')
         return LogError("Expected ',' or ']' in array literal");
       getNextToken(); // eat ,
     }
   }
-  
+
   if (CurTok != ']')
     return LogError("Expected ']' to close array literal");
   getNextToken(); // eat ]
-  
-  // For now, infer the element type from the elements
-  // In a real implementation, might want to check all elements have compatible types
-  std::string ElementType = "int"; // Default to int, will be improved with type inference
-  
+
+  // Infer the element type from the elements and check compatibility
+  std::string ElementType = "";
+  std::string CommonType = "";
+  bool hasFloat = false;
+
+  // Check all elements for type compatibility
+  for (const auto& elem : Elements)
+  {
+    std::string elemType = InferExprType(elem.get());
+
+    if (!elemType.empty())
+    {
+      if (ElementType.empty())
+      {
+        // First typed element determines the base type
+        ElementType = elemType;
+        CommonType = elemType;
+      }
+      else if (!AreTypesCompatible(ElementType, elemType))
+      {
+        // Types are incompatible
+        return LogError("Incompatible types in array literal: cannot mix " +
+                       ElementType + " and " + elemType);
+      }
+
+      // Track if we have any floats/doubles for type promotion
+      if (elemType == "float" || elemType == "double")
+      {
+        hasFloat = true;
+      }
+    }
+  }
+
+  // If we have mixed int/float, promote to double
+  if (hasFloat && (ElementType == "int" || ElementType == "float" || ElementType == "double"))
+  {
+    ElementType = "double";
+  }
+
+  // Default to int if we couldn't determine type
+  if (ElementType.empty())
+  {
+    ElementType = "int";
+  }
+
   return std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
 }
 
