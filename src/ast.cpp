@@ -98,7 +98,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   else if (TypeStr == "void")
     return llvm::Type::getVoidTy(*TheContext);
   else if (TypeStr == "string")
-    return llvm::PointerType::get(llvm::Type::getInt16Ty(*TheContext), 0); // Strings as 16-bit char*
+    return llvm::PointerType::get(*TheContext, 0); // Strings as opaque pointer
   // New sized integer types
   else if (TypeStr == "byte")
     return llvm::Type::getInt8Ty(*TheContext);   // 8-bit unsigned
@@ -125,7 +125,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     llvm::Type *ElemType = getTypeFromString(ElementType);
     if (ElemType) {
       // Create struct type for array: { element_ptr, size }
-      llvm::Type *PtrType = llvm::PointerType::get(ElemType, 0);
+      llvm::Type *PtrType = llvm::PointerType::get(*TheContext, 0);
       llvm::Type *SizeType = llvm::Type::getInt32Ty(*TheContext);
       return llvm::StructType::get(*TheContext, {PtrType, SizeType});
     }
@@ -135,7 +135,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   // Check if it's a struct type
   auto structIt = StructTypes.find(TypeStr);
   if (structIt != StructTypes.end()) {
-    return llvm::PointerType::get(structIt->second, 0); // Struct instances are pointers
+    return llvm::PointerType::get(*TheContext, 0); // Struct instances are opaque pointers
   }
   
   return nullptr;
@@ -143,7 +143,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
 
 // Helper to get array struct type for a given element type
 llvm::StructType *getArrayStructType(llvm::Type *ElementType) {
-  llvm::Type *PtrType = llvm::PointerType::get(ElementType, 0);
+  llvm::Type *PtrType = llvm::PointerType::get(*TheContext, 0);
   llvm::Type *SizeType = llvm::Type::getInt32Ty(*TheContext);
   return llvm::StructType::get(*TheContext, {PtrType, SizeType});
 }
@@ -187,7 +187,7 @@ llvm::Value *BoolExprAST::codegen() {
 // Generate code for null expressions
 llvm::Value *NullExprAST::codegen() {
   // Create a null pointer for string type (16-bit char*)
-  llvm::Type *StringType = llvm::PointerType::get(llvm::Type::getInt16Ty(*TheContext), 0);
+  llvm::Type *StringType = llvm::PointerType::get(*TheContext, 0);
   return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(StringType));
 }
 
