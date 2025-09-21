@@ -8,7 +8,9 @@ The Hybrid compiler includes a comprehensive test suite with automated test disc
 
 ### Test Runner Script
 
-The primary way to run tests is using the `run_tests.sh` script:
+The primary way to run tests is using the platform-specific test runner:
+
+#### Unix/macOS
 
 ```bash
 # Run all tests
@@ -25,19 +27,49 @@ The primary way to run tests is using the `run_tests.sh` script:
 ./run_tests.sh -h
 ```
 
+#### Windows
+
+```cmd
+# Run all tests
+run_tests.bat
+
+# Run tests with verbose output
+run_tests.bat -v
+
+# Run specific test or pattern
+run_tests.bat test_expr      # Runs test_expr.hy
+run_tests.bat array         # Runs all tests containing "array"
+
+# Show help
+run_tests.bat -h
+```
+
 ### Running Individual Tests
 
 Tests can also be run directly with the compiler:
 
+#### Unix/macOS
 ```bash
 # Run a specific test file
-./hybrid < test/test_codegen.hy
+./build/hybrid < test/test_codegen.hy
 
 # Run with output redirection
-./hybrid < test/test_expr.hy > output.txt
+./build/hybrid < test/test_expr.hy > output.txt
 
 # Run with error output
-./hybrid < test/test_fail.hy 2>&1
+./build/hybrid < test/test_fail.hy 2>&1
+```
+
+#### Windows
+```cmd
+# Run a specific test file
+build\hybrid.exe < test\test_codegen.hy
+
+# Run with output redirection
+build\hybrid.exe < test\test_expr.hy > output.txt
+
+# Run with error output
+build\hybrid.exe < test\test_fail.hy 2>&1
 ```
 
 ## Test Suite Features

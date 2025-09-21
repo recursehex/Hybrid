@@ -37,6 +37,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -Wno-unused-parameter
         -Wno-unused-variable
     )
+elseif(MSVC)
+    target_compile_options(hybrid PRIVATE
+        /W4
+        /wd4100  # unreferenced formal parameter
+        /wd4101  # unreferenced local variable
+        /wd4996  # deprecated functions
+    )
+    # Set Windows subsystem to console
+    set_target_properties(hybrid PROPERTIES
+        LINK_FLAGS "/SUBSYSTEM:CONSOLE"
+    )
 endif()
 
 # Add current directory to include path

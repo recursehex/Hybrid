@@ -11,17 +11,22 @@ Hybrid is a performant, statically-typed programming language that combines the 
 ### Prerequisites
 
 ```bash
-# Install LLVM
-brew install llvm        # macOS
-apt install llvm-dev     # Ubuntu/Debian
+# macOS
+brew install llvm cmake
 
-# Install CMake
-brew install cmake       # macOS
-apt install cmake        # Ubuntu/Debian
+# Ubuntu/Debian
+apt install llvm-dev cmake build-essential
+
+# Windows
+# 1. Download and install LLVM: https://github.com/llvm/llvm-project/releases
+# 2. Download and install CMake: https://cmake.org/download/
+# 3. Install Ninja (optional but recommended): https://ninja-build.org/
+# 4. Ensure LLVM's bin directory is in your PATH
 ```
 
 ### Building
 
+#### Unix/macOS
 ```bash
 # Configure and build
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -37,8 +42,25 @@ cmake --preset=release
 cmake --build --preset=release
 ```
 
+#### Windows
+```cmd
+# Using build script
+build.bat               # Release build
+build.bat -d            # Debug build
+build.bat -c -t         # Clean build and run tests
+
+# Or use CMake presets (recommended)
+cmake --preset=release
+cmake --build --preset=release
+
+# Or manual CMake
+cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
 ### Running
 
+#### Unix/macOS
 ```bash
 # Run interactive mode
 ./build/hybrid          # or ./build/release/hybrid with presets
@@ -48,6 +70,20 @@ cmake --build --preset=release
 
 # Run tests
 ./run_tests.sh
+./run_tests.sh -v       # Verbose mode
+```
+
+#### Windows
+```cmd
+# Run interactive mode
+build\hybrid.exe        # or build\release\hybrid.exe with presets
+
+# Run a program
+build\hybrid.exe < program.hy
+
+# Run tests
+run_tests.bat
+run_tests.bat -v        # Verbose mode
 ```
 
 ## Documentation
@@ -67,12 +103,13 @@ Comprehensive documentation is available in the `docs/` directory:
 
 ## Build System
 
-The project uses CMake for cross-platform builds.
+The project uses CMake for cross-platform builds with full support for Windows, Linux, and macOS.
 
 ### Prerequisites
 - LLVM 20+ with development headers
-- C++17 compatible compiler
+- C++17 compatible compiler (Clang, GCC, or MSVC)
 - CMake 3.20+
+- Windows: Ninja build system (recommended) or Visual Studio
 
 ## Project Structure
 
@@ -84,8 +121,10 @@ Hybrid/
 ├── docs/               # Documentation
 ├── CMakeLists.txt      # Main build configuration
 ├── CMakePresets.json   # Build presets for IDEs
-├── build.sh            # Build script
-└── run_tests.sh        # Test runner script
+├── build.sh            # Unix/macOS build script
+├── build.bat           # Windows build script
+├── run_tests.sh        # Unix/macOS test runner
+└── run_tests.bat       # Windows test runner
 ```
 
 ## Current Status
