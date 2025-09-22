@@ -75,7 +75,7 @@ echo "Build Type: $BUILD_TYPE"
 echo "Build Directory: $BUILD_DIR"
 echo ""
 
-# Find LLVM
+# Find LLVM toolchain roots
 LLVM_DIR=""
 if command -v llvm-config &> /dev/null; then
     LLVM_PREFIX=$(llvm-config --prefix)
@@ -90,7 +90,27 @@ else
     exit 1
 fi
 
+# Prefer upstream clang binaries when available so we compile with the same toolchain we link against
+CLANG_BIN=""
+CLANGXX_BIN=""
+if [ -d "/opt/homebrew/opt/llvm/bin" ]; then
+    CLANG_BIN="/opt/homebrew/opt/llvm/bin/clang"
+    CLANGXX_BIN="/opt/homebrew/opt/llvm/bin/clang++"
+elif command -v clang &> /dev/null; then
+    CLANG_BIN=$(command -v clang)
+    CLANGXX_BIN=$(command -v clang++)
+fi
+
+# Ensure the macOS SDK is visible to Homebrew clang
+if [ "$(uname -s)" = "Darwin" ] && [ -z "${SDKROOT:-}" ]; then
+    SDKROOT=$(xcrun --show-sdk-path 2>/dev/null || true)
+fi
+
 echo "Found LLVM at: $LLVM_DIR"
+if [ -n "$CLANG_BIN" ]; then
+    echo "Using C compiler: $CLANG_BIN"
+    echo "Using C++ compiler: $CLANGXX_BIN"
+fi
 echo ""
 
 # Clean if requested
@@ -102,10 +122,23 @@ fi
 
 # Configure
 echo -e "${YELLOW}Configuring CMake...${NC}"
-cmake -B "$BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DLLVM_DIR="$LLVM_DIR" \
+CMAKE_ARGS=(
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+    -DLLVM_DIR="$LLVM_DIR"
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+)
+
+if [ -n "$CLANG_BIN" ]; then
+    CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$CLANG_BIN")
+fi
+if [ -n "$CLANGXX_BIN" ]; then
+    CMAKE_ARGS+=(-DCMAKE_CXX_COMPILER="$CLANGXX_BIN")
+fi
+if [ -n "${SDKROOT:-}" ]; then
+    CMAKE_ARGS+=(-DCMAKE_OSX_SYSROOT="$SDKROOT")
+fi
+
+cmake -B "$BUILD_DIR" "${CMAKE_ARGS[@]}"
 
 echo ""
 

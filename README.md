@@ -6,54 +6,106 @@
 
 Hybrid is a performant, statically-typed programming language that combines the power of C/C++ with the flexibility of Python. It has a modern, expressive syntax, interoperating with C/C++ while being memory-safe.
 
+## Contents
+- [Quick Start](#quick-start)
+- [Documentation](#documentation)
+- [Build System](#build-system)
+- [Project Structure](#project-structure)
+- [Current Status](#current-status)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Quick Start
 
-### Prerequisites
+### Requirements
+
+#### macOS
+
+Install LLVM and CMake via Homebrew:
 
 ```bash
-# macOS
 brew install llvm cmake
+```
 
-# Ubuntu/Debian
+Ensure Homebrew's LLVM clang is first on PATH by adding the following to your `~/.zprofile` or `~/.zshrc`:
+
+```bash
+export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+```
+
+> [!NOTE]
+> Hybrid's macOS builds use the Homebrew-provided LLVM clang toolchain. If you prefer not to modify your shell profile, make sure `/opt/homebrew/opt/llvm/bin` is on your PATH before configuring the project.
+
+#### Ubuntu/Debian
+
+Install LLVM, CMake, and build tools:
+
+```bash
 apt install llvm-dev cmake build-essential
+```
 
-# Windows
-# 1. Download and install LLVM: https://github.com/llvm/llvm-project/releases
-# 2. Download and install CMake: https://cmake.org/download/
-# 3. Install Ninja (optional but recommended): https://ninja-build.org/
-# 4. Ensure LLVM's bin directory is in your PATH
+#### Windows
+Install LLVM, CMake, and Ninja using [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/) or [Chocolatey](https://chocolatey.org/):
+
+```cmd
+winget install LLVM.LLVM
+choco install llvm
+
+winget install Kitware.CMake
+choco install cmake
+
+winget install Ninja-build.Ninja
+choco install ninja
+```
+
+Ensure LLVM's bin directory is in your PATH:
+```bash
+set PATH=C:\Program Files\LLVM\bin;%PATH%
 ```
 
 ### Building
 
 #### Unix/macOS
-```bash
-# Configure and build
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
 
-# Or use the build script
+Configure and build:
+```bash
 ./build.sh              # Release build
 ./build.sh -d           # Debug build
 ./build.sh -c -t        # Clean build and run tests
+```
 
-# Or use CMake presets
+Or use CMake presets:
+```bash
 cmake --preset=release
 cmake --build --preset=release
 ```
 
-#### Windows
-```cmd
-# Using build script
-build.bat               # Release build
-build.bat -d            # Debug build
-build.bat -c -t         # Clean build and run tests
+Or manual CMake:
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
 
-# Or use CMake presets (recommended)
+#### Windows
+
+Using build script:
+
+```cmd
+build.bat
+build.bat -d
+build.bat -c -t
+```
+
+Or use CMake presets:
+
+```cmd
 cmake --preset=release
 cmake --build --preset=release
+```
 
-# Or manual CMake
+Or manual CMake:
+
+```cmd
 cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
@@ -61,11 +113,14 @@ cmake --build build
 ### Running
 
 #### Unix/macOS
-```bash
-# Run interactive mode
-./build/hybrid          # or ./build/release/hybrid with presets
 
-# Run a program
+Run interactive mode:
+```bash
+./build/hybrid          # or ./build/release/hybrid with presets
+```
+
+Run a program:
+```bash
 ./build/hybrid < program.hy
 
 # Run tests
@@ -74,6 +129,7 @@ cmake --build build
 ```
 
 #### Windows
+
 ```cmd
 # Run interactive mode
 build\hybrid.exe        # or build\release\hybrid.exe with presets
@@ -83,7 +139,7 @@ build\hybrid.exe < program.hy
 
 # Run tests
 run_tests.bat
-run_tests.bat -v        # Verbose mode
+run_tests.bat -v
 ```
 
 ## Documentation

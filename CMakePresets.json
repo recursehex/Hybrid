@@ -55,7 +55,12 @@
         "rhs": "Darwin"
       },
       "cacheVariables": {
-        "LLVM_DIR": "/opt/homebrew/opt/llvm/lib/cmake/llvm"
+        "LLVM_DIR": "/opt/homebrew/opt/llvm/lib/cmake/llvm",
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++"
+      },
+      "environment": {
+        "PATH": "/opt/homebrew/opt/llvm/bin:$penv{PATH}"
       }
     },
     {
