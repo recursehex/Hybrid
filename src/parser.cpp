@@ -19,6 +19,22 @@ std::map<std::string, int> BinopPrecedence;
 /// StructNames - Track struct names as valid types
 std::set<std::string> StructNames;
 
+/// UnsafeContext - Track if we're currently in an unsafe block or function
+static int UnsafeContextLevel = 0;
+
+bool isInUnsafeContext() {
+  return UnsafeContextLevel > 0;
+}
+
+void enterUnsafeContext() {
+  UnsafeContextLevel++;
+}
+
+void exitUnsafeContext() {
+  if (UnsafeContextLevel > 0)
+    UnsafeContextLevel--;
+}
+
 /// Helper function to check if current token is a built-in type
 bool IsBuiltInType()
 {
@@ -33,8 +49,56 @@ bool IsBuiltInType()
 /// Helper function to check if current token is a valid type (built-in or struct)
 bool IsValidType()
 {
-  return IsBuiltInType() || 
+  return IsBuiltInType() ||
          (CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end());
+}
+
+/// Helper function to parse a complete type including array and pointer modifiers
+/// Returns the full type string (e.g., "int@", "int@2", "int[]", "float@[]")
+std::string ParseCompleteType()
+{
+  if (!IsValidType())
+    return "";
+
+  std::string Type = IdentifierStr;
+  getNextToken(); // eat base type
+
+  // Check for pointer type with @ operator (e.g., int@, int@2)
+  if (CurTok == tok_at) {
+    // Check if we're in an unsafe context
+    if (!isInUnsafeContext()) {
+      fprintf(stderr, "Error: Pointer types can only be used within unsafe blocks or unsafe functions\n");
+      return "";
+    }
+
+    getNextToken(); // eat '@'
+
+    // Check for pointer level (e.g., @2 for pointer-to-pointer)
+    if (CurTok == tok_number) {
+      int level = (int)NumVal;
+      if (level != NumVal || level < 1) {
+        fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+        return "";
+      }
+      Type += "@" + std::to_string(level);
+      getNextToken(); // eat number
+    } else {
+      Type += "@"; // Single level pointer
+    }
+  }
+
+  // Check for array type
+  if (CurTok == '[') {
+    getNextToken(); // eat [
+    if (CurTok != ']') {
+      fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
+      return "";
+    }
+    getNextToken(); // eat ]
+    Type += "[]"; // Add array indicator to type
+  }
+
+  return Type;
 }
 
 /// GetTokPrecedence - Get the precedence of the pending binary operator token.
@@ -355,7 +419,8 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
 
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
   // If the token is not a unary operator, it must be a primary expression.
-  if (CurTok != '-' && CurTok != tok_not && CurTok != tok_inc && CurTok != tok_dec) {
+  if (CurTok != '-' && CurTok != tok_not && CurTok != tok_inc && CurTok != tok_dec &&
+      CurTok != tok_hash && CurTok != tok_at) {
     return ParsePrimary();
   }
 
@@ -365,10 +430,26 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
   else if (Opc == tok_not) OpStr = "!";
   else if (Opc == tok_inc) OpStr = "++";
   else if (Opc == tok_dec) OpStr = "--";
+  else if (Opc == tok_hash) {
+    OpStr = "#";  // Address-of operator
+    if (!isInUnsafeContext()) {
+      LogError("Address-of operator (#) can only be used within unsafe blocks or unsafe functions");
+      return nullptr;
+    }
+  }
+  else if (Opc == tok_at) {
+    OpStr = "@";    // Dereference operator
+    if (!isInUnsafeContext()) {
+      LogError("Dereference operator (@) can only be used within unsafe blocks or unsafe functions");
+      return nullptr;
+    }
+  }
 
   getNextToken(); // eat the operator.
 
-  auto Operand = ParseUnaryExpr();
+  // For dereference operator (@), parse with postfix to get lower precedence
+  // This makes @holder.pointers[0] parse as @(holder.pointers[0])
+  auto Operand = (OpStr == "@") ? ParsePrimaryWithPostfix() : ParseUnaryExpr();
   if (!Operand)
     return nullptr;
 
@@ -447,6 +528,8 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case tok_not:
   case tok_inc:
   case tok_dec:
+  case tok_hash:
+  case tok_at:
     return ParseUnaryExpr();
   case tok_switch:
     return ParseSwitchExpression();
@@ -599,6 +682,22 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       std::string MemberName = IdentifierStr;
       getNextToken(); // eat member name
       LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName);
+    } else if (CurTok == tok_arrow) {
+      // Pointer member access (-> is syntactic sugar for (@ptr).member)
+      if (!isInUnsafeContext()) {
+        LogError("Arrow operator (->) can only be used within unsafe blocks or unsafe functions");
+        return nullptr;
+      }
+      getNextToken(); // eat '->'
+      if (CurTok != tok_identifier) {
+        LogError("Expected member name after '->'");
+        return nullptr;
+      }
+      std::string MemberName = IdentifierStr;
+      getNextToken(); // eat member name
+      // Create (@ptr).member
+      auto Deref = std::make_unique<UnaryExprAST>("@", std::move(LHS), true);
+      LHS = std::make_unique<MemberAccessExprAST>(std::move(Deref), MemberName);
     } else {
       break;
     }
@@ -620,13 +719,14 @@ std::unique_ptr<ExprAST> ParseExpression() {
 
 /// prototype
 ///   ::= id id '(' (id id (',' id id)*)? ')'  // C-style: returntype name(type param, type param, ...)
-std::unique_ptr<PrototypeAST> ParsePrototype() {
+std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   // Parse return type
   if (!IsValidType())
     return LogErrorP("Expected return type in prototype");
 
-  std::string ReturnType = IdentifierStr;
-  getNextToken();
+  std::string ReturnType = ParseCompleteType();
+  if (ReturnType.empty())
+    return LogErrorP("Failed to parse return type");
 
   if (CurTok != tok_identifier)
     return LogErrorP("Expected function name in prototype");
@@ -643,20 +743,21 @@ std::unique_ptr<PrototypeAST> ParsePrototype() {
   // Handle empty parameter list
   if (CurTok == ')') {
     getNextToken(); // eat ')'
-    return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args));
+    return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe);
   }
   
   // Parse first parameter
   while (true) {
     if (!IsValidType())
       return LogErrorP("Expected parameter type");
-    
-    std::string ParamType = IdentifierStr;
-    getNextToken();
-    
+
+    std::string ParamType = ParseCompleteType();
+    if (ParamType.empty())
+      return LogErrorP("Failed to parse parameter type");
+
     if (CurTok != tok_identifier)
       return LogErrorP("Expected parameter name");
-    
+
     std::string ParamName = IdentifierStr;
     getNextToken();
     
@@ -673,19 +774,25 @@ std::unique_ptr<PrototypeAST> ParsePrototype() {
     getNextToken(); // eat ','
   }
 
-  return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args));
+  return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe);
 }
 
 /// definition ::= prototype block
+/// Note: 'unsafe' is handled by the caller (HandleUnsafe), which sets the context
 std::unique_ptr<FunctionAST> ParseDefinition() {
-  auto Proto = ParsePrototype();
-  if (!Proto)
+  // Check if we're in an unsafe context (set by HandleUnsafe)
+  bool isUnsafe = isInUnsafeContext();
+
+  auto Proto = ParsePrototype(isUnsafe);
+  if (!Proto) {
     return nullptr;
+  }
 
   auto Body = ParseBlock();
-  if (!Body)
+  if (!Body) {
     return nullptr;
-    
+  }
+
   return std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
 }
 
@@ -734,20 +841,10 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration() {
   if (!IsValidType())
     return nullptr;
-    
-  std::string Type = IdentifierStr;
-  getNextToken(); // eat type
-  
-  // Check for array type
-  if (CurTok == '[') {
-    getNextToken(); // eat [
-    if (CurTok != ']') {
-      LogError("Expected ']' after '[' in array type");
-      return nullptr;
-    }
-    getNextToken(); // eat ]
-    Type += "[]"; // Add array indicator to type
-  }
+
+  std::string Type = ParseCompleteType();
+  if (Type.empty())
+    return nullptr;
   
   if (CurTok != tok_identifier)
     return nullptr;
@@ -994,6 +1091,31 @@ std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
   }
 
   return std::make_unique<AssertStmtAST>(std::move(Condition));
+}
+
+/// unsafeblock ::= 'unsafe' block
+std::unique_ptr<UnsafeBlockStmtAST> ParseUnsafeBlock() {
+  getNextToken(); // eat 'unsafe'
+
+  // Skip newlines after 'unsafe'
+  while (CurTok == tok_newline)
+    getNextToken();
+
+  // Enter unsafe context
+  enterUnsafeContext();
+
+  // Parse the block
+  auto Body = ParseBlock();
+  if (!Body) {
+    LogError("expected block after 'unsafe'");
+    exitUnsafeContext();
+    return nullptr;
+  }
+
+  // Exit unsafe context
+  exitUnsafeContext();
+
+  return std::make_unique<UnsafeBlockStmtAST>(std::move(Body));
 }
 
 /// switchstmt ::= 'switch' expression '{' case* '}'
@@ -1487,6 +1609,8 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseAssertStatement();
   case tok_switch:
     return ParseSwitchStatement();
+  case tok_unsafe:
+    return ParseUnsafeBlock();
   case '}':
     // End of block - not a statement, but not an error either
     // Let the caller (ParseBlock) handle this
@@ -1557,19 +1681,10 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
 /// ParseTypeIdentifier - Handles top-level declarations that start with a type
 /// Could be either a variable declaration or function definition
 bool ParseTypeIdentifier() {
-  // Save the type information
-  std::string Type = IdentifierStr;
-  getNextToken(); // eat type
-  
-  // Check for array type
-  if (CurTok == '[') {
-    getNextToken(); // eat [
-    if (CurTok != ']') {
-      fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
-      return false;
-    }
-    getNextToken(); // eat ]
-    Type += "[]"; // Add array indicator to type
+  // Parse the complete type (including arrays and pointers)
+  std::string Type = ParseCompleteType();
+  if (Type.empty()) {
+    return false;
   }
   
   if (CurTok != tok_identifier) {
@@ -1596,18 +1711,10 @@ bool ParseTypeIdentifier() {
           return false;
         }
         
-        std::string ParamType = IdentifierStr;
-        getNextToken();
-        
-        // Check for array type
-        if (CurTok == '[') {
-          getNextToken(); // eat [
-          if (CurTok != ']') {
-            fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
-            return false;
-          }
-          getNextToken(); // eat ]
-          ParamType += "[]"; // Add array indicator to type
+        std::string ParamType = ParseCompleteType();
+        if (ParamType.empty()) {
+          fprintf(stderr, "Error: Failed to parse parameter type\n");
+          return false;
         }
         
         if (CurTok != tok_identifier) {
@@ -1765,8 +1872,11 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
           return nullptr;
         }
         
-        std::string ParamType = IdentifierStr;
-        getNextToken(); // eat type
+        std::string ParamType = ParseCompleteType();
+        if (ParamType.empty()) {
+          LogError("Failed to parse parameter type");
+          return nullptr;
+        }
         
         // Parse parameter name
         if (CurTok != tok_identifier) {
@@ -1815,18 +1925,10 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       
     } else if (IsValidType()) {
       // This might be a field or a method
-      std::string Type = IdentifierStr;
-      getNextToken(); // eat type
-      
-      // Check for array type
-      if (CurTok == '[') {
-        getNextToken(); // eat [
-        if (CurTok != ']') {
-          LogError("Expected ']' after '[' in array type");
-          return nullptr;
-        }
-        getNextToken(); // eat ]
-        Type += "[]";
+      std::string Type = ParseCompleteType();
+      if (Type.empty()) {
+        LogError("Failed to parse field type");
+        return nullptr;
       }
       
       if (CurTok != tok_identifier) {
@@ -1854,8 +1956,11 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
             return nullptr;
           }
           
-          std::string ParamType = IdentifierStr;
-          getNextToken(); // eat type
+          std::string ParamType = ParseCompleteType();
+          if (ParamType.empty()) {
+            LogError("Failed to parse parameter type");
+            return nullptr;
+          }
           
           // Parse parameter name
           if (CurTok != tok_identifier) {

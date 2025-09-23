@@ -103,6 +103,26 @@ void HandleStructDefinition() {
   }
 }
 
+void HandleUnsafe() {
+  extern int CurTok;
+  extern void enterUnsafeContext();
+  extern void exitUnsafeContext();
+
+  getNextToken(); // eat 'unsafe'
+
+  if (CurTok == tok_struct) {
+    // Handle unsafe struct definition
+    enterUnsafeContext();
+    HandleStructDefinition();
+    exitUnsafeContext();
+  } else {
+    // Handle unsafe function definition
+    enterUnsafeContext();
+    HandleDefinition();
+    exitUnsafeContext();
+  }
+}
+
 void HandleSwitchStatement() {
   if (auto SwitchAST = ParseSwitchStatement()) {
     fprintf(stderr, "Parsed switch statement successfully, generating code...\n");
@@ -146,6 +166,10 @@ void MainLoop() {
       break;
     case tok_switch:
       HandleSwitchStatement();
+      break;
+    case tok_unsafe:
+      // Handle unsafe functions or unsafe structs
+      HandleUnsafe();
       break;
     case tok_int:
     case tok_float:

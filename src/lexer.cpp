@@ -94,6 +94,8 @@ int gettok() {
       return tok_default;
     if (IdentifierStr == "assert")
       return tok_assert;
+    if (IdentifierStr == "unsafe")
+      return tok_unsafe;
     return tok_identifier;
   }
 
@@ -312,7 +314,13 @@ char_literal_end:
       LastChar = getchar();
       return tok_dec; // --
     }
-    
+
+    // Handle arrow operator for pointer member access
+    if (Op == '-' && NextChar == '>') {
+      LastChar = getchar();
+      return tok_arrow; // ->
+    }
+
     // Check for compound assignment
     if (NextChar == '=') {
       LastChar = getchar();
@@ -455,11 +463,23 @@ char_literal_end:
     LastChar = getchar();
     return tok_colon;
   }
-  
+
   // Check for dot (member access).
   if (LastChar == '.') {
     LastChar = getchar();
     return tok_dot;
+  }
+
+  // Check for @ (dereference/pointer type)
+  if (LastChar == '@') {
+    LastChar = getchar();
+    return tok_at;
+  }
+
+  // Check for # (address-of)
+  if (LastChar == '#') {
+    LastChar = getchar();
+    return tok_hash;
   }
 
   // Check for newline.

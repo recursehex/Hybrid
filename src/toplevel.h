@@ -7,6 +7,7 @@ void HandleExtern();
 void HandleTopLevelExpression();
 void HandleVariableDeclaration();
 void HandleStructDefinition();
+void HandleUnsafe();
 void HandleSwitchStatement();
 void MainLoop();
 

@@ -112,7 +112,13 @@ enum Token {
   tok_dot = -71,              // .
 
   // switch statement operators
-  tok_lambda = -72           // =>
+  tok_lambda = -72,          // =>
+
+  // pointer and unsafe operators
+  tok_unsafe = -73,          // unsafe
+  tok_at = -74,              // @ (dereference/pointer type)
+  tok_hash = -75,            // # (address-of)
+  tok_arrow = -76            // -> (pointer member access)
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

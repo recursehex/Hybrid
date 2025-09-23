@@ -198,6 +198,18 @@ public:
   ExprAST *getCondition() const { return Condition.get(); }
 };
 
+/// UnsafeBlockStmtAST - Statement class for unsafe blocks.
+class UnsafeBlockStmtAST : public StmtAST {
+  std::unique_ptr<BlockStmtAST> Body;
+
+public:
+  UnsafeBlockStmtAST(std::unique_ptr<BlockStmtAST> Body)
+      : Body(std::move(Body)) {}
+
+  llvm::Value *codegen() override;
+  BlockStmtAST *getBody() const { return Body.get(); }
+};
+
 /// CaseAST - Represents a single case clause in a switch.
 class CaseAST {
   std::vector<std::unique_ptr<ExprAST>> Values;  // Multiple values for same case
@@ -402,6 +414,7 @@ public:
       : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix) {}
 
   llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
   const std::string &getOp() const { return Op; }
   ExprAST *getOperand() const { return Operand.get(); }
   bool getIsPrefix() const { return isPrefix; }
@@ -451,16 +464,18 @@ class PrototypeAST {
   std::string ReturnType;
   std::string Name;
   std::vector<Parameter> Args;
+  bool IsUnsafe;
 
 public:
-  PrototypeAST(const std::string &ReturnType, const std::string &Name, 
-               std::vector<Parameter> Args)
-      : ReturnType(ReturnType), Name(Name), Args(std::move(Args)) {}
+  PrototypeAST(const std::string &ReturnType, const std::string &Name,
+               std::vector<Parameter> Args, bool IsUnsafe = false)
+      : ReturnType(ReturnType), Name(Name), Args(std::move(Args)), IsUnsafe(IsUnsafe) {}
 
   const std::string &getReturnType() const { return ReturnType; }
   const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
-  
+  bool isUnsafe() const { return IsUnsafe; }
+
   llvm::Function *codegen();
 };
 
@@ -541,5 +556,11 @@ void InitializeModule();
 
 // Get the LLVM module for printing
 llvm::Module *getModule();
+
+// Check if currently in an unsafe context
+bool isInUnsafeContext();
+
+// Set/clear unsafe context
+void setUnsafeContext(bool unsafe);
 
 #endif // AST_H

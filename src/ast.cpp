@@ -56,6 +56,7 @@ llvm::Module *getModule() {
   return TheModule.get();
 }
 
+
 // Error handling utilities
 llvm::Value *LogErrorV(const char *Str) {
   fprintf(stderr, "Error: %s\n", Str);
@@ -131,13 +132,40 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     }
     return nullptr;
   }
-  
+  // Check for pointer types (e.g., "int@", "float@2")
+  else if (TypeStr.find('@') != std::string::npos) {
+    size_t atPos = TypeStr.find('@');
+    std::string BaseType = TypeStr.substr(0, atPos);
+
+    // Parse pointer level (default is 1)
+    int level = 1;
+    if (atPos + 1 < TypeStr.size()) {
+      std::string levelStr = TypeStr.substr(atPos + 1);
+      if (!levelStr.empty()) {
+        level = std::stoi(levelStr);
+      }
+    }
+
+    // Get the base type
+    llvm::Type *BaseLLVMType = getTypeFromString(BaseType);
+    if (!BaseLLVMType)
+      return nullptr;
+
+    // Create nested pointer types based on level
+    llvm::Type *Result = BaseLLVMType;
+    for (int i = 0; i < level; i++) {
+      Result = llvm::PointerType::get(*TheContext, 0);
+    }
+
+    return Result;
+  }
+
   // Check if it's a struct type
   auto structIt = StructTypes.find(TypeStr);
   if (structIt != StructTypes.end()) {
     return llvm::PointerType::get(*TheContext, 0); // Struct instances are opaque pointers
   }
-  
+
   return nullptr;
 }
 
@@ -364,7 +392,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
       // Otherwise, check if it's from a variable
       else if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
         std::string varName = VarExpr->getName();
-        
+
         // Check local types first, then global types
         std::string typeStr;
         if (LocalTypes.count(varName)) {
@@ -372,13 +400,24 @@ llvm::Value *ArrayIndexExprAST::codegen() {
         } else if (GlobalTypes.count(varName)) {
           typeStr = GlobalTypes[varName];
         }
-        
+
         if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
           elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
           ElemType = getTypeFromString(elemTypeStr);
         }
       }
-      
+      // Check if it's from a member access (e.g., holder.pointers)
+      else if (dynamic_cast<MemberAccessExprAST*>(getArray())) {
+        // Get the type from the member access expression
+        std::string memberType = getArray()->getTypeName();
+
+        // If the member type ends with [], it's an array
+        if (!memberType.empty() && memberType.size() > 2 && memberType.substr(memberType.size() - 2) == "[]") {
+          elemTypeStr = memberType.substr(0, memberType.size() - 2);
+          ElemType = getTypeFromString(elemTypeStr);
+        }
+      }
+
       // Default to int if can't determine
       if (!ElemType) {
         ElemType = llvm::Type::getInt32Ty(*TheContext);
@@ -426,10 +465,10 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   
   // Calculate the address of the indexed element
   llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
-  
+
   // Set the type name for proper type checking
   setTypeName(elemTypeStr);
-  
+
   // Load and return the value
   return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
 }
@@ -892,19 +931,35 @@ llvm::Value *BinaryExprAST::codegen() {
         llvm::Value *FieldPtr = LHSMA->codegen_ptr();
         if (!FieldPtr)
           return nullptr;
-        
+
         // Cast RHS to the field type if necessary
         // Need to determine the field type from the struct definition
         // For now, trust that R has the correct type
         // TODO: Add proper type checking
         // R = castToType(R, FieldType);
-        
+
         Builder->CreateStore(R, FieldPtr);
         // Return a void value to indicate this is a statement, not an expression
         setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      } else if (UnaryExprAST *LHSU = dynamic_cast<UnaryExprAST*>(getLHS())) {
+        // Check if it's a dereference operator (pointer assignment)
+        if (LHSU->getOp() == "@") {
+          // Get the pointer from the dereference operation
+          llvm::Value *Ptr = LHSU->codegen_ptr();
+          if (!Ptr)
+            return nullptr;
+
+          // Store the value to the pointer location
+          Builder->CreateStore(R, Ptr);
+          // Return a void value to indicate this is a statement, not an expression
+          setTypeName("void");
+          return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+        } else {
+          return LogErrorV("destination of '=' must be a variable, array element, struct member, or dereferenced pointer");
+        }
       } else {
-        return LogErrorV("destination of '=' must be a variable, array element, or struct member");
+        return LogErrorV("destination of '=' must be a variable, array element, struct member, or dereferenced pointer");
       }
     }
   }
@@ -1382,7 +1437,82 @@ llvm::Value *UnaryExprAST::codegen() {
     return Builder->CreateNot(OperandV, "nottmp");
   }
 
+  // Handle pointer operators
+  if (Op == "#") {
+    // Address-of operator
+    llvm::Value *Ptr = Operand->codegen_ptr();
+    if (!Ptr)
+      return LogErrorV("Cannot take address of non-lvalue");
+
+    // Set type name to pointer type
+    std::string baseType = Operand->getTypeName();
+    setTypeName(baseType + "@");
+
+    return Ptr;
+  } else if (Op == "@") {
+    // Dereference operator
+    if (!OperandV->getType()->isPointerTy())
+      return LogErrorV("Cannot dereference non-pointer type");
+
+    // For opaque pointers in LLVM 15+, we need to determine the element type
+    // from the operand's type string
+    std::string operandType = Operand->getTypeName();
+    if (operandType.empty() || operandType.find('@') == std::string::npos)
+      return LogErrorV("Invalid pointer type for dereference");
+
+    // Remove the @ and any level suffix to get the base type
+    size_t atPos = operandType.find('@');
+    std::string baseType = operandType.substr(0, atPos);
+
+    // If it's a multi-level pointer, the result is still a pointer
+    if (atPos + 1 < operandType.size()) {
+      std::string levelStr = operandType.substr(atPos + 1);
+      if (!levelStr.empty()) {
+        int level = std::stoi(levelStr);
+        if (level > 1) {
+          // Result type is pointer with level-1
+          if (level == 2) {
+            setTypeName(baseType + "@");
+          } else {
+            setTypeName(baseType + "@" + std::to_string(level - 1));
+          }
+        } else {
+          setTypeName(baseType);
+        }
+      } else {
+        setTypeName(baseType);
+      }
+    } else {
+      setTypeName(baseType);
+    }
+
+    // Get the element type to load
+    llvm::Type *ElementType = getTypeFromString(getTypeName());
+    if (!ElementType)
+      return LogErrorV("Cannot determine element type for dereference");
+
+    return Builder->CreateLoad(ElementType, OperandV, "deref");
+  }
+
   return LogErrorV("invalid unary operator");
+}
+
+// Generate pointer for unary expressions (for address-of operations)
+llvm::Value *UnaryExprAST::codegen_ptr() {
+  if (Op == "@") {
+    // Dereference operator returns the pointer itself
+    llvm::Value *OperandV = Operand->codegen();
+    if (!OperandV)
+      return nullptr;
+
+    if (!OperandV->getType()->isPointerTy())
+      return LogErrorV("Cannot dereference non-pointer type");
+
+    return OperandV;
+  }
+
+  // Other unary operators don't have an lvalue
+  return nullptr;
 }
 
 // Generate code for type casting expressions
@@ -2308,6 +2438,13 @@ llvm::Value *AssertStmtAST::codegen() {
 
   // Return a dummy value indicating successful assertion
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
+// Generate code for unsafe blocks
+llvm::Value *UnsafeBlockStmtAST::codegen() {
+  // Unsafe blocks simply execute their body
+  // The safety checks are done at parse time, not at runtime
+  return Body->codegen();
 }
 
 //===----------------------------------------------------------------------===//
