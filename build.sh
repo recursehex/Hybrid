@@ -90,7 +90,7 @@ else
     exit 1
 fi
 
-# Prefer upstream clang binaries when available so we compile with the same toolchain we link against
+# Prefer upstream clang binaries when available so compile with the same toolchain that is linked against
 CLANG_BIN=""
 CLANGXX_BIN=""
 if [ -d "/opt/homebrew/opt/llvm/bin" ]; then

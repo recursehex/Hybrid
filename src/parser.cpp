@@ -233,7 +233,7 @@ static std::string InferExprType(const ExprAST* expr)
     return arrayExpr->getElementType() + "[]";
   }
 
-  // For other expressions, we can't determine type at parse time
+  // For other expressions, can't determine type at parse time
   return "";
 }
 
@@ -372,7 +372,7 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
                        ElementType + " and " + elemType);
       }
 
-      // Track if we have any floats/doubles for type promotion
+      // Track if any floats/doubles for type promotion
       if (elemType == "float" || elemType == "double")
       {
         hasFloat = true;
@@ -380,13 +380,13 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
     }
   }
 
-  // If we have mixed int/float, promote to double
+  // If mixed int/float, promote to double
   if (hasFloat && (ElementType == "int" || ElementType == "float" || ElementType == "double"))
   {
     ElementType = "double";
   }
 
-  // Default to int if we couldn't determine type
+  // Default to int if couldn't determine type
   if (ElementType.empty())
   {
     ElementType = "int";
@@ -1223,7 +1223,7 @@ std::unique_ptr<SwitchExprAST> ParseSwitchExpression() {
       continue;
     }
     
-    // For expression switches, we expect value => expr format or default => expr
+    // For expression switches, expect value => expr format or default => expr
     if (CurTok == tok_default) {
       auto Case = ParseCase(true); // true = expression case
       if (!Case)
@@ -1326,7 +1326,7 @@ std::unique_ptr<CaseAST> ParseCase(bool isExpression) {
       }
     } while (true);
   } else {
-    // In switch expressions, we might have direct values without 'case'
+    // In switch expressions, might have direct values without 'case'
     if (isExpression) {
       do {
         // Skip newlines

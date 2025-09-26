@@ -67,7 +67,7 @@ unsafe void test_nested_pointer_arrays() {
     // Get pointers to all elements of arr3
     int@[] row3 = [#arr3[0], #arr3[1], #arr3[2]]
 
-    // Now we can access like a 2D array through pointer dereferencing
+    // Can access like a 2D array through pointer dereferencing
     // Access element at "row 0, col 0" (should be 1)
     int val00 = @row1[0]
 
@@ -77,7 +77,7 @@ unsafe void test_nested_pointer_arrays() {
     // Access element at "row 2, col 1" (should be 8)
     int val21 = @row3[1]
 
-    // We can also modify through these pointers
+    // Can also modify through these pointers
     @row1[0] = 100  // arr1[0] is now 100
     @row2[1] = 200  // arr2[1] is now 200
 
