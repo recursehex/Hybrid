@@ -28,6 +28,7 @@ static std::map<std::string, llvm::GlobalVariable *> GlobalValues;
 static std::map<std::string, std::string> GlobalTypes; // Track types of globals
 static std::map<std::string, std::string> LocalTypes;  // Track types of locals
 static std::map<std::string, llvm::StructType *> StructTypes; // Track struct types
+static std::map<std::string, int64_t> ArraySizes; // Track array sizes for compile-time checks
 static std::map<std::string, std::vector<std::pair<std::string, unsigned>>> StructFieldIndices; // Track field names and indices
 static std::map<std::string, std::map<std::string, std::string>> StructFieldTypes; // Track field types: structName -> (fieldName -> typeName)
 
@@ -374,20 +375,40 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   llvm::Type *ArrayType = ArrayVal->getType();
   llvm::Value *ArrayPtr = nullptr;
   llvm::Type *ElemType = nullptr;
+  llvm::Value *ArraySize = nullptr; // Track the array size for bounds checking
   std::string elemTypeStr = "int"; // Track the element type string for setTypeName
-  
+
   if (ArrayType->isStructTy()) {
     // New array representation: extract pointer from struct
     llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
     if (StructType->getNumElements() == 2) {
       // Extract the pointer (field 0)
       ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
+
+      // Extract the size (field 1) for bounds checking
+      ArraySize = Builder->CreateExtractValue(ArrayVal, 1, "arraySize");
       
       // Determine element type from the context
       // First, check if it's from a direct array literal
       if (ArrayExprAST *ArrayExpr = dynamic_cast<ArrayExprAST*>(getArray())) {
         elemTypeStr = ArrayExpr->getElementType();
         ElemType = getTypeFromString(elemTypeStr);
+
+        // For direct array literals, do compile-time bounds checking
+        if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
+          int64_t IndexValue = ConstIndex->getSExtValue();
+          int64_t ArrayLiteralSize = ArrayExpr->getElements().size();
+
+          // Check for negative index at compile time
+          if (IndexValue < 0) {
+            return LogErrorV("Array index cannot be negative");
+          }
+
+          // Check for out of bounds at compile time
+          if (IndexValue >= ArrayLiteralSize) {
+            return LogErrorV("Array index out of bounds");
+          }
+        }
       }
       // Otherwise, check if it's from a variable
       else if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
@@ -404,6 +425,24 @@ llvm::Value *ArrayIndexExprAST::codegen() {
         if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
           elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
           ElemType = getTypeFromString(elemTypeStr);
+
+          // Check for compile-time bounds checking if array size is known
+          if (ArraySizes.count(varName)) {
+            if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
+              int64_t IndexValue = ConstIndex->getSExtValue();
+              int64_t KnownArraySize = ArraySizes[varName];
+
+              // Check for negative index at compile time
+              if (IndexValue < 0) {
+                return LogErrorV("Array index cannot be negative");
+              }
+
+              // Check for out of bounds at compile time
+              if (IndexValue >= KnownArraySize) {
+                return LogErrorV("Array index out of bounds");
+              }
+            }
+          }
         }
       }
       // Check if it's from a member access (e.g., holder.pointers)
@@ -462,7 +501,77 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   
   if (!ArrayPtr || !ElemType)
     return LogErrorV("Invalid array type for indexing");
-  
+
+  // Add compile-time bounds checking for constant indices
+  if (ArraySize) {
+    // Check if both index and size are constants
+    if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
+      if (llvm::ConstantInt *ConstSize = llvm::dyn_cast<llvm::ConstantInt>(ArraySize)) {
+        int64_t IndexValue = ConstIndex->getSExtValue();
+        int64_t SizeValue = ConstSize->getSExtValue();
+
+        // Check for negative index at compile time
+        if (IndexValue < 0) {
+          return LogErrorV("Array index cannot be negative");
+        }
+
+        // Check for out of bounds at compile time
+        if (IndexValue >= SizeValue) {
+          return LogErrorV("Array index out of bounds");
+        }
+
+        // Constant index is valid, no need for runtime check
+        // Calculate the address of the indexed element
+        llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
+
+        // Set the type name for proper type checking
+        setTypeName(elemTypeStr);
+
+        // Load and return the value
+        return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
+      }
+    }
+
+    // Runtime bounds checking for non-constant indices
+    // Create bounds check: 0 <= index < size
+    llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+
+    // Check for negative index
+    llvm::Value *IsNegative = Builder->CreateICmpSLT(IndexVal,
+      llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0), "is_negative");
+
+    // Check for index >= size
+    llvm::Value *IsOutOfBounds = Builder->CreateICmpSGE(IndexVal, ArraySize, "is_out_of_bounds");
+
+    // Combine the checks
+    llvm::Value *IsBadIndex = Builder->CreateOr(IsNegative, IsOutOfBounds, "bad_index");
+
+    // Create blocks for error handling
+    llvm::BasicBlock *SafeBB = llvm::BasicBlock::Create(*TheContext, "safe_index", TheFunction);
+    llvm::BasicBlock *ErrorBB = llvm::BasicBlock::Create(*TheContext, "bounds_error", TheFunction);
+
+    Builder->CreateCondBr(IsBadIndex, ErrorBB, SafeBB);
+
+    // Emit error block - call abort() to terminate the program
+    Builder->SetInsertPoint(ErrorBB);
+
+    // Get or declare the abort function
+    llvm::Function *AbortFunc = TheModule->getFunction("abort");
+    if (!AbortFunc) {
+      llvm::FunctionType *AbortType = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(*TheContext), false);
+      AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage,
+        "abort", TheModule.get());
+    }
+
+    // Call abort to terminate the program
+    Builder->CreateCall(AbortFunc);
+    Builder->CreateUnreachable();
+
+    // Continue with safe execution
+    Builder->SetInsertPoint(SafeBB);
+  }
+
   // Calculate the address of the indexed element
   llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
 
@@ -506,11 +615,14 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
 
   // Extract the pointer from the array struct
   llvm::Value *ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayptr");
-  
+
+  // Extract the size for bounds checking
+  llvm::Value *ArraySize = Builder->CreateExtractValue(ArrayVal, 1, "arraysize");
+
   // For now, determine the element type based on the array expression type
   // In a real implementation, track this information in the AST
   llvm::Type *ElemTy = llvm::Type::getInt32Ty(*TheContext); // Default to i32
-  
+
   // Try to infer the actual element type from the array
   if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
     // Look up the variable's type information
@@ -522,6 +634,65 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
       // In practice, need proper type tracking
     }
   }
+
+  // Add compile-time bounds checking for constant indices
+  if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
+    if (llvm::ConstantInt *ConstSize = llvm::dyn_cast<llvm::ConstantInt>(ArraySize)) {
+      int64_t IndexValue = ConstIndex->getSExtValue();
+      int64_t SizeValue = ConstSize->getSExtValue();
+
+      // Check for negative index at compile time
+      if (IndexValue < 0) {
+        return LogErrorV("Array index cannot be negative");
+      }
+
+      // Check for out of bounds at compile time
+      if (IndexValue >= SizeValue) {
+        return LogErrorV("Array index out of bounds");
+      }
+
+      // Constant index is valid, no need for runtime check
+      return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
+    }
+  }
+
+  // Runtime bounds checking for non-constant indices
+  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+
+  // Check for negative index
+  llvm::Value *IsNegative = Builder->CreateICmpSLT(IndexVal,
+    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0), "is_negative");
+
+  // Check for index >= size
+  llvm::Value *IsOutOfBounds = Builder->CreateICmpSGE(IndexVal, ArraySize, "is_out_of_bounds");
+
+  // Combine the checks
+  llvm::Value *IsBadIndex = Builder->CreateOr(IsNegative, IsOutOfBounds, "bad_index");
+
+  // Create blocks for error handling
+  llvm::BasicBlock *SafeBB = llvm::BasicBlock::Create(*TheContext, "safe_index_ptr", TheFunction);
+  llvm::BasicBlock *ErrorBB = llvm::BasicBlock::Create(*TheContext, "bounds_error_ptr", TheFunction);
+
+  Builder->CreateCondBr(IsBadIndex, ErrorBB, SafeBB);
+
+  // Emit error block - call abort() to terminate the program
+  Builder->SetInsertPoint(ErrorBB);
+
+  // Get or declare the abort function
+  llvm::Function *AbortFunc = TheModule->getFunction("abort");
+  if (!AbortFunc) {
+    llvm::FunctionType *AbortType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), false);
+    AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage,
+      "abort", TheModule.get());
+  }
+
+  // Call abort to terminate the program
+  Builder->CreateCall(AbortFunc);
+  Builder->CreateUnreachable();
+
+  // Continue with safe execution
+  Builder->SetInsertPoint(SafeBB);
 
   return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
 }
@@ -1454,7 +1625,7 @@ llvm::Value *UnaryExprAST::codegen() {
     if (!OperandV->getType()->isPointerTy())
       return LogErrorV("Cannot dereference non-pointer type");
 
-    // For opaque pointers in LLVM 15+, we need to determine the element type
+    // For opaque pointers in LLVM 15+, need to determine the element type
     // from the operand's type string
     std::string operandType = Operand->getTypeName();
     if (operandType.empty() || operandType.find('@') == std::string::npos)
@@ -1746,6 +1917,16 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     // Remember this global binding
     GlobalValues[getName()] = GV;
     GlobalTypes[getName()] = getType();
+
+    // Track array size for compile-time bounds checking
+    if (getType().size() > 2 && getType().substr(getType().size() - 2) == "[]") {
+      // If initializer is an array literal, track its size
+      if (getInitializer()) {
+        if (ArrayExprAST *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
+          ArraySizes[getName()] = ArrayInit->getElements().size();
+        }
+      }
+    }
     
     // Return the value that was stored
     return Builder->CreateLoad(VarType, GV, getName());
@@ -1769,6 +1950,16 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     // Remember this local binding
     NamedValues[getName()] = Alloca;
     LocalTypes[getName()] = getType();  // Track the type
+
+    // Track array size for compile-time bounds checking
+    if (getType().size() > 2 && getType().substr(getType().size() - 2) == "[]") {
+      // If initializer is an array literal, track its size
+      if (getInitializer()) {
+        if (ArrayExprAST *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
+          ArraySizes[getName()] = ArrayInit->getElements().size();
+        }
+      }
+    }
     
     // Return the value that was stored
     return Builder->CreateLoad(VarType, Alloca, getName());
@@ -2499,6 +2690,14 @@ llvm::Function *FunctionAST::codegen() {
   // Record the function arguments in the NamedValues map
   NamedValues.clear();
   LocalTypes.clear();  // Clear local types for new function
+  // Clear local array sizes, but keep global ones
+  for (auto it = ArraySizes.begin(); it != ArraySizes.end(); ) {
+    if (NamedValues.count(it->first) || LocalTypes.count(it->first)) {
+      it = ArraySizes.erase(it);
+    } else {
+      ++it;
+    }
+  }
   
   // Get parameter info from the prototype
   const auto &Params = getProto()->getArgs();

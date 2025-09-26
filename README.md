@@ -228,6 +228,10 @@ Hybrid/
     - Examples: `int max = a if a > b else b`, `return n if n >= 0 else -n`
     - Automatic type promotion: `double mixed = 3.14 if false else 42`
     - Right-associative with proper precedence handling
+- Pointer operators
+    - `@` - pointer operator and dereference operator
+    - `#` - address operator
+    - `unsafe` - pointers can only be used within these blocks
 
 **Planned Features**
 - Mulitidimensional arrays
@@ -265,10 +269,6 @@ Hybrid/
     - `?[]`
     - `??`
     - `??=`
-- Pointer operators
-    - `@` - pointer operator and dereference operator
-    - `#` - address operator
-    - `unsafe` - pointers can only be used within these blocks
 - Smart pointers
     - `unique`
     - `shared`
