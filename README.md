@@ -163,7 +163,7 @@ The project uses CMake for cross-platform builds with full support for Windows, 
 
 ### Prerequisites
 - LLVM 20+ with development headers
-- C++17 compatible compiler (Clang, GCC, or MSVC)
+- C++20 compatible compiler (Clang, GCC, or MSVC)
 - CMake 3.20+
 - Windows: Ninja build system (recommended) or Visual Studio
 
