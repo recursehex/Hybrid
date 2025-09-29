@@ -200,7 +200,7 @@ void MainLoop() {
         extern std::string IdentifierStr;
         extern int CurTok;
         
-        if (StructNames.find(IdentifierStr) != StructNames.end()) {
+        if (StructNames.contains(IdentifierStr)) {
           // It's a struct type, need to look ahead to determine what it is
           std::string structName = IdentifierStr;
           getNextToken(); // consume the struct name

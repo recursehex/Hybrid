@@ -2,9 +2,11 @@
 #define AST_H
 
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 #include <cstdint>
+#include "concepts.h"
 
 // LLVM forward declarations
 namespace llvm {
@@ -21,11 +23,11 @@ protected:
   
 public:
   virtual ~ExprAST() = default;
-  virtual llvm::Value *codegen() = 0;
-  virtual llvm::Value *codegen_ptr() { return nullptr; }
+  [[nodiscard]] virtual llvm::Value *codegen() = 0;
+  [[nodiscard]] virtual llvm::Value *codegen_ptr() { return nullptr; }
   
   // Get the type name of this expression
-  virtual std::string getTypeName() const { return TypeName; }
+  [[nodiscard]] virtual std::string getTypeName() const { return TypeName; }
   
   // Set the type name (used during codegen)
   void setTypeName(const std::string &TN) const { TypeName = TN; }
@@ -35,7 +37,7 @@ public:
 class StmtAST {
 public:
   virtual ~StmtAST() = default;
-  virtual llvm::Value *codegen() = 0;
+  [[nodiscard]] virtual llvm::Value *codegen() = 0;
 };
 
 /// ReturnStmtAST - Statement class for return statements.
@@ -75,7 +77,7 @@ public:
   
   llvm::Value *codegen() override;
   const std::string &getType() const { return Type; }
-  const std::string &getName() const { return Name; }
+  [[nodiscard]] const std::string &getName() const { return Name; }
   ExprAST *getInitializer() const { return Initializer.get(); }
 };
 
@@ -300,7 +302,7 @@ public:
   NumberExprAST(double Val) : Val(Val) {}
   
   llvm::Value *codegen() override;
-  double getValue() const { return Val; }
+  [[nodiscard]] double getValue() const { return Val; }
 };
 
 /// BoolExprAST - Expression class for boolean literals (true/false).
@@ -311,7 +313,7 @@ public:
   BoolExprAST(bool Val) : Val(Val) {}
   
   llvm::Value *codegen() override;
-  bool getValue() const { return Val; }
+  [[nodiscard]] bool getValue() const { return Val; }
 };
 
 /// NullExprAST - Expression class for null literal.
@@ -355,8 +357,9 @@ public:
       : ElementType(ElementType), Elements(std::move(Elements)) {}
   
   llvm::Value *codegen() override;
-  const std::string &getElementType() const { return ElementType; }
-  const std::vector<std::unique_ptr<ExprAST>> &getElements() const { return Elements; }
+  [[nodiscard]] const std::string &getElementType() const { return ElementType; }
+  [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getElements() const { return Elements; }
+  [[nodiscard]] std::span<const std::unique_ptr<ExprAST>> getElementsSpan() const { return Elements; }
 };
 
 /// ArrayIndexExprAST - Expression class for array indexing like arr[0].
@@ -384,7 +387,7 @@ public:
   
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
-  const std::string &getName() const { return Name; }
+  [[nodiscard]] const std::string &getName() const { return Name; }
 };
 
 /// BinaryExprAST - Expression class for a binary operator.
@@ -398,7 +401,7 @@ public:
       : Op(Op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
   
   llvm::Value *codegen() override;
-  const std::string &getOp() const { return Op; }
+  [[nodiscard]] const std::string &getOp() const { return Op; }
   ExprAST *getLHS() const { return LHS.get(); }
   ExprAST *getRHS() const { return RHS.get(); }
 };
@@ -415,7 +418,7 @@ public:
 
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
-  const std::string &getOp() const { return Op; }
+  [[nodiscard]] const std::string &getOp() const { return Op; }
   ExprAST *getOperand() const { return Operand.get(); }
   bool getIsPrefix() const { return isPrefix; }
 };
@@ -445,17 +448,14 @@ public:
       : Callee(Callee), Args(std::move(Args)) {}
   
   llvm::Value *codegen() override;
-  const std::string &getCallee() const { return Callee; }
-  const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+  [[nodiscard]] const std::string &getCallee() const { return Callee; }
+  [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
 };
 
 /// Parameter - Represents a function parameter with type and name
 struct Parameter {
   std::string Type;
   std::string Name;
-  
-  Parameter(const std::string &Type, const std::string &Name) 
-      : Type(Type), Name(Name) {}
 };
 
 /// PrototypeAST - Represents the "prototype" for a function,
@@ -472,7 +472,7 @@ public:
       : ReturnType(ReturnType), Name(Name), Args(std::move(Args)), IsUnsafe(IsUnsafe) {}
 
   const std::string &getReturnType() const { return ReturnType; }
-  const std::string &getName() const { return Name; }
+  [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
   bool isUnsafe() const { return IsUnsafe; }
 
@@ -505,7 +505,7 @@ public:
       : Type(Type), Name(Name) {}
   
   const std::string &getType() const { return Type; }
-  const std::string &getName() const { return Name; }
+  [[nodiscard]] const std::string &getName() const { return Name; }
 };
 
 /// MemberAccessExprAST - Expression class for struct member access (e.g., point.x).
@@ -546,7 +546,7 @@ public:
   
   llvm::Type *codegen();
   
-  const std::string &getName() const { return Name; }
+  [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<std::unique_ptr<FieldAST>> &getFields() const { return Fields; }
   const std::vector<std::unique_ptr<FunctionAST>> &getMethods() const { return Methods; }
 };

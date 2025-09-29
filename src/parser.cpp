@@ -50,7 +50,7 @@ bool IsBuiltInType()
 bool IsValidType()
 {
   return IsBuiltInType() ||
-         (CurTok == tok_identifier && StructNames.find(IdentifierStr) != StructNames.end());
+         (CurTok == tok_identifier && StructNames.contains(IdentifierStr));
 }
 
 /// Helper function to parse a complete type including array and pointer modifiers
@@ -103,6 +103,8 @@ std::string ParseCompleteType()
 
 /// GetTokPrecedence - Get the precedence of the pending binary operator token.
 int GetTokPrecedence() {
+  using enum Token;
+
   // Handle comparison operator tokens
   if (CurTok == tok_eq) {
     return BinopPrecedence["=="];
@@ -1887,7 +1889,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
         std::string ParamName = IdentifierStr;
         getNextToken(); // eat name
         
-        Args.push_back(Parameter(ParamType, ParamName));
+        Args.push_back(Parameter{.Type = ParamType, .Name = ParamName});
         
         if (CurTok == ')') break;
         
@@ -1971,7 +1973,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
           std::string ParamName = IdentifierStr;
           getNextToken(); // eat name
           
-          Args.push_back(Parameter(ParamType, ParamName));
+          Args.push_back(Parameter{.Type = ParamType, .Name = ParamName});
           
           if (CurTok == ')') break;
           

@@ -18,6 +18,8 @@
 #include <map>
 #include <cmath>
 #include <climits>
+#include <ranges>
+#include <string_view>
 
 // Global LLVM objects
 static std::unique_ptr<llvm::LLVMContext> TheContext;
@@ -70,18 +72,18 @@ llvm::Function *LogErrorF(const char *Str) {
 }
 
 // Helper to check if a type name represents a signed type
-bool isSignedType(const std::string &TypeStr) {
+constexpr bool isSignedType(std::string_view TypeStr) {
   // Signed types: int, sbyte, short, long, char (in C, char is signed by default)
   // Note: schar is "short char" (8-bit), not signed char
-  return TypeStr == "int" || TypeStr == "sbyte" || TypeStr == "short" || 
+  return TypeStr == "int" || TypeStr == "sbyte" || TypeStr == "short" ||
          TypeStr == "long" || TypeStr == "char";
 }
 
 // Helper to check if a type name represents an unsigned type
-bool isUnsignedType(const std::string &TypeStr) {
+constexpr bool isUnsignedType(std::string_view TypeStr) {
   // Unsigned types: byte, ushort, uint, ulong
   // Note: schar and lchar are character types, treating as unsigned
-  return TypeStr == "byte" || TypeStr == "ushort" || TypeStr == "uint" || 
+  return TypeStr == "byte" || TypeStr == "ushort" || TypeStr == "uint" ||
          TypeStr == "ulong" || TypeStr == "schar" || TypeStr == "lchar";
 }
 
@@ -1763,7 +1765,7 @@ llvm::Value *CastExprAST::codegen() {
 // Generate code for function calls, including struct constructors
 llvm::Value *CallExprAST::codegen() {
   // Check if this is a struct constructor call
-  if (StructTypes.find(getCallee()) != StructTypes.end()) {
+  if (StructTypes.contains(getCallee())) {
     // This is a struct constructor call
     std::string ConstructorName = getCallee() + "_new";
     llvm::Function *ConstructorF = TheModule->getFunction(ConstructorName);
@@ -2750,7 +2752,7 @@ llvm::Function *FunctionAST::codegen() {
 // Generate code for struct definitions
 llvm::Type *StructAST::codegen() {
   // Check if this struct type already exists
-  if (StructTypes.find(Name) != StructTypes.end()) {
+  if (StructTypes.contains(Name)) {
     fprintf(stderr, "Error: Struct type already defined: %s\n", Name.c_str());
     return nullptr;
   }
