@@ -302,8 +302,21 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   std::vector<std::unique_ptr<ExprAST>> Args;
   if (CurTok != ')') {
     while (true) {
-      if (auto Arg = ParseExpression())
-        Args.push_back(std::move(Arg));
+      // Check for ref argument
+      bool argIsRef = false;
+      if (CurTok == tok_ref) {
+        argIsRef = true;
+        getNextToken(); // eat 'ref'
+      }
+
+      if (auto Arg = ParseExpression()) {
+        // Wrap in RefExprAST if it's a ref argument
+        if (argIsRef) {
+          Args.push_back(std::make_unique<RefExprAST>(std::move(Arg)));
+        } else {
+          Args.push_back(std::move(Arg));
+        }
+      }
       else
         return nullptr;
 
@@ -722,6 +735,13 @@ std::unique_ptr<ExprAST> ParseExpression() {
 /// prototype
 ///   ::= id id '(' (id id (',' id id)*)? ')'  // C-style: returntype name(type param, type param, ...)
 std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
+  // Check for ref return type
+  bool returnsByRef = false;
+  if (CurTok == tok_ref) {
+    returnsByRef = true;
+    getNextToken(); // eat 'ref'
+  }
+
   // Parse return type
   if (!IsValidType())
     return LogErrorP("Expected return type in prototype");
@@ -741,15 +761,22 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
 
   std::vector<Parameter> Args;
   getNextToken(); // eat '('
-  
+
   // Handle empty parameter list
   if (CurTok == ')') {
     getNextToken(); // eat ')'
-    return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe);
+    return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe, returnsByRef);
   }
-  
-  // Parse first parameter
+
+  // Parse parameters
   while (true) {
+    // Check for ref parameter
+    bool paramIsRef = false;
+    if (CurTok == tok_ref) {
+      paramIsRef = true;
+      getNextToken(); // eat 'ref'
+    }
+
     if (!IsValidType())
       return LogErrorP("Expected parameter type");
 
@@ -762,21 +789,25 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
 
     std::string ParamName = IdentifierStr;
     getNextToken();
-    
-    Args.emplace_back(ParamType, ParamName);
-    
+
+    Parameter param;
+    param.Type = ParamType;
+    param.Name = ParamName;
+    param.IsRef = paramIsRef;
+    Args.push_back(param);
+
     if (CurTok == ')') {
       getNextToken(); // eat ')'
       break;
     }
-    
+
     if (CurTok != ',')
       return LogErrorP("Expected ',' or ')' in parameter list");
-    
+
     getNextToken(); // eat ','
   }
 
-  return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe);
+  return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe, returnsByRef);
 }
 
 /// definition ::= prototype block
@@ -822,49 +853,69 @@ std::unique_ptr<PrototypeAST> ParseExtern() {
   return ParsePrototype();
 }
 
-/// returnstmt ::= 'return' expression?
+/// returnstmt ::= 'return' ['ref'] expression?
 std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
   getNextToken(); // eat 'return'
-  
+
   // Check if this is a void return (no expression)
   if (CurTok == tok_newline || CurTok == ';' || CurTok == '}') {
     // Return with no value
-    return std::make_unique<ReturnStmtAST>(nullptr);
+    return std::make_unique<ReturnStmtAST>(nullptr, false);
   }
-  
+
+  // Check for ref return
+  bool returnsByRef = false;
+  if (CurTok == tok_ref) {
+    returnsByRef = true;
+    getNextToken(); // eat 'ref'
+  }
+
   auto ReturnValue = ParseExpression();
   if (!ReturnValue)
     return nullptr;
-    
-  return std::make_unique<ReturnStmtAST>(std::move(ReturnValue));
+
+  return std::make_unique<ReturnStmtAST>(std::move(ReturnValue), returnsByRef);
 }
 
-/// variabledecl ::= type identifier '=' expression
-std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration() {
+/// variabledecl ::= ['ref'] type identifier '=' expression
+std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef) {
   if (!IsValidType())
     return nullptr;
 
   std::string Type = ParseCompleteType();
   if (Type.empty())
     return nullptr;
-  
+
   if (CurTok != tok_identifier)
     return nullptr;
-    
+
   std::string Name = IdentifierStr;
   getNextToken(); // eat identifier
-  
+
   if (CurTok != '=') {
     LogError("Expected '=' after variable name (all variables must be initialized)");
     return nullptr;
   }
-  
+
   getNextToken(); // eat '='
+
+  // Check if the initializer has 'ref' keyword (for linking two variables)
+  bool initializerIsRef = false;
+  if (CurTok == tok_ref) {
+    initializerIsRef = true;
+    getNextToken(); // eat 'ref'
+  }
+
   std::unique_ptr<ExprAST> Initializer = ParseExpression();
   if (!Initializer)
     return nullptr;
-  
-  return std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer));
+
+  // If initializer has ref, wrap it in RefExprAST
+  if (initializerIsRef) {
+    Initializer = std::make_unique<RefExprAST>(std::move(Initializer));
+  }
+
+  return std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer), isRef);
 }
 
 /// foreachstmt ::= 'for' type identifier 'in' expression block
@@ -1613,6 +1664,14 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseSwitchStatement();
   case tok_unsafe:
     return ParseUnsafeBlock();
+  case tok_ref:
+    // Handle ref variable declarations
+    getNextToken(); // eat 'ref'
+    if (!IsValidType()) {
+      LogError("Expected type after 'ref'");
+      return nullptr;
+    }
+    return ParseVariableDeclaration(true);
   case '}':
     // End of block - not a statement, but not an error either
     // Let the caller (ParseBlock) handle this
@@ -1682,21 +1741,21 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
 
 /// ParseTypeIdentifier - Handles top-level declarations that start with a type
 /// Could be either a variable declaration or function definition
-bool ParseTypeIdentifier() {
+bool ParseTypeIdentifier(bool isRef) {
   // Parse the complete type (including arrays and pointers)
   std::string Type = ParseCompleteType();
   if (Type.empty()) {
     return false;
   }
-  
+
   if (CurTok != tok_identifier) {
     fprintf(stderr, "Error: Expected identifier after type\n");
     return false;
   }
-  
+
   std::string Name = IdentifierStr;
   getNextToken(); // eat identifier
-  
+
   // Check what follows
   if (CurTok == '(') {
     // It's a function definition
@@ -1708,37 +1767,48 @@ bool ParseTypeIdentifier() {
     // Parse parameters
     if (CurTok != ')') {
       while (true) {
+        // Check for ref parameter
+        bool paramIsRef = false;
+        if (CurTok == tok_ref) {
+          paramIsRef = true;
+          getNextToken(); // eat 'ref'
+        }
+
         if (!IsValidType()) {
           fprintf(stderr, "Error: Expected parameter type\n");
           return false;
         }
-        
+
         std::string ParamType = ParseCompleteType();
         if (ParamType.empty()) {
           fprintf(stderr, "Error: Failed to parse parameter type\n");
           return false;
         }
-        
+
         if (CurTok != tok_identifier) {
           fprintf(stderr, "Error: Expected parameter name\n");
           return false;
         }
-        
+
         std::string ParamName = IdentifierStr;
         getNextToken();
-        
-        Args.emplace_back(ParamType, ParamName);
-        
+
+        Parameter param;
+        param.Type = ParamType;
+        param.Name = ParamName;
+        param.IsRef = paramIsRef;
+        Args.push_back(param);
+
         if (CurTok == ')') {
           getNextToken(); // eat ')'
           break;
         }
-        
+
         if (CurTok != ',') {
           fprintf(stderr, "Error: Expected ',' or ')' in parameter list\n");
           return false;
         }
-        
+
         getNextToken(); // eat ','
       }
     } else {
@@ -1768,26 +1838,36 @@ bool ParseTypeIdentifier() {
   } else if (CurTok == '=') {
     // It's a variable declaration
     getNextToken(); // eat '='
+
+    // Check if the initializer has 'ref' keyword (for linking two variables)
+    bool initializerIsRef = false;
+    if (CurTok == tok_ref) {
+      initializerIsRef = true;
+      getNextToken(); // eat 'ref'
+    }
+
     auto Initializer = ParseExpression();
     if (!Initializer) {
       fprintf(stderr, "Error: Expected expression after '='\n");
       return false;
     }
-    
+
+    // If initializer has ref, wrap it in RefExprAST
+    if (initializerIsRef) {
+      Initializer = std::make_unique<RefExprAST>(std::move(Initializer));
+    }
+
     // Create the variable declaration AST but don't generate code here
     // Code generation will be handled by HandleVariableDeclaration in toplevel.cpp
-    auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer));
-    
+    auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer), isRef);
+
     // Need to wrap it in a function for top-level variable declarations
     auto Proto = std::make_unique<PrototypeAST>("void", "__anon_var_decl",
                                                 std::vector<Parameter>());
-    
-    // Wrap the variable declaration in a return statement and block
-    auto ReturnStmt = std::make_unique<ReturnStmtAST>(
-        std::make_unique<VariableExprAST>(Name));
+
+    // Wrap the variable declaration in a block (no additional return needed)
     std::vector<std::unique_ptr<StmtAST>> Statements;
     Statements.push_back(std::move(VarDecl));
-    Statements.push_back(std::move(ReturnStmt));
     auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
     
     auto Func = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));

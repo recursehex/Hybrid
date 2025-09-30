@@ -37,7 +37,7 @@ std::unique_ptr<PrototypeAST> ParseExtern();
 std::unique_ptr<StmtAST> ParseStatement();
 std::unique_ptr<ReturnStmtAST> ParseReturnStatement();
 std::unique_ptr<BlockStmtAST> ParseBlock();
-std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration();
+std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef = false);
 std::unique_ptr<ForEachStmtAST> ParseForEachStatement();
 std::unique_ptr<ForLoopStmtAST> ParseForLoopStatement();
 std::unique_ptr<UseStmtAST> ParseUseStatement();
@@ -53,7 +53,7 @@ std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> 
 std::unique_ptr<CaseAST> ParseCase(bool isExpression);
 
 // Top-level parsing that can handle both variable declarations and function definitions
-bool ParseTypeIdentifier();
+bool ParseTypeIdentifier(bool isRef = false);
 
 // Struct parsing functions
 std::unique_ptr<StructAST> ParseStructDefinition();

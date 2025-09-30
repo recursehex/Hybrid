@@ -171,6 +171,13 @@ void MainLoop() {
       // Handle unsafe functions or unsafe structs
       HandleUnsafe();
       break;
+    case tok_ref:
+      // Handle ref variable declarations
+      getNextToken(); // eat 'ref'
+      if (!ParseTypeIdentifier(true)) {
+        getNextToken();
+      }
+      break;
     case tok_int:
     case tok_float:
     case tok_double:

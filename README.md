@@ -232,6 +232,8 @@ Hybrid/
     - `@` - pointer operator and dereference operator
     - `#` - address operator
     - `unsafe` - pointers can only be used within these blocks
+- Reference types
+    - `ref type`
 
 **Planned Features**
 - Mulitidimensional arrays
@@ -262,8 +264,6 @@ Hybrid/
     - `decimal`
 - Nullable types
     - `type?`
-- Reference types
-    - `ref type`
 - Nullity operators
     - `?.`
     - `?[]`

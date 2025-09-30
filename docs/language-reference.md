@@ -69,11 +69,12 @@ The following keywords are reserved:
   - Sized integers: `byte`, `sbyte`, `short`, `ushort`, `uint`, `long`, `ulong`
   - Sized characters: `schar`, `lchar`
 - Control flow: `if`, `else`, `for`, `in`, `to`, `by`, `while`, `break`, `skip`, `switch`, `case`, `default`
-- Function keywords: `return`, `extern`
+- Function keywords: `return`, `extern`, `ref`
 - Structure keywords: `use`, `struct`, `this`
 - Boolean literals: `true`, `false`
 - Null literal: `null`
 - Exception handling: `assert`
+- Memory safety: `unsafe`
 
 ## Literals
 
@@ -179,3 +180,6 @@ See the individual documentation files for detailed information on each construc
 - [Control Flow](control-flow.md)
 - [Expressions](expressions.md)
 - [Arrays](arrays.md)
+- [Reference Types](references.md)
+- [Pointers and Memory Safety](pointers-and-memory-safety.md)
+- [Structs](structs.md)

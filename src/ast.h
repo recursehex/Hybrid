@@ -43,13 +43,15 @@ public:
 /// ReturnStmtAST - Statement class for return statements.
 class ReturnStmtAST : public StmtAST {
   std::unique_ptr<ExprAST> ReturnValue;
+  bool IsRef;
 
 public:
-  ReturnStmtAST(std::unique_ptr<ExprAST> ReturnValue)
-      : ReturnValue(std::move(ReturnValue)) {}
-  
+  ReturnStmtAST(std::unique_ptr<ExprAST> ReturnValue, bool IsRef = false)
+      : ReturnValue(std::move(ReturnValue)), IsRef(IsRef) {}
+
   llvm::Value *codegen() override;
   ExprAST *getReturnValue() const { return ReturnValue.get(); }
+  bool isRef() const { return IsRef; }
 };
 
 /// BlockStmtAST - Statement class for statement blocks.
@@ -69,16 +71,18 @@ class VariableDeclarationStmtAST : public StmtAST {
   std::string Type;
   std::string Name;
   std::unique_ptr<ExprAST> Initializer;
+  bool IsRef;
 
 public:
   VariableDeclarationStmtAST(const std::string &Type, const std::string &Name,
-                             std::unique_ptr<ExprAST> Initializer)
-      : Type(Type), Name(Name), Initializer(std::move(Initializer)) {}
-  
+                             std::unique_ptr<ExprAST> Initializer, bool IsRef = false)
+      : Type(Type), Name(Name), Initializer(std::move(Initializer)), IsRef(IsRef) {}
+
   llvm::Value *codegen() override;
   const std::string &getType() const { return Type; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   ExprAST *getInitializer() const { return Initializer.get(); }
+  bool isRef() const { return IsRef; }
 };
 
 /// ExpressionStmtAST - Statement class for expression statements.
@@ -437,6 +441,18 @@ public:
   ExprAST *getOperand() const { return Operand.get(); }
 };
 
+/// RefExprAST - Expression class for ref argument expressions (e.g., ref x in function calls).
+class RefExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  RefExprAST(std::unique_ptr<ExprAST> Operand)
+      : Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+};
+
 /// CallExprAST - Expression class for function calls.
 class CallExprAST : public ExprAST {
   std::string Callee;
@@ -446,7 +462,7 @@ public:
   CallExprAST(const std::string &Callee,
               std::vector<std::unique_ptr<ExprAST>> Args)
       : Callee(Callee), Args(std::move(Args)) {}
-  
+
   llvm::Value *codegen() override;
   [[nodiscard]] const std::string &getCallee() const { return Callee; }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
@@ -456,6 +472,7 @@ public:
 struct Parameter {
   std::string Type;
   std::string Name;
+  bool IsRef = false;
 };
 
 /// PrototypeAST - Represents the "prototype" for a function,
@@ -465,16 +482,18 @@ class PrototypeAST {
   std::string Name;
   std::vector<Parameter> Args;
   bool IsUnsafe;
+  bool ReturnsByRef;
 
 public:
   PrototypeAST(const std::string &ReturnType, const std::string &Name,
-               std::vector<Parameter> Args, bool IsUnsafe = false)
-      : ReturnType(ReturnType), Name(Name), Args(std::move(Args)), IsUnsafe(IsUnsafe) {}
+               std::vector<Parameter> Args, bool IsUnsafe = false, bool ReturnsByRef = false)
+      : ReturnType(ReturnType), Name(Name), Args(std::move(Args)), IsUnsafe(IsUnsafe), ReturnsByRef(ReturnsByRef) {}
 
   const std::string &getReturnType() const { return ReturnType; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
   bool isUnsafe() const { return IsUnsafe; }
+  bool returnsByRef() const { return ReturnsByRef; }
 
   llvm::Function *codegen();
 };

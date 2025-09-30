@@ -31,7 +31,7 @@ enum Token {
   tok_default = -18,
   tok_assert = -19,
 
-  // types
+  // basic types
   tok_int = -20,
   tok_float = -21,
   tok_double = -22,
@@ -53,7 +53,7 @@ enum Token {
   tok_schar = -34,
   tok_lchar = -35,
 
-  // primary
+  // primary literals
   tok_identifier = -36,
   tok_number = -37,
   tok_string_literal = -38,
@@ -68,57 +68,60 @@ enum Token {
   tok_newline = -43,
 
   // comparison operators
-  tok_eq = -44,        // ==
-  tok_ne = -45,        // !=
-  tok_le = -46,        // <=
-  tok_ge = -47,        // >=
-  tok_lt = -48,        // <
-  tok_gt = -49,        // >
+  tok_eq = -44,         // ==
+  tok_ne = -45,         // !=
+  tok_le = -46,         // <=
+  tok_ge = -47,         // >=
+  tok_lt = -48,         // <
+  tok_gt = -49,         // >
 
   // boolean operators
-  tok_and = -50,       // &&
-  tok_or = -51,        // ||
-  tok_not = -52,       // !
+  tok_and = -50,        // &&
+  tok_or = -51,         // ||
+  tok_not = -52,        // !
 
   // compound assignment operators
-  tok_plus_eq = -53,   // +=
-  tok_minus_eq = -54,  // -=
-  tok_mult_eq = -55,   // *=
-  tok_div_eq = -56,    // /=
-  tok_mod_eq = -57,    // %=
+  tok_plus_eq = -53,    // +=
+  tok_minus_eq = -54,   // -=
+  tok_mult_eq = -55,    // *=
+  tok_div_eq = -56,     // /=
+  tok_mod_eq = -57,     // %=
 
   // bitwise operators
-  tok_bitwise_and = -58,     // &
-  tok_bitwise_or = -59,      // |
-  tok_bitwise_xor = -60,     // ^
-  tok_left_shift = -61,      // <<
-  tok_right_shift = -62,     // >>
+  tok_bitwise_and = -58,      // &
+  tok_bitwise_or = -59,       // |
+  tok_bitwise_xor = -60,      // ^
+  tok_left_shift = -61,       // <<
+  tok_right_shift = -62,      // >>
 
   // bitwise compound assignment operators
-  tok_and_eq = -63,          // &=
-  tok_or_eq = -64,           // |=
-  tok_xor_eq = -65,          // ^=
-  tok_left_shift_eq = -66,   // <<=
-  tok_right_shift_eq = -67,  // >>=
+  tok_and_eq = -63,           // &=
+  tok_or_eq = -64,            // |=
+  tok_xor_eq = -65,           // ^=
+  tok_left_shift_eq = -66,    // <<=
+  tok_right_shift_eq = -67,   // >>=
 
   // increment/decrement
-  tok_inc = -68,             // ++
-  tok_dec = -69,             // --
+  tok_inc = -68,              // ++
+  tok_dec = -69,              // --
 
   // type casting
-  tok_colon = -70,           // :
+  tok_colon = -70,            // :
 
   // member access
   tok_dot = -71,              // .
 
   // switch statement operators
-  tok_lambda = -72,          // =>
+  tok_lambda = -72,           // =>
 
   // pointer and unsafe operators
-  tok_unsafe = -73,          // unsafe
-  tok_at = -74,              // @ (dereference/pointer type)
-  tok_hash = -75,            // # (address-of)
-  tok_arrow = -76            // -> (pointer member access)
+  tok_unsafe = -73,           // unsafe
+  tok_at = -74,               // @ (dereference/pointer type)
+  tok_hash = -75,             // \# (address-of)
+  tok_arrow = -76,            // -> (pointer member access)
+
+  // reference type
+  tok_ref = -77               // ref
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

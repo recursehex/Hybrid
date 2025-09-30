@@ -96,6 +96,8 @@ int gettok() {
       return tok_assert;
     if (IdentifierStr == "unsafe")
       return tok_unsafe;
+    if (IdentifierStr == "ref")
+      return tok_ref;
     return tok_identifier;
   }
 
