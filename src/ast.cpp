@@ -27,12 +27,98 @@ static std::unique_ptr<llvm::Module> TheModule;
 static std::unique_ptr<llvm::IRBuilder<>> Builder;
 static std::map<std::string, llvm::Value *> NamedValues;
 static std::map<std::string, llvm::GlobalVariable *> GlobalValues;
-static std::map<std::string, std::string> GlobalTypes; // Track types of globals
-static std::map<std::string, std::string> LocalTypes;  // Track types of locals
+static std::map<std::string, TypeInfo> GlobalTypes; // Track types of globals
+static std::map<std::string, TypeInfo> LocalTypes;  // Track types of locals
 static std::map<std::string, llvm::StructType *> StructTypes; // Track struct types
 static std::map<std::string, int64_t> ArraySizes; // Track array sizes for compile-time checks
 static std::map<std::string, std::vector<std::pair<std::string, unsigned>>> StructFieldIndices; // Track field names and indices
 static std::map<std::string, std::map<std::string, std::string>> StructFieldTypes; // Track field types: structName -> (fieldName -> typeName)
+
+static unsigned computePointerDepth(const std::string &typeName) {
+  size_t atPos = typeName.find('@');
+  if (atPos == std::string::npos)
+    return 0;
+
+  size_t endPos = typeName.find_first_of("[]", atPos);
+  std::string suffix = typeName.substr(atPos + 1, endPos == std::string::npos ? std::string::npos : endPos - atPos - 1);
+  if (suffix.empty())
+    return 1;
+
+  unsigned depth = 1;
+  try {
+    depth = static_cast<unsigned>(std::stoul(suffix));
+    if (depth == 0)
+      depth = 1;
+  } catch (...) {
+    depth = 1;
+  }
+  return depth;
+}
+
+static bool isArrayTypeName(const std::string &typeName) {
+  return typeName.size() > 2 && typeName.substr(typeName.size() - 2) == "[]";
+}
+
+static TypeInfo makeTypeInfo(std::string typeName,
+                             RefStorageClass storage = RefStorageClass::None,
+                             bool isMutable = true,
+                             bool declaredRef = false) {
+  TypeInfo info;
+  info.typeName = std::move(typeName);
+  info.pointerDepth = computePointerDepth(info.typeName);
+  info.isArray = isArrayTypeName(info.typeName);
+  info.refStorage = storage;
+  info.isMutable = isMutable;
+  info.declaredRef = declaredRef;
+  return info;
+}
+
+static const TypeInfo *lookupLocalTypeInfo(const std::string &name) {
+  auto It = LocalTypes.find(name);
+  if (It != LocalTypes.end())
+    return &It->second;
+  return nullptr;
+}
+
+static const TypeInfo *lookupGlobalTypeInfo(const std::string &name) {
+  auto It = GlobalTypes.find(name);
+  if (It != GlobalTypes.end())
+    return &It->second;
+  return nullptr;
+}
+
+static const TypeInfo *lookupTypeInfo(const std::string &name) {
+  if (const auto *info = lookupLocalTypeInfo(name))
+    return info;
+  return lookupGlobalTypeInfo(name);
+}
+
+static void rememberGlobalType(const std::string &name, TypeInfo info) {
+  GlobalTypes[name] = std::move(info);
+}
+
+static void rememberLocalType(const std::string &name, TypeInfo info) {
+  LocalTypes[name] = std::move(info);
+}
+
+static TypeInfo runtimeTypeFrom(const TypeInfo &declared, RefStorageClass storage, bool declaredRefOverride) {
+  TypeInfo info = declared;
+  info.refStorage = storage;
+  info.declaredRef = declaredRefOverride;
+  return info;
+}
+
+static bool isDeclaredRefGlobal(const std::string &name) {
+  if (const auto *info = lookupGlobalTypeInfo(name))
+    return info->declaredRef;
+  return false;
+}
+
+static bool isDeclaredRefLocal(const std::string &name) {
+  if (const auto *info = lookupLocalTypeInfo(name))
+    return info->declaredRef;
+  return false;
+}
 
 // Stack to track loop exit blocks for break statements
 static std::vector<llvm::BasicBlock *> LoopExitBlocks;
@@ -416,16 +502,9 @@ llvm::Value *ArrayIndexExprAST::codegen() {
       else if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
         std::string varName = VarExpr->getName();
 
-        // Check local types first, then global types
-        std::string typeStr;
-        if (LocalTypes.count(varName)) {
-          typeStr = LocalTypes[varName];
-        } else if (GlobalTypes.count(varName)) {
-          typeStr = GlobalTypes[varName];
-        }
-
-        if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-          elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+        const TypeInfo *info = lookupTypeInfo(varName);
+        if (info && info->isArray) {
+          elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
           ElemType = getTypeFromString(elemTypeStr);
 
           // Check for compile-time bounds checking if array size is known
@@ -474,18 +553,11 @@ llvm::Value *ArrayIndexExprAST::codegen() {
     // If the array is from a variable, check its type
     if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
       std::string varName = VarExpr->getName();
-      
-      // Check local types first, then global types
-      std::string typeStr;
-      if (LocalTypes.count(varName)) {
-        typeStr = LocalTypes[varName];
-      } else if (GlobalTypes.count(varName)) {
-        typeStr = GlobalTypes[varName];
-      }
-      
-      if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
+
+      const TypeInfo *info = lookupTypeInfo(varName);
+      if (info && info->isArray) {
         // It's an array type, extract the element type
-        elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+        elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
         if (elemTypeStr == "int") {
           ElemType = llvm::Type::getInt32Ty(*TheContext);
         } else if (elemTypeStr == "float" || elemTypeStr == "double") {
@@ -588,31 +660,24 @@ llvm::Value *ArrayIndexExprAST::codegen() {
 llvm::Value *VariableExprAST::codegen_ptr() {
   llvm::Value *V = NamedValues[getName()];
   if (V) {
-    // Check if this is a pointer ref variable
-    if (LocalTypes.count(getName())) {
-      std::string typeName = LocalTypes[getName()];
-      if (typeName.substr(0, 7) == "refptr_") {
-        // For pointer ref variables, load the pointer from the alloca
+    if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
+      if (info->isAlias()) {
         llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
         return Builder->CreateLoad(Alloca->getAllocatedType(), V, (getName() + "_ptr").c_str());
       }
-      // For regular ref variables (ref_), just return the alloca itself
-      // because it's a regular variable that can be referenced
+      // For ref value owners we can just return the alloca itself
     }
     return V;
   }
 
   llvm::Value *G = GlobalValues[getName()];
   if (G) {
-    // Check if this is a pointer ref variable
-    if (GlobalTypes.count(getName())) {
-      std::string typeName = GlobalTypes[getName()];
-      llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(G);
-      if (typeName.substr(0, 4) == "ref_" && GV->getValueType()->isPointerTy()) {
-        // For pointer ref variables, load the pointer from the global
+    if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
+      if (info->isAlias()) {
+        llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(G);
         return Builder->CreateLoad(GV->getValueType(), G, (getName() + "_ptr").c_str());
       }
-      // For regular ref variables, just return the global itself
+      // For ref value owners we can just return the global itself
     }
     return G;
   }
@@ -732,26 +797,20 @@ llvm::Value *VariableExprAST::codegen() {
     // Local variable - load from alloca
     llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
     // Set type name from local types
-    if (LocalTypes.count(getName())) {
-      std::string typeName = LocalTypes[getName()];
-      setTypeName(typeName);
+    if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
+      setTypeName(info->typeName);
 
-      // Check if this is a pointer ref variable (has "refptr_" prefix)
-      if (typeName.substr(0, 7) == "refptr_") {
-        // For pointer ref variables: first load gets the pointer, second load gets the value
+      if (info->isAlias()) {
         llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
-        // Get the actual type (remove "refptr_" prefix)
-        std::string actualType = typeName.substr(7);
-        llvm::Type *ActualLLVMType = getTypeFromString(actualType);
+        llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
         if (!ActualLLVMType)
           return LogErrorV("Invalid type for ref variable");
-        // Load the actual value from the pointer
         return Builder->CreateLoad(ActualLLVMType, Ptr, (getName() + "_deref").c_str());
       }
-      // Check if this is a regular ref variable (has "ref_" prefix but not "refptr_")
-      // These are just regular variables that can be referenced
-      // No special handling needed - just load normally
+
+      return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
     }
+
     return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
   }
 
@@ -760,27 +819,20 @@ llvm::Value *VariableExprAST::codegen() {
   if (GV) {
     // Global variable - load from global
     // Set type name from global types
-    if (GlobalTypes.count(getName())) {
-      std::string typeName = GlobalTypes[getName()];
-      setTypeName(typeName);
+    if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
+      setTypeName(info->typeName);
 
-      // Check if this is a pointer ref variable
-      if (typeName.substr(0, 7) == "refptr_" ||
-          (GV->getValueType()->isPointerTy() && typeName.substr(0, 4) == "ref_")) {
-        // For pointer ref variables: first load gets the pointer, second load gets the value
+      if (info->isAlias()) {
         llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
-        // Get the actual type (remove prefix)
-        std::string actualType = (typeName.substr(0, 7) == "refptr_") ?
-                                  typeName.substr(7) : typeName.substr(4);
-        llvm::Type *ActualLLVMType = getTypeFromString(actualType);
+        llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
         if (!ActualLLVMType)
           return LogErrorV("Invalid type for ref variable");
-        // Load the actual value from the pointer
         return Builder->CreateLoad(ActualLLVMType, Ptr, (getName() + "_deref").c_str());
       }
-      // Otherwise it's a regular ref variable (just a regular variable that can be referenced)
-      // No special handling needed
+
+      return Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
     }
+
     return Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
   }
 
@@ -1071,23 +1123,15 @@ llvm::Value *BinaryExprAST::codegen() {
           // Local variable
           llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
 
-          // Check if this is a pointer ref variable (refptr_)
-          if (LocalTypes.count(LHSE->getName())) {
-            std::string typeName = LocalTypes[LHSE->getName()];
-            if (typeName.substr(0, 7) == "refptr_") {
-              // This is a pointer ref variable - need to dereference
-              llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (LHSE->getName() + "_ptr").c_str());
-              // Get the actual type (remove "refptr_" prefix)
-              std::string actualType = typeName.substr(7);
-              llvm::Type *ActualLLVMType = getTypeFromString(actualType);
-              if (!ActualLLVMType)
-                return LogErrorV("Invalid type for ref variable");
-              R = castToType(R, ActualLLVMType);
-              Builder->CreateStore(R, Ptr);
-              // Return a void value to indicate this is a statement, not an expression
-              setTypeName("void");
-              return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
-            }
+          if (const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName()); info && info->isAlias()) {
+            llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (LHSE->getName() + "_ptr").c_str());
+            llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
+            if (!ActualLLVMType)
+              return LogErrorV("Invalid type for ref variable");
+            R = castToType(R, ActualLLVMType);
+            Builder->CreateStore(R, Ptr);
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
           }
 
           // Regular variable assignment
@@ -1102,26 +1146,15 @@ llvm::Value *BinaryExprAST::codegen() {
         // Check global scope
         llvm::GlobalVariable *GV = GlobalValues[LHSE->getName()];
         if (GV) {
-          // Check if this is a pointer ref variable
-          if (GlobalTypes.count(LHSE->getName())) {
-            std::string typeName = GlobalTypes[LHSE->getName()];
-            // Check for both "refptr_" and "ref_" with pointer type
-            if (typeName.substr(0, 7) == "refptr_" ||
-                (typeName.substr(0, 4) == "ref_" && GV->getValueType()->isPointerTy())) {
-              // This is a pointer ref variable - need to dereference
-              llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, (LHSE->getName() + "_ptr").c_str());
-              // Get the actual type (remove prefix)
-              std::string actualType = (typeName.substr(0, 7) == "refptr_") ?
-                                       typeName.substr(7) : typeName.substr(4);
-              llvm::Type *ActualLLVMType = getTypeFromString(actualType);
-              if (!ActualLLVMType)
-                return LogErrorV("Invalid type for ref variable");
-              R = castToType(R, ActualLLVMType);
-              Builder->CreateStore(R, Ptr);
-              // Return a void value to indicate this is a statement, not an expression
-              setTypeName("void");
-              return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
-            }
+          if (const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName()); info && info->isAlias()) {
+            llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, (LHSE->getName() + "_ptr").c_str());
+            llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
+            if (!ActualLLVMType)
+              return LogErrorV("Invalid type for ref variable");
+            R = castToType(R, ActualLLVMType);
+            Builder->CreateStore(R, Ptr);
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
           }
 
           // Regular global variable
@@ -1171,16 +1204,8 @@ llvm::Value *BinaryExprAST::codegen() {
             if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(LHSAI->getArray())) {
               std::string varName = VarExpr->getName();
               
-              // Check local types first, then global types
-              std::string typeStr;
-              if (LocalTypes.count(varName)) {
-                typeStr = LocalTypes[varName];
-              } else if (GlobalTypes.count(varName)) {
-                typeStr = GlobalTypes[varName];
-              }
-              
-              if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-                std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+              if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
+                std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
                 ElemType = getTypeFromString(elemTypeStr);
               }
             }
@@ -1369,16 +1394,8 @@ llvm::Value *BinaryExprAST::codegen() {
           if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
             std::string varName = ArrayVar->getName();
             
-            // Check local types first, then global types
-            std::string typeStr;
-            if (LocalTypes.count(varName)) {
-              typeStr = LocalTypes[varName];
-            } else if (GlobalTypes.count(varName)) {
-              typeStr = GlobalTypes[varName];
-            }
-            
-            if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-              std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+            if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
+              std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
               ElemType = getTypeFromString(elemTypeStr);
             }
           }
@@ -1582,16 +1599,8 @@ llvm::Value *BinaryExprAST::codegen() {
           if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
             std::string varName = ArrayVar->getName();
             
-            // Check local types first, then global types
-            std::string typeStr;
-            if (LocalTypes.count(varName)) {
-              typeStr = LocalTypes[varName];
-            } else if (GlobalTypes.count(varName)) {
-              typeStr = GlobalTypes[varName];
-            }
-            
-            if (!typeStr.empty() && typeStr.size() > 2 && typeStr.substr(typeStr.size() - 2) == "[]") {
-              std::string elemTypeStr = typeStr.substr(0, typeStr.size() - 2);
+            if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
+              std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
               ElemType = getTypeFromString(elemTypeStr);
             }
           }
@@ -2005,6 +2014,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
   // For ref variables, need to store a pointer to the actual type
   bool isRefVar = isRef();
+  TypeInfo declaredInfo = getTypeInfo();
 
   // Check if at global scope
   llvm::Function *TheFunction = nullptr;
@@ -2046,23 +2056,22 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       // Check if initializer is a variable reference to another ref variable
       bool shouldLink = initializerIsRef;
       if (!shouldLink && dynamic_cast<VariableExprAST*>(getInitializer())) {
-        // Check if the referenced variable is a ref variable
         VariableExprAST *VarInit = static_cast<VariableExprAST*>(getInitializer());
         std::string refVarName = VarInit->getName();
-        if (GlobalTypes.count(refVarName) && GlobalTypes[refVarName].substr(0, 4) == "ref_") {
+        if (isDeclaredRefGlobal(refVarName))
           shouldLink = true;
-        }
       }
 
       if (shouldLink) {
         // This is linking to another variable: ref int b = a or ref int b = ref a
         // Create a pointer variable
+        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
         llvm::GlobalVariable *GV = new llvm::GlobalVariable(
-            *TheModule, llvm::PointerType::get(*TheContext, 0), false, llvm::GlobalValue::ExternalLinkage,
+            *TheModule, AliasPtrType, false, llvm::GlobalValue::ExternalLinkage,
             nullptr, getName());
 
         // Initialize to null pointer
-        GV->setInitializer(llvm::ConstantPointerNull::get(llvm::PointerType::get(*TheContext, 0)));
+        GV->setInitializer(llvm::ConstantPointerNull::get(AliasPtrType));
 
         // Generate the initializer (should return a pointer)
         llvm::Value *InitVal;
@@ -2081,10 +2090,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this global binding (stores the pointer global)
         GlobalValues[getName()] = GV;
-        GlobalTypes[getName()] = "ref_" + getType();
+        rememberGlobalType(getName(), runtimeTypeFrom(declaredInfo, RefStorageClass::RefAlias, true));
 
         // Return the dereferenced value (load pointer, then load value from it)
-        llvm::Value *Ptr = Builder->CreateLoad(llvm::PointerType::get(*TheContext, 0), GV, getName());
+        llvm::Value *Ptr = Builder->CreateLoad(AliasPtrType, GV, getName());
         return Builder->CreateLoad(VarType, Ptr, (getName() + "_deref"));
       } else {
         // This is a regular initialization: ref int a = 1
@@ -2108,7 +2117,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this global binding (as a regular variable)
         GlobalValues[getName()] = GV;
-        GlobalTypes[getName()] = "ref_" + getType(); // Mark as ref for tracking
+        rememberGlobalType(getName(), runtimeTypeFrom(declaredInfo, RefStorageClass::RefValue, true));
 
         // Return the value
         return Builder->CreateLoad(VarType, GV, getName());
@@ -2120,12 +2129,13 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
       if (initializerHasRef) {
         // Create a pointer variable because of explicit ref
+        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
         llvm::GlobalVariable *GV = new llvm::GlobalVariable(
-            *TheModule, llvm::PointerType::get(*TheContext, 0), false, llvm::GlobalValue::ExternalLinkage,
+            *TheModule, AliasPtrType, false, llvm::GlobalValue::ExternalLinkage,
             nullptr, getName());
 
         // Initialize to null pointer
-        GV->setInitializer(llvm::ConstantPointerNull::get(llvm::PointerType::get(*TheContext, 0)));
+        GV->setInitializer(llvm::ConstantPointerNull::get(AliasPtrType));
 
         // Generate the initializer (should return a pointer)
         llvm::Value *InitVal = getInitializer()->codegen();
@@ -2137,10 +2147,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this global binding (stores as a pointer)
         GlobalValues[getName()] = GV;
-        GlobalTypes[getName()] = "refptr_" + getType(); // Mark as pointer ref
+        rememberGlobalType(getName(), runtimeTypeFrom(declaredInfo, RefStorageClass::RefAlias, false));
 
         // Return the dereferenced value (load pointer, then load value from it)
-        llvm::Value *Ptr = Builder->CreateLoad(llvm::PointerType::get(*TheContext, 0), GV, getName());
+        llvm::Value *Ptr = Builder->CreateLoad(AliasPtrType, GV, getName());
         return Builder->CreateLoad(VarType, Ptr, (getName() + "_deref"));
       } else {
         // Regular variable without ref
@@ -2173,7 +2183,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this global binding
         GlobalValues[getName()] = GV;
-        GlobalTypes[getName()] = getType();
+        rememberGlobalType(getName(), declaredInfo);
       }
     }
 
@@ -2193,7 +2203,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
     } else {
       // For regular variables, check if it's a refptr
-      if (GlobalTypes.count(getName()) && GlobalTypes[getName()].substr(0, 7) == "refptr_") {
+      if (const TypeInfo *info = lookupGlobalTypeInfo(getName()); info && info->isAlias()) {
         // Already returned above in the initializerHasRef branch
         return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
       } else {
@@ -2211,19 +2221,17 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       // Check if initializer is a variable reference to another ref variable
       bool shouldLink = initializerIsRef;
       if (!shouldLink && dynamic_cast<VariableExprAST*>(getInitializer())) {
-        // Check if the referenced variable is a ref variable
         VariableExprAST *VarInit = static_cast<VariableExprAST*>(getInitializer());
         std::string refVarName = VarInit->getName();
-        if ((LocalTypes.count(refVarName) && LocalTypes[refVarName].substr(0, 4) == "ref_") ||
-            (GlobalTypes.count(refVarName) && GlobalTypes[refVarName].substr(0, 4) == "ref_")) {
+        if (isDeclaredRefLocal(refVarName) || isDeclaredRefGlobal(refVarName))
           shouldLink = true;
-        }
       }
 
       if (shouldLink) {
         // This is linking to another variable: ref int b = a or ref int b = ref a
         // Create a pointer variable
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(llvm::PointerType::get(*TheContext, 0), nullptr, getName());
+        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
+        llvm::AllocaInst *Alloca = Builder->CreateAlloca(AliasPtrType, nullptr, getName());
 
         // Generate the initializer (should return a pointer)
         llvm::Value *InitVal;
@@ -2242,10 +2250,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this local binding (stores the pointer alloca)
         NamedValues[getName()] = Alloca;
-        LocalTypes[getName()] = "refptr_" + getType();  // Track as pointer to ref
+        rememberLocalType(getName(), runtimeTypeFrom(declaredInfo, RefStorageClass::RefAlias, true));
 
         // Return the dereferenced value (load pointer, then load value from it)
-        llvm::Value *Ptr = Builder->CreateLoad(llvm::PointerType::get(*TheContext, 0), Alloca, getName());
+        llvm::Value *Ptr = Builder->CreateLoad(AliasPtrType, Alloca, getName());
         return Builder->CreateLoad(VarType, Ptr, (getName() + "_deref"));
       } else {
         // This is a regular initialization: ref int a = 1
@@ -2263,7 +2271,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this local binding (as a regular variable)
         NamedValues[getName()] = Alloca;
-        LocalTypes[getName()] = "ref_" + getType();  // Mark as ref for tracking
+        rememberLocalType(getName(), runtimeTypeFrom(declaredInfo, RefStorageClass::RefValue, true));
 
         // Return the value
         return Builder->CreateLoad(VarType, Alloca, getName());
@@ -2275,7 +2283,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
       if (initializerHasRef) {
         // Create a pointer variable because of explicit ref
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(llvm::PointerType::get(*TheContext, 0), nullptr, getName());
+        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
+        llvm::AllocaInst *Alloca = Builder->CreateAlloca(AliasPtrType, nullptr, getName());
 
         // Generate the initializer (should return a pointer)
         llvm::Value *InitVal = getInitializer()->codegen();
@@ -2287,10 +2296,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this local binding (stores as a pointer)
         NamedValues[getName()] = Alloca;
-        LocalTypes[getName()] = "refptr_" + getType(); // Mark as pointer ref
+        rememberLocalType(getName(), runtimeTypeFrom(declaredInfo, RefStorageClass::RefAlias, false));
 
         // Return the dereferenced value (load pointer, then load value from it)
-        llvm::Value *Ptr = Builder->CreateLoad(llvm::PointerType::get(*TheContext, 0), Alloca, getName());
+        llvm::Value *Ptr = Builder->CreateLoad(AliasPtrType, Alloca, getName());
         return Builder->CreateLoad(VarType, Ptr, (getName() + "_deref"));
       } else {
         // Regular variable without ref, allocate the actual type
@@ -2311,7 +2320,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Remember this local binding
         NamedValues[getName()] = Alloca;
-        LocalTypes[getName()] = getType();  // Track the type
+        rememberLocalType(getName(), declaredInfo);
 
         // Track array size for compile-time bounds checking
         if (getType().size() > 2 && getType().substr(getType().size() - 2) == "[]") {
@@ -3011,26 +3020,26 @@ llvm::Function *PrototypeAST::codegen() {
   // Convert parameter types
   std::vector<llvm::Type*> ParamTypes;
   for (const auto &Param : Args) {
-    llvm::Type *ParamType = getTypeFromString(Param.Type);
+    llvm::Type *ParamType = getTypeFromString(Param.DeclaredType.typeName);
     if (!ParamType)
       return LogErrorF("Unknown parameter type");
 
     // If it's a ref parameter, use pointer type
     if (Param.IsRef) {
-      ParamTypes.push_back(llvm::PointerType::get(*TheContext, 0));
+      ParamTypes.push_back(ParamType->getPointerTo());
     } else {
       ParamTypes.push_back(ParamType);
     }
   }
 
   // Get return type
-  llvm::Type *RetType = getTypeFromString(ReturnType);
+  llvm::Type *RetType = getTypeFromString(ReturnTypeInfo.typeName);
   if (!RetType)
     return LogErrorF("Unknown return type");
 
   // If it returns by ref, use pointer type
   if (returnsByRef()) {
-    RetType = llvm::PointerType::get(*TheContext, 0);
+    RetType = RetType->getPointerTo();
   }
 
   // Create the function type
@@ -3093,11 +3102,13 @@ llvm::Function *FunctionAST::codegen() {
 
     // Track the type of the parameter
     if (i < Params.size()) {
-      // For ref parameters, track with "refptr_" prefix since they are pointers
       if (isRefParam) {
-        LocalTypes[std::string(Arg.getName())] = "refptr_" + Params[i].Type;
+        TypeInfo paramInfo = Params[i].DeclaredType;
+        paramInfo.refStorage = RefStorageClass::RefAlias;
+        paramInfo.declaredRef = true;
+        rememberLocalType(std::string(Arg.getName()), std::move(paramInfo));
       } else {
-        LocalTypes[std::string(Arg.getName())] = Params[i].Type;
+        rememberLocalType(std::string(Arg.getName()), Params[i].DeclaredType);
       }
     }
     i++;
@@ -3173,8 +3184,15 @@ llvm::Type *StructAST::codegen() {
     if (Method->getProto()->getName() == Name) {
       // This is a constructor, generate it as a static method that returns a new instance
       std::string ConstructorName = Name + "_new";
+      TypeInfo ctorReturnType;
+      ctorReturnType.typeName = Name;
+      ctorReturnType.pointerDepth = 0;
+      ctorReturnType.isArray = false;
+      ctorReturnType.refStorage = RefStorageClass::None;
+      ctorReturnType.isMutable = true;
+      ctorReturnType.declaredRef = false;
       auto ConstructorProto = std::make_unique<PrototypeAST>(
-          Name, ConstructorName, Method->getProto()->getArgs());
+          std::move(ctorReturnType), ConstructorName, Method->getProto()->getArgs());
       
       // Generate the constructor function
       llvm::Function *ConstructorFunc = ConstructorProto->codegen();
@@ -3191,7 +3209,7 @@ llvm::Type *StructAST::codegen() {
       
       // Store the struct pointer as 'this'
       NamedValues["this"] = StructPtr;
-      LocalTypes["this"] = Name;
+      rememberLocalType("this", makeTypeInfo(Name));
       
       // Set up the argument values
       int i = 0;
@@ -3207,7 +3225,15 @@ llvm::Type *StructAST::codegen() {
         
         // Add arguments to variable symbol table
         NamedValues[ArgName] = Alloca;
-        LocalTypes[ArgName] = Method->getProto()->getArgs()[i].Type;
+        bool argIsRef = Method->getProto()->getArgs()[i].IsRef;
+        if (argIsRef) {
+          TypeInfo paramInfo = Method->getProto()->getArgs()[i].DeclaredType;
+          paramInfo.refStorage = RefStorageClass::RefAlias;
+          paramInfo.declaredRef = true;
+          rememberLocalType(ArgName, std::move(paramInfo));
+        } else {
+          rememberLocalType(ArgName, Method->getProto()->getArgs()[i].DeclaredType);
+        }
         i++;
       }
       
@@ -3379,7 +3405,7 @@ llvm::Value *ThisExprAST::codegen() {
   // Get type from LocalTypes
   auto TypeIt = LocalTypes.find("this");
   if (TypeIt != LocalTypes.end()) {
-    setTypeName(TypeIt->second);
+    setTypeName(TypeIt->second.typeName);
   }
   
   return It->second;

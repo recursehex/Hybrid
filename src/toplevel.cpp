@@ -4,6 +4,7 @@
 #include "ast.h"
 #include <cstdio>
 #include <set>
+#include <utility>
 
 // LLVM includes for module and context management
 #include "llvm/IR/LLVMContext.h"
@@ -263,7 +264,14 @@ void MainLoop() {
                 getNextToken(); // eat '='
                 auto Init = ParseExpression();
                 if (Init) {
-                  auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(structName, varName, std::move(Init));
+                  TypeInfo declInfo;
+                  declInfo.typeName = structName;
+                  declInfo.pointerDepth = 0;
+                  declInfo.isArray = false;
+                  declInfo.refStorage = RefStorageClass::None;
+                  declInfo.isMutable = true;
+                  declInfo.declaredRef = false;
+                  auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), varName, std::move(Init));
                   if (auto VarIR = VarDecl->codegen()) {
                     fprintf(stderr, "Generated variable declaration IR:\n");
                     VarIR->print(llvm::errs());

@@ -160,9 +160,14 @@ int y = ref x  // LLVM: @y = global ptr null
 
 ### Type Tracking
 
-The compiler tracks ref types internally:
-- `ref_type` - A regular variable that can be referenced
-- `refptr_type` - A pointer to another variable (linked ref)
+The compiler now tracks reference metadata with a structured `TypeInfo` record instead of string prefixes:
+- `typeName` preserves the language-visible type (e.g., `int`, `MyStruct[]`).
+- `refStorage` captures whether a binding owns storage (`RefValue`) or aliases another binding (`RefAlias`).
+- `declaredRef` records whether the variable was declared with the `ref` keyword so the linker can validate future aliases.
+
+Both global and local symbol tables map identifiers directly to `TypeInfo`, eliminating the former `ref_`/`refptr_` bookkeeping.
+
+Pointer lowering now uses the pointee's actual LLVM type, so ref parameters and aliases carry typed pointers (`ptr <ty>` in opaque-pointer IR) instead of generic `i8*` placeholders.
 
 ### Reading Through References
 
@@ -328,7 +333,7 @@ float f = 3.14
 func(ref f)  // ERROR: Type mismatch
 ```
 
-## Limitations
+## Restrictions
 
 1. **No ref to temporaries**: Cannot create refs to literal values
    ```cs
@@ -352,6 +357,11 @@ func(ref f)  // ERROR: Type mismatch
        return ref local  // Dangerous - local goes out of scope
    }
    ```
+
+## Validation
+
+- [ ] Add regression coverage for ref linking (declared refs, regular aliases, nested links) to ensure runtime type metadata stays in sync.
+- [ ] Extend IR snapshot tests to verify ref parameters and returns are emitted as typed pointers rather than opaque `i8*` values.
 
 ## See Also
 

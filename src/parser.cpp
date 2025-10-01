@@ -3,8 +3,41 @@
 #include <cstdio>
 #include <cmath>
 #include <set>
+#include <utility>
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Function.h"
+
+static unsigned parsePointerDepth(const std::string &typeName) {
+  size_t atPos = typeName.find('@');
+  if (atPos == std::string::npos)
+    return 0;
+
+  size_t endPos = typeName.find_first_of("[]", atPos);
+  std::string suffix = typeName.substr(atPos + 1, endPos == std::string::npos ? std::string::npos : endPos - atPos - 1);
+  if (suffix.empty())
+    return 1;
+
+  unsigned depth = 1;
+  try {
+    depth = static_cast<unsigned>(std::stoul(suffix));
+    if (depth == 0)
+      depth = 1;
+  } catch (...) {
+    depth = 1;
+  }
+  return depth;
+}
+
+static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef) {
+  TypeInfo info;
+  info.typeName = typeName;
+  info.pointerDepth = parsePointerDepth(typeName);
+  info.isArray = typeName.size() > 2 && typeName.substr(typeName.size() - 2) == "[]";
+  info.refStorage = declaredRef ? RefStorageClass::RefValue : RefStorageClass::None;
+  info.isMutable = true;
+  info.declaredRef = declaredRef;
+  return info;
+}
 
 /// CurTok/getNextToken - Provide a simple token buffer.  CurTok is the current
 /// token the parser is looking at.  getNextToken reads another token from the
@@ -765,7 +798,8 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   // Handle empty parameter list
   if (CurTok == ')') {
     getNextToken(); // eat ')'
-    return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe, returnsByRef);
+    TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
+    return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName, std::move(Args), isUnsafe, returnsByRef);
   }
 
   // Parse parameters
@@ -794,6 +828,7 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
     param.Type = ParamType;
     param.Name = ParamName;
     param.IsRef = paramIsRef;
+    param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
     Args.push_back(param);
 
     if (CurTok == ')') {
@@ -807,7 +842,8 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
     getNextToken(); // eat ','
   }
 
-  return std::make_unique<PrototypeAST>(ReturnType, FnName, std::move(Args), isUnsafe, returnsByRef);
+  TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
+  return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName, std::move(Args), isUnsafe, returnsByRef);
 }
 
 /// definition ::= prototype block
@@ -833,7 +869,8 @@ std::unique_ptr<FunctionAST> ParseDefinition() {
 std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
   if (auto E = ParseExpression()) {
     // Make an anonymous proto.
-    auto Proto = std::make_unique<PrototypeAST>("void", "__anon_expr",
+    TypeInfo anonReturn = buildDeclaredTypeInfo("void", false);
+    auto Proto = std::make_unique<PrototypeAST>(std::move(anonReturn), "__anon_expr",
                                                 std::vector<Parameter>());
     
     // Wrap the expression in a return statement and block
@@ -915,7 +952,8 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
     Initializer = std::make_unique<RefExprAST>(std::move(Initializer));
   }
 
-  return std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer), isRef);
+  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+  return std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 }
 
 /// foreachstmt ::= 'for' type identifier 'in' expression block
@@ -1797,6 +1835,7 @@ bool ParseTypeIdentifier(bool isRef) {
         param.Type = ParamType;
         param.Name = ParamName;
         param.IsRef = paramIsRef;
+        param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
         Args.push_back(param);
 
         if (CurTok == ')') {
@@ -1816,7 +1855,8 @@ bool ParseTypeIdentifier(bool isRef) {
     }
     
     // Create prototype
-    auto Proto = std::make_unique<PrototypeAST>(Type, Name, std::move(Args));
+    TypeInfo returnInfo = buildDeclaredTypeInfo(Type, false);
+    auto Proto = std::make_unique<PrototypeAST>(std::move(returnInfo), Name, std::move(Args));
     
     // Parse the body
     auto Body = ParseBlock();
@@ -1859,10 +1899,12 @@ bool ParseTypeIdentifier(bool isRef) {
 
     // Create the variable declaration AST but don't generate code here
     // Code generation will be handled by HandleVariableDeclaration in toplevel.cpp
-    auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(Type, Name, std::move(Initializer), isRef);
+    TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+    auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 
     // Need to wrap it in a function for top-level variable declarations
-    auto Proto = std::make_unique<PrototypeAST>("void", "__anon_var_decl",
+    TypeInfo anonVarReturn = buildDeclaredTypeInfo("void", false);
+    auto Proto = std::make_unique<PrototypeAST>(std::move(anonVarReturn), "__anon_var_decl",
                                                 std::vector<Parameter>());
 
     // Wrap the variable declaration in a block (no additional return needed)
@@ -1969,7 +2011,12 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
         std::string ParamName = IdentifierStr;
         getNextToken(); // eat name
         
-        Args.push_back(Parameter{.Type = ParamType, .Name = ParamName});
+        Parameter param;
+        param.Type = ParamType;
+        param.Name = ParamName;
+        param.IsRef = false;
+        param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
+        Args.push_back(std::move(param));
         
         if (CurTok == ')') break;
         
@@ -2001,7 +2048,8 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
         return nullptr;
       
       // Create constructor as a method with void return type
-      auto Proto = std::make_unique<PrototypeAST>("void", StructName, std::move(Args));
+      TypeInfo ctorReturn = buildDeclaredTypeInfo("void", false);
+      auto Proto = std::make_unique<PrototypeAST>(std::move(ctorReturn), StructName, std::move(Args));
       auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
       Methods.push_back(std::move(Constructor));
       
@@ -2053,7 +2101,12 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
           std::string ParamName = IdentifierStr;
           getNextToken(); // eat name
           
-          Args.push_back(Parameter{.Type = ParamType, .Name = ParamName});
+          Parameter param;
+          param.Type = ParamType;
+          param.Name = ParamName;
+          param.IsRef = false;
+          param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
+          Args.push_back(std::move(param));
           
           if (CurTok == ')') break;
           
@@ -2084,7 +2137,8 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
         if (!Body)
           return nullptr;
         
-        auto Proto = std::make_unique<PrototypeAST>(Type, Name, std::move(Args));
+        TypeInfo methodReturn = buildDeclaredTypeInfo(Type, false);
+        auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), Name, std::move(Args));
         auto Method = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
         Methods.push_back(std::move(Method));
         

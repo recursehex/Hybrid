@@ -6,7 +6,28 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <optional>
+#include <utility>
 #include "concepts.h"
+
+enum class RefStorageClass {
+  None,
+  RefValue,
+  RefAlias
+};
+
+struct TypeInfo {
+  std::string typeName;           // canonical language-visible type
+  unsigned pointerDepth = 0;      // number of explicit pointer levels (@)
+  bool isArray = false;           // whether type is an array ("[]")
+  RefStorageClass refStorage = RefStorageClass::None;
+  bool isMutable = true;
+  bool declaredRef = false;       // whether declared via `ref`
+
+  bool isReference() const { return refStorage != RefStorageClass::None; }
+  bool ownsStorage() const { return refStorage == RefStorageClass::RefValue; }
+  bool isAlias() const { return refStorage == RefStorageClass::RefAlias; }
+};
 
 // LLVM forward declarations
 namespace llvm {
@@ -68,18 +89,19 @@ public:
 
 /// VariableDeclarationStmtAST - Statement class for variable declarations.
 class VariableDeclarationStmtAST : public StmtAST {
-  std::string Type;
+  TypeInfo DeclaredType;
   std::string Name;
   std::unique_ptr<ExprAST> Initializer;
   bool IsRef;
 
 public:
-  VariableDeclarationStmtAST(const std::string &Type, const std::string &Name,
+  VariableDeclarationStmtAST(TypeInfo DeclaredType, const std::string &Name,
                              std::unique_ptr<ExprAST> Initializer, bool IsRef = false)
-      : Type(Type), Name(Name), Initializer(std::move(Initializer)), IsRef(IsRef) {}
+      : DeclaredType(std::move(DeclaredType)), Name(Name), Initializer(std::move(Initializer)), IsRef(IsRef) {}
 
   llvm::Value *codegen() override;
-  const std::string &getType() const { return Type; }
+  const std::string &getType() const { return DeclaredType.typeName; }
+  const TypeInfo &getTypeInfo() const { return DeclaredType; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   ExprAST *getInitializer() const { return Initializer.get(); }
   bool isRef() const { return IsRef; }
@@ -473,23 +495,25 @@ struct Parameter {
   std::string Type;
   std::string Name;
   bool IsRef = false;
+  TypeInfo DeclaredType;
 };
 
 /// PrototypeAST - Represents the "prototype" for a function,
 /// which captures its name, and its argument names and types.
 class PrototypeAST {
-  std::string ReturnType;
+  TypeInfo ReturnTypeInfo;
   std::string Name;
   std::vector<Parameter> Args;
   bool IsUnsafe;
   bool ReturnsByRef;
 
 public:
-  PrototypeAST(const std::string &ReturnType, const std::string &Name,
+  PrototypeAST(TypeInfo ReturnTypeInfo, const std::string &Name,
                std::vector<Parameter> Args, bool IsUnsafe = false, bool ReturnsByRef = false)
-      : ReturnType(ReturnType), Name(Name), Args(std::move(Args)), IsUnsafe(IsUnsafe), ReturnsByRef(ReturnsByRef) {}
+      : ReturnTypeInfo(std::move(ReturnTypeInfo)), Name(Name), Args(std::move(Args)), IsUnsafe(IsUnsafe), ReturnsByRef(ReturnsByRef) {}
 
-  const std::string &getReturnType() const { return ReturnType; }
+  const std::string &getReturnType() const { return ReturnTypeInfo.typeName; }
+  const TypeInfo &getReturnTypeInfo() const { return ReturnTypeInfo; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
   bool isUnsafe() const { return IsUnsafe; }
