@@ -12,7 +12,7 @@ void testIntToFloat()
     // Assert expected results of type promotion
     assert int: result1 == 45  // 42 + 3.14 ≈ 45.14, truncated to 45
     assert int: result2 == 131  // 3.14 * 42 ≈ 131.88, truncated to 131
-    assert int: (result3 * 10) == 13  // 42 / 3.14 ≈ 13.375, * 10 ≈ 133.75, truncated to 133
+    assert int: (result3 * 10) == 133  // 42 / 3.14 ≈ 13.375, * 10 ≈ 133.75, truncated to 133
 
     print(int: result1)
     print(int: result2)

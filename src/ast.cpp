@@ -1945,14 +1945,18 @@ llvm::Value *CallExprAST::codegen() {
     llvm::Value *ArgVal = getArgs()[i]->codegen();
     if (!ArgVal)
       return nullptr;
-    
+
     // Cast the argument to the expected parameter type
     ArgVal = castToType(ArgVal, Arg.getType());
     ArgsV.push_back(ArgVal);
     ++i;
   }
 
-  return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
+  // Don't assign a name to void function calls
+  if (CalleeF->getReturnType()->isVoidTy())
+    return Builder->CreateCall(CalleeF, ArgsV);
+  else
+    return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
 //===----------------------------------------------------------------------===//
