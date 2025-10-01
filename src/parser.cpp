@@ -1750,11 +1750,16 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
       continue;
     }
     
+    int StartTok = CurTok;
     auto Stmt = ParseStatement();
     if (!Stmt) {
       // Check if hit closing brace
       if (CurTok == '}')
         break;  // Normal end of block
+      if (CurTok == tok_eof)
+        return nullptr;
+      if (CurTok == StartTok)
+        getNextToken();  // Ensure progress on error to avoid infinite loops
       return nullptr;  // Actual error
     }
       
