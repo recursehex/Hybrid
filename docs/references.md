@@ -358,11 +358,6 @@ func(ref f)  // ERROR: Type mismatch
    }
    ```
 
-## Validation
-
-- [ ] Add regression coverage for ref linking (declared refs, regular aliases, nested links) to ensure runtime type metadata stays in sync.
-- [ ] Extend IR snapshot tests to verify ref parameters and returns are emitted as typed pointers rather than opaque `i8*` values.
-
 ## See Also
 
 - [Pointers and Memory Safety](pointers-and-memory-safety.md) - For explicit pointer operations

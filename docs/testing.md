@@ -80,6 +80,19 @@ The test runner automatically finds all `.hy` files in the `test/` directory:
 - No need to register tests manually
 - New tests are discovered automatically
 - Tests are run in alphabetical order
+- Tests organized by subdirectories (types/, errors/, structs/, etc.)
+
+### Binary Execution
+
+The test suite compiles and executes generated LLVM IR:
+
+- **Automatic compilation**: If `clang` is available, tests are compiled to native binaries
+- **Runtime library**: A temporary runtime library is created with support functions (e.g., `print()`)
+- **Execution verification**: Tests are run and exit codes are checked
+- **Assert detection**: Runtime aborts (exit code 134/SIGABRT) are detected as test failures
+- **Cleanup**: All temporary files are automatically removed
+
+This ensures that generated code not only compiles but also executes correctly.
 
 ### Error Detection
 
@@ -93,6 +106,13 @@ The test suite uses pattern matching to detect compilation errors:
 | `"Unknown variable"` | Undefined variable references |
 | `"invalid binary operator"` | Unsupported operations |
 | `"Expected.*after"` | Syntax errors |
+
+Additionally, runtime errors are detected:
+
+| Exit Code | Description |
+|-----------|-------------|
+| `134` (SIGABRT) | Runtime abort (e.g., from `assert` statements) |
+| Non-zero | Other runtime errors |
 
 ### Test Classification
 
