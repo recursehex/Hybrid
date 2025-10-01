@@ -121,7 +121,10 @@ enum Token {
   tok_arrow = -76,            // -> (pointer member access)
 
   // reference type
-  tok_ref = -77               // ref
+  tok_ref = -77,              // ref
+
+  // error token
+  tok_error = -78             // error during lexing
 };
 
 extern std::string IdentifierStr; // Filled in if tok_identifier

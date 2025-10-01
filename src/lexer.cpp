@@ -1,6 +1,11 @@
 #include "lexer.h"
 #include <cctype>
 #include <cstdio>
+#include <cerrno>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <iostream>
 
 std::string IdentifierStr; // Filled in if tok_identifier
 double NumVal;             // Filled in if tok_number
@@ -101,7 +106,7 @@ int gettok() {
     return tok_identifier;
   }
 
-  if (isdigit(LastChar)) { 
+  if (isdigit(LastChar)) {
     // Number: [0-9.]+
     std::string NumStr;
     do {
@@ -109,7 +114,38 @@ int gettok() {
       LastChar = getchar();
     } while (isdigit(LastChar) || LastChar == '.');
 
-    NumVal = strtod(NumStr.c_str(), nullptr);
+    // Parse the number and check for overflow
+    errno = 0;
+    char* endptr;
+    NumVal = strtod(NumStr.c_str(), &endptr);
+
+    // Check for overflow/underflow
+    if (errno == ERANGE) {
+      std::cerr << "Error: Number literal '" << NumStr << "' is out of range (overflow/underflow)\n";
+      return tok_error;
+    }
+
+    // Check if entire string was parsed
+    if (*endptr != '\0') {
+      std::cerr << "Error: Invalid number format '" << NumStr << "'\n";
+      return tok_error;
+    }
+
+    // Additional validation: Check if the number can fit in int64 range when it's a whole number
+    // This prevents issues where strtod accepts very large integers that overflow when cast
+    if (NumVal == floor(NumVal)) {
+      // It's a whole number - verify it fits in int64 range
+      // We use int64 as the largest integer type we support
+      constexpr double INT64_MIN_D = static_cast<double>(INT64_MIN);
+      constexpr double INT64_MAX_D = static_cast<double>(INT64_MAX);
+
+      if (NumVal < INT64_MIN_D || NumVal > INT64_MAX_D) {
+        std::cerr << "Error: Integer literal '" << NumStr
+                  << "' exceeds maximum supported integer range (-9223372036854775808 to 9223372036854775807)\n";
+        return tok_error;
+      }
+    }
+
     return tok_number;
   }
   
@@ -125,7 +161,17 @@ int gettok() {
         NumStr += LastChar;
         LastChar = getchar();
       }
-      NumVal = strtod(NumStr.c_str(), nullptr);
+
+      // Parse with overflow checking
+      errno = 0;
+      char* endptr;
+      NumVal = strtod(NumStr.c_str(), &endptr);
+
+      if (errno == ERANGE) {
+        std::cerr << "Error: Number literal '" << NumStr << "' is out of range (overflow/underflow)\n";
+        return tok_error;
+      }
+
       return tok_number;
     } else {
       // Not a number, put back the character and return '.'

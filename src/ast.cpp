@@ -284,10 +284,25 @@ void ForLoopStmtAST::print() const {
 llvm::Value *NumberExprAST::codegen() {
   // Check if the number is a whole number that could be an integer
   double val = getValue();
-  if (val == floor(val) && val >= INT32_MIN && val <= INT32_MAX) {
-    // It's a whole number in int32 range, create as integer
-    setTypeName("int");
-    return llvm::ConstantInt::get(*TheContext, llvm::APInt(32, (int32_t)val));
+  if (val == floor(val)) {
+    // It's a whole number - check if it fits in int32 range
+    // Use strict comparison to avoid undefined behavior from casting
+    // out-of-range values to int32_t
+    constexpr double INT32_MIN_D = static_cast<double>(INT32_MIN);
+    constexpr double INT32_MAX_D = static_cast<double>(INT32_MAX);
+
+    if (val >= INT32_MIN_D && val <= INT32_MAX_D) {
+      // Safe to convert to int32
+      setTypeName("int");
+      // Use static_cast to be explicit and safer
+      int64_t int_val = static_cast<int64_t>(val);
+      return llvm::ConstantInt::get(*TheContext, llvm::APInt(32, int_val, true));
+    } else {
+      // Integer is too large for int32, but should have been caught by lexer
+      // This is a safety fallback - treat as double to preserve the value
+      setTypeName("double");
+      return llvm::ConstantFP::get(*TheContext, llvm::APFloat(val));
+    }
   } else {
     // It's a floating point number
     setTypeName("double");
