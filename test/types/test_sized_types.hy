@@ -31,9 +31,14 @@ lchar lc1 = 'Z'        // 32-bit character
 
 // Test same-type operations (should work)
 byte b_add = b1 + b2
-short s_add = s1 + s2  
+short s_add = s1 + s2
 int i_add = i1 + i2
 long l_add = l1 + l2
+
+assert b1 == 255
+assert sb1 == 127
+assert s1 == 32767
+assert us1 == 65535
 
 // Test arrays of sized types
 byte[] bytes = [10, 20, 30]
@@ -44,6 +49,10 @@ long[] longs = [1000, 2000, 3000]
 byte b_elem = bytes[0]
 short s_elem = shorts[1]
 long l_elem = longs[2]
+
+assert b_elem == 10
+assert s_elem == 200
+assert l_elem == 3000
 
 // Test functions with sized types
 byte identity_byte(byte x)
@@ -62,9 +71,9 @@ long multiply_long(long x, long y)
 }
 
 // Test function calls
-identity_byte(b1)
-add_shorts(s1, s2)
-multiply_long(l1, l2)
+assert identity_byte(b1) == 255
+assert add_shorts(100, 200) == 300
+assert multiply_long(10, 20) == 200
 
 // Test type promotion to float/double
 float f1 = 3.14
@@ -94,3 +103,121 @@ lchar lchar_test(lchar lc)
 char_test(c1)
 schar_test(sc1)
 lchar_test(lc1)
+
+// ========================================
+// Literal Type Inference Tests
+// ========================================
+
+// Test 1: Comparisons with literals (both directions)
+byte b_cmp = 100
+assert b_cmp == 100     // Literal adapts to byte
+assert 100 == b_cmp     // Reversed also works
+assert b_cmp != 99
+assert 255 > b_cmp
+assert b_cmp < 200
+
+short s_cmp = 1000
+assert s_cmp == 1000
+assert 1000 == s_cmp
+assert s_cmp >= 1000
+assert 1000 <= s_cmp
+
+long l_cmp = 50000
+assert l_cmp == 50000
+assert 50000 == l_cmp
+
+// Test 2: Arithmetic with literals
+byte b_arith = 50
+byte b_sum = b_arith + 10      // 10 becomes byte
+byte b_diff = 100 - b_arith    // 100 becomes byte
+byte b_prod = b_arith * 2      // 2 becomes byte
+byte b_quot = b_arith / 5      // 5 becomes byte
+byte b_mod = b_arith % 7       // 7 becomes byte
+
+assert b_sum == 60
+assert b_diff == 50
+assert b_prod == 100
+assert b_quot == 10
+assert b_mod == 1
+
+// Test with reversed operands
+byte b_rev = 5 + b_arith
+assert b_rev == 55
+
+short s_arith = 500
+short s_sum = s_arith + 23
+short s_prod = 2 * s_arith
+
+assert s_sum == 523
+assert s_prod == 1000
+
+// Test 3: Function arguments with literals
+void check_byte(byte x)
+{
+    assert x == 42
+}
+
+void check_short(short x)
+{
+    assert x == 1234
+}
+
+void check_long(long x)
+{
+    assert x == 99999
+}
+
+check_byte(42)          // 42 becomes byte
+check_short(1234)       // 1234 becomes short
+check_long(99999)       // 99999 becomes long
+
+// Test 4: Nested expressions
+byte b_nested = (10 + 20) * 2
+assert b_nested == 60
+
+short s_nested = (100 + 200) / 3
+assert s_nested == 100
+
+// Test 5: Complex mixed expressions
+byte b_complex = 10
+assert b_complex + 5 == 15
+assert 20 - b_complex == 10
+assert b_complex * 3 != 29
+assert b_complex > 5 && b_complex < 20
+
+short s_complex = 250
+assert s_complex + 750 == 1000
+assert 500 + s_complex == 750
+assert s_complex * 2 > 400
+
+// Test 6: All comparison operators
+byte b_ops = 42
+assert b_ops == 42
+assert b_ops != 43
+assert b_ops < 50
+assert b_ops > 40
+assert b_ops <= 42
+assert b_ops >= 42
+
+// Test 7: Literal inference with maximum values
+byte b_max = 255
+assert b_max == 255
+assert b_max + 0 == 255
+
+sbyte sb_max = 127
+assert sb_max == 127
+assert sb_max - 0 == 127
+
+short s_max = 32767
+assert s_max == 32767
+assert s_max * 1 == 32767
+
+// Test 8: Literal inference preserves type safety
+// These operations work because literals adapt to the variable's type
+byte safe_byte = 100
+byte safe_result = safe_byte + 50
+assert safe_result == 150
+
+// Verify the result is still a byte by using it in byte context
+byte verify = safe_result + 5
+assert verify == 155

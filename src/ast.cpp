@@ -310,6 +310,35 @@ llvm::Value *NumberExprAST::codegen() {
   }
 }
 
+// Generate code for numeric literal with target type context
+llvm::Value *NumberExprAST::codegen_with_target(llvm::Type *TargetType) {
+  double val = getValue();
+
+  // If target is a floating point type
+  if (TargetType->isFloatingPointTy()) {
+    setTypeName(TargetType->isFloatTy() ? "float" : "double");
+    return llvm::ConstantFP::get(TargetType, val);
+  }
+
+  // If target is an integer type and value is a whole number
+  if (TargetType->isIntegerTy() && val == floor(val)) {
+    int64_t int_val = static_cast<int64_t>(val);
+    unsigned bitWidth = TargetType->getIntegerBitWidth();
+
+    // Set the appropriate type name
+    if (bitWidth == 8) setTypeName("byte");
+    else if (bitWidth == 16) setTypeName("short");
+    else if (bitWidth == 32) setTypeName("int");
+    else if (bitWidth == 64) setTypeName("long");
+
+    // Create integer constant with target bit width
+    return llvm::ConstantInt::get(*TheContext, llvm::APInt(bitWidth, int_val, true));
+  }
+
+  // Fallback to default codegen if target type doesn't match
+  return codegen();
+}
+
 // Generate code for boolean expressions
 llvm::Value *BoolExprAST::codegen() {
   setTypeName("bool");
@@ -1054,9 +1083,37 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
 
 // Generate code for binary expressions like +, -, *, /, <, >
 llvm::Value *BinaryExprAST::codegen() {
+  // Generate left operand first
   llvm::Value *L = getLHS()->codegen();
-  llvm::Value *R = getRHS()->codegen();
-  if (!L || !R)
+  if (!L)
+    return nullptr;
+
+  // For comparisons, arithmetic, and equality operators, try to generate right operand with left's type as target
+  // This allows number literals to automatically match the target type
+  llvm::Value *R = nullptr;
+  bool isComparisonOrArithmetic = (Op == "==" || Op == "!=" || Op == "<" || Op == ">" || Op == "<=" || Op == ">=" ||
+                                   Op == "+" || Op == "-" || Op == "*" || Op == "/" || Op == "%");
+  if (isComparisonOrArithmetic) {
+    if (NumberExprAST *NumRHS = dynamic_cast<NumberExprAST*>(getRHS())) {
+      // Right side is a number literal - generate it with left's type as target
+      R = NumRHS->codegen_with_target(L->getType());
+    } else if (NumberExprAST *NumLHS = dynamic_cast<NumberExprAST*>(getLHS())) {
+      // Left side is a number literal - regenerate it and the right side
+      // This handles cases like: 255 == byte_var or 10 + byte_var
+      llvm::Value *RTemp = getRHS()->codegen();
+      if (RTemp) {
+        L = NumLHS->codegen_with_target(RTemp->getType());
+        R = RTemp;
+      }
+    }
+  }
+
+  // If R wasn't generated yet (not a comparison or not a number literal), generate normally
+  if (!R) {
+    R = getRHS()->codegen();
+  }
+
+  if (!R)
     return nullptr;
 
   // Get type names from operands

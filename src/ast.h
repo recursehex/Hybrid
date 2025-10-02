@@ -326,8 +326,9 @@ class NumberExprAST : public ExprAST {
 
 public:
   NumberExprAST(double Val) : Val(Val) {}
-  
+
   llvm::Value *codegen() override;
+  llvm::Value *codegen_with_target(llvm::Type *TargetType);
   [[nodiscard]] double getValue() const { return Val; }
 };
 

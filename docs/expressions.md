@@ -48,6 +48,33 @@ int remainder = 17 % 5  // 2
 int check = 20 % 6      // 2
 ```
 
+#### Arithmetic with Sized Types
+
+Number literals automatically adapt to match the type of the variable they're used with:
+
+```c
+// With byte (8-bit)
+byte b = 50
+byte sum = b + 10       // 10 becomes i8, result is i8
+byte doubled = b * 2    // 2 becomes i8
+
+// With short (16-bit)
+short s = 1000
+short total = s + 500   // 500 becomes i16
+short halved = s / 2    // 2 becomes i16
+
+// With long (64-bit)
+long l = 5000000
+long big = l + 4000000  // 4000000 becomes i64
+
+// Works in both operand positions
+byte b2 = 20
+byte result1 = b2 + 5   // Right operand is literal
+byte result2 = 5 + b2   // Left operand is literal
+```
+
+See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for more details.
+
 ### Unary Operators
 
 ```c
@@ -136,6 +163,30 @@ bool gte = 6 >= 6      // true
 // With expressions
 bool complex = (x + 5) > (y * 2)
 ```
+
+### Comparisons with Sized Types
+
+Number literals automatically adapt to match the type being compared:
+
+```c
+// With byte
+byte b = 100
+bool check1 = b == 100      // 100 becomes i8
+bool check2 = 255 > b       // 255 becomes i8
+bool check3 = b <= 200      // 200 becomes i8
+
+// With short
+short s = 1000
+bool valid = s == 1000      // 1000 becomes i16
+bool inRange = s >= 500 && s <= 1500  // Both literals become i16
+
+// Works in both directions
+byte value = 42
+bool test1 = value == 42    // Literal on right
+bool test2 = 42 == value    // Literal on left
+```
+
+This eliminates the need for explicit casts like `b == byte: 100` in most cases. See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for details.
 
 ## Boolean Operators
 

@@ -85,12 +85,129 @@ float y            // Error: variable must be initialized
 
 While types must be explicitly declared, the compiler performs automatic type inference for literals:
 
-- Whole numbers without decimal points become `int` (i32)
+- Whole numbers without decimal points become `int` (i32) by default
 - Numbers with decimal points become `double`
 - Character literals in single quotes become `char`
 - String literals in double quotes become `string`
 - `true` and `false` become `bool`
 - Integer literals are range-checked and sized to fit the target type
+
+### Context-Aware Literal Type Inference
+
+Number literals automatically adapt to the target type in binary operations, eliminating the need for explicit casts in most common cases. This feature, similar to C#, Rust, and Swift, improves code readability while maintaining type safety.
+
+#### How It Works
+
+When a number literal appears in a binary operation (comparison or arithmetic) with a typed variable, the literal automatically generates with the variable's type:
+
+```c
+byte b = 100
+assert b == 100      // 100 becomes i8, not i32
+assert 100 == b      // Works in both directions
+
+short s = 1000
+short result = s + 50  // 50 becomes i16
+short doubled = 2 * s  // 2 becomes i16
+```
+
+#### Supported Operations
+
+Literal inference works with:
+
+**Comparison Operators:**
+```c
+byte b = 50
+assert b == 50       // Equality
+assert b != 49       // Inequality
+assert b < 100       // Less than
+assert b > 25        // Greater than
+assert b <= 50       // Less than or equal
+assert b >= 50       // Greater than or equal
+```
+
+**Arithmetic Operators:**
+```c
+byte x = 10
+byte sum = x + 5     // Addition: 5 becomes i8
+byte diff = 20 - x   // Subtraction: 20 becomes i8
+byte prod = x * 3    // Multiplication: 3 becomes i8
+byte quot = x / 2    // Division: 2 becomes i8
+byte mod = x % 3     // Modulo: 3 becomes i8
+```
+
+**Function Arguments:**
+```c
+void processByte(byte value) {
+    // ...
+}
+
+processByte(42)      // 42 automatically becomes i8
+```
+
+#### All Integer Types Supported
+
+Literal inference works with all sized integer types:
+
+```java
+// 8-bit types
+byte b = 200
+assert b + 55 == 255
+
+sbyte sb = 100
+assert sb - 50 == 50
+
+// 16-bit types
+short s = 30000
+assert s + 2767 == 32767
+
+ushort us = 60000
+assert us + 5535 == 65535
+
+// 32-bit types (default, but still works)
+int i = 1000
+assert i * 1000 == 1000000
+
+// 64-bit types
+long l = 5000000
+assert l + 4000000 == 9000000
+```
+
+#### Type Safety Maintained
+
+The compiler still prevents unsafe operations:
+
+```java
+// Range checking still enforced
+byte overflow = 256   // Error: 256 exceeds byte range [0-255]
+
+// Overflow detection in literals
+byte b = 200
+assert b == 256       // Error: 256 out of range for byte
+
+// Variable-to-variable still requires explicit casts
+byte b1 = 10
+short s1 = b1         // Error: requires explicit cast
+short s2 = short: b1  // OK: explicit cast
+```
+
+#### Complex Expressions
+
+Literal inference works in nested expressions:
+
+```java
+byte result = (10 + 20) * 2
+assert result == 60   // All literals become i8
+
+short complex = (100 + 200) / 3
+assert complex == 100
+```
+
+#### Benefits
+
+1. **Cleaner code**: No need for `byte: 100` in comparisons and arithmetic
+2. **Maintains safety**: Overflow checking and type checking still apply
+3. **Modern design**: Follows patterns from C#, Rust, and Swift
+4. **Zero ambiguity**: Only applies when target type is clear from context
 
 ## Type Casting and Promotion
 
@@ -160,7 +277,7 @@ byte tiny = byte: small    // Will fail if value > 255
 
 When casting between signed and unsigned integers:
 
-```c
+```cs
 // Signed to unsigned (zero-extends if needed)
 sbyte signed = -1         // 0xFF in binary
 byte unsigned = byte: signed  // unsigned = 255 (0xFF)
@@ -184,7 +301,7 @@ ulong ul = ulong: ui     // ul = 60000 (zero extended)
 
 The compiler performs range checking for literal casts:
 
-```c
+```cs
 // Valid casts - values within target range
 byte b1 = byte: 255      // OK - maximum byte value
 sbyte sb1 = sbyte: 127   // OK - maximum sbyte value
@@ -208,7 +325,7 @@ The compiler includes comprehensive integer overflow detection for literal value
 
 The lexer detects integer literals that exceed the maximum representable value:
 
-```c
+```cs
 // Valid literals - within range
 int maxInt = 2147483647          // OK - maximum i32 value
 long maxLong = 9223372036854775807  // OK - maximum i64 value
@@ -249,7 +366,7 @@ See `test/types/test_overflow.hy` for valid edge cases and `test/errors/test_ove
 
 Character types can be cast to and from integers:
 
-```c
+```cs
 // Character to integer
 char ch = 'A'            // Unicode 65
 int code = int: ch       // code = 65
@@ -269,7 +386,7 @@ schar small = schar: standard  // 8-bit character
 
 Type casting can be used in complex expressions:
 
-```c
+```cpp
 // Cast result of arithmetic
 int a = 10
 int b = 3
@@ -294,7 +411,7 @@ int truncated = int: floats[0]    // truncated = 1
 
 #### Type Casting in Assignments
 
-```c
+```cs
 // Cast on right-hand side
 float source = 3.14
 int target = int: source          // target = 3
@@ -325,7 +442,7 @@ i += int: f                       // i = 13 (10 + 3)
 
 ### Examples
 
-```c
+```cs
 // Valid operations with casting
 short s = 100
 int i = 200
@@ -348,7 +465,7 @@ int num = int: flag            // Error: cannot cast bool to int
 
 Functions have types determined by their return type and parameter types:
 
-```c
+```cs
 // Function type: (int, int) -> int
 int add(int x, int y) { return x + y }
 
@@ -406,7 +523,7 @@ Hybrid types map directly to LLVM types:
 
 Variables can be declared at global scope or local scope:
 
-```c
+```cs
 // Global variables - visible to all functions
 int globalCount = 0
 string appName = "MyApp"
