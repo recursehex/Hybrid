@@ -3,9 +3,12 @@ extern void print(int x)
 void testBasicBounds()
 {
     int[] small = [1]
+    assert small[0] == 1
     print(small[0])
-    
+
     int[] arr = [10, 20, 30, 40, 50]
+    assert arr[0] == 10
+    assert arr[4] == 50
     print(arr[0])
     print(arr[4])
 }
@@ -29,7 +32,12 @@ void testExpressionIndexes()
 {
     int[] data = [100, 200, 300, 400, 500]
     int index = 2
-    
+
+    assert data[index] == 300
+    assert data[index + 1] == 400
+    assert data[index - 1] == 200
+    assert data[index * 2] == 500
+    assert data[index / 2] == 200
     print(data[index])
     print(data[index + 1])
     print(data[index - 1])

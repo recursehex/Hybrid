@@ -81,6 +81,20 @@ void HandleForEachStatement() {
   }
 }
 
+void HandleAssertStatement() {
+  auto Assert = ParseAssertStatement();
+  if (Assert) {
+    if (auto AssertIR = Assert->codegen()) {
+      fprintf(stderr, "Generated top-level assert IR:\n");
+      AssertIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    }
+  } else {
+    // Skip token for error recovery.
+    getNextToken();
+  }
+}
+
 void HandleUseStatement() {
   auto Use = ParseUseStatement();
   if (Use) {
@@ -161,6 +175,9 @@ void MainLoop() {
       break;
     case tok_for:
       HandleForEachStatement();
+      break;
+    case tok_assert:
+      HandleAssertStatement();
       break;
     case tok_struct:
       HandleStructDefinition();

@@ -9,6 +9,7 @@ void HandleVariableDeclaration();
 void HandleStructDefinition();
 void HandleUnsafe();
 void HandleSwitchStatement();
+void HandleAssertStatement();
 void MainLoop();
 
 #endif // TOPLEVEL_H

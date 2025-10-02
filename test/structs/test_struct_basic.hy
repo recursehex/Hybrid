@@ -17,6 +17,8 @@ Point p1 = Point(10, 20)
 // Test 3: Member field access
 int xVal = p1.x
 int yVal = p1.y
+assert xVal == 10
+assert yVal == 20
 
 // Test 4: Struct instantiation without assignment (standalone call)
 Point(30, 40)
@@ -29,6 +31,9 @@ Point p3 = Point(-5, 15)
 int sum = p1.x + p1.y  // 30
 int diff = p2.x - p2.y // -100
 int product = p3.x * p3.y // -75
+assert sum == 30
+assert diff == -100
+assert product == -75
 
 // Test 7: Struct with single field
 struct Counter {
@@ -41,3 +46,4 @@ struct Counter {
 
 Counter c = Counter(42)
 int val = c.count  // 42
+assert val == 42

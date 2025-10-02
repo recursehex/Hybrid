@@ -8,18 +8,23 @@ int main()
     int d = 5
     
     int result1 = a + b * c
+    assert result1 == 14  // 2 + (3 * 4) = 2 + 12 = 14
     print(result1)
-    
+
     int result2 = (a + b) * c
+    assert result2 == 20  // (2 + 3) * 4 = 5 * 4 = 20
     print(result2)
-    
+
     int result3 = a * b + c * d
+    assert result3 == 26  // (2 * 3) + (4 * 5) = 6 + 20 = 26
     print(result3)
-    
+
     int result4 = a + b - c + d
+    assert result4 == 6  // 2 + 3 - 4 + 5 = 6
     print(result4)
-    
+
     int result5 = a * b / c * d
+    assert result5 == 5  // (2 * 3 / 4) * 5 = (6 / 4) * 5 = 1 * 5 = 5
     print(result5)
     
     bool flag1 = true
@@ -27,9 +32,11 @@ int main()
     bool flag3 = true
     
     bool logical1 = flag1 && flag2 || flag3
+    assert logical1 == true  // (true && false) || true = false || true = true
     print(int: logical1)
-    
+
     bool logical2 = flag1 || flag2 && flag3
+    assert logical2 == true  // true || (false && true) = true || false = true
     print(int: logical2)
     
     bool comparison1 = a < b && c > d

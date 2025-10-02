@@ -1111,6 +1111,8 @@ int incomplete = switch x
 
 Assert statements are used for debugging and testing to verify that conditions hold true at runtime. If an assertion fails, the program terminates immediately.
 
+Assert statements can be used both inside functions and at the top level (global scope), making them useful for compile-time validation and runtime checks.
+
 ### Basic Syntax
 
 ```c
@@ -1118,6 +1120,27 @@ assert expression
 ```
 
 The expression must evaluate to a boolean value or be convertible to boolean. If the expression evaluates to false, the program calls `abort()` and terminates.
+
+### Scope and Usage
+
+Assert can be used in two contexts:
+
+1. **Inside functions**: For runtime validation within function bodies
+2. **At top level**: For global constant validation and test assertions
+
+```c
+// Top-level assertions (global scope)
+int global_value = 42
+assert global_value == 42  // OK - validates global state
+
+// Inside functions
+int test()
+{
+    int x = 10
+    assert x > 0  // OK - runtime validation
+    return x
+}
+```
 
 ### Usage Examples
 
