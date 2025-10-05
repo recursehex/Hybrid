@@ -2141,7 +2141,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       if (shouldLink) {
         // This is linking to another variable: ref int b = a or ref int b = ref a
         // Create a pointer variable
-        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
+        llvm::PointerType *AliasPtrType = llvm::PointerType::get(*TheContext, 0);
         llvm::GlobalVariable *GV = new llvm::GlobalVariable(
             *TheModule, AliasPtrType, false, llvm::GlobalValue::ExternalLinkage,
             nullptr, getName());
@@ -2205,7 +2205,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
       if (initializerHasRef) {
         // Create a pointer variable because of explicit ref
-        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
+        llvm::PointerType *AliasPtrType = llvm::PointerType::get(*TheContext, 0);
         llvm::GlobalVariable *GV = new llvm::GlobalVariable(
             *TheModule, AliasPtrType, false, llvm::GlobalValue::ExternalLinkage,
             nullptr, getName());
@@ -2305,11 +2305,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
       if (shouldLink) {
         // This is linking to another variable: ref int b = a or ref int b = ref a
-        // Create a pointer variable
-        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(AliasPtrType, nullptr, getName());
-
-        // Generate the initializer (should return a pointer)
+        // Generate the initializer first (should return a pointer)
         llvm::Value *InitVal;
         if (initializerIsRef) {
           InitVal = getInitializer()->codegen();
@@ -2320,6 +2316,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         }
         if (!InitVal)
           return nullptr;
+
+        // Only create the alloca after successful initialization
+        llvm::PointerType *AliasPtrType = llvm::PointerType::get(*TheContext, 0);
+        llvm::AllocaInst *Alloca = Builder->CreateAlloca(AliasPtrType, nullptr, getName());
 
         // Store the pointer in the alloca
         Builder->CreateStore(InitVal, Alloca);
@@ -2333,13 +2333,13 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         return Builder->CreateLoad(VarType, Ptr, (getName() + "_deref"));
       } else {
         // This is a regular initialization: ref int a = 1
-        // Create a regular variable, but mark it as ref so others can reference it
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
-
-        // Generate the initializer value
+        // Generate the initializer value first
         llvm::Value *InitVal = getInitializer()->codegen();
         if (!InitVal)
           return nullptr;
+
+        // Only create the alloca after successful initialization
+        llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
 
         // Cast and store the value
         InitVal = castToType(InitVal, VarType, getType());
@@ -2358,14 +2358,14 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       bool initializerHasRef = dynamic_cast<RefExprAST*>(getInitializer()) != nullptr;
 
       if (initializerHasRef) {
-        // Create a pointer variable because of explicit ref
-        llvm::PointerType *AliasPtrType = VarType->getPointerTo();
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(AliasPtrType, nullptr, getName());
-
-        // Generate the initializer (should return a pointer)
+        // Generate the initializer first (should return a pointer)
         llvm::Value *InitVal = getInitializer()->codegen();
         if (!InitVal)
           return nullptr;
+
+        // Only create the alloca after successful initialization
+        llvm::PointerType *AliasPtrType = llvm::PointerType::get(*TheContext, 0);
+        llvm::AllocaInst *Alloca = Builder->CreateAlloca(AliasPtrType, nullptr, getName());
 
         // Store the pointer in the alloca
         Builder->CreateStore(InitVal, Alloca);
@@ -2378,19 +2378,21 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         llvm::Value *Ptr = Builder->CreateLoad(AliasPtrType, Alloca, getName());
         return Builder->CreateLoad(VarType, Ptr, (getName() + "_deref"));
       } else {
-        // Regular variable without ref, allocate the actual type
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
-
-        // Generate and store the initial value
+        // Regular variable without ref
+        // Generate and validate the initial value first
+        llvm::Value *InitVal = nullptr;
         if (getInitializer()) {
-          llvm::Value *InitVal = getInitializer()->codegen();
+          InitVal = getInitializer()->codegen();
           if (!InitVal)
             return nullptr;
+        }
 
-          // Cast the initializer to the variable type if needed
+        // Only create the alloca after successful initialization
+        llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
+
+        // Cast and store the initial value if present
+        if (InitVal) {
           InitVal = castToType(InitVal, VarType, getType());
-
-          // Store the initial value
           Builder->CreateStore(InitVal, Alloca);
         }
 
@@ -3102,7 +3104,7 @@ llvm::Function *PrototypeAST::codegen() {
 
     // If it's a ref parameter, use pointer type
     if (Param.IsRef) {
-      ParamTypes.push_back(ParamType->getPointerTo());
+      ParamTypes.push_back(llvm::PointerType::get(*TheContext, 0));
     } else {
       ParamTypes.push_back(ParamType);
     }
@@ -3115,7 +3117,7 @@ llvm::Function *PrototypeAST::codegen() {
 
   // If it returns by ref, use pointer type
   if (returnsByRef()) {
-    RetType = RetType->getPointerTo();
+    RetType = llvm::PointerType::get(*TheContext, 0);
   }
 
   // Create the function type
