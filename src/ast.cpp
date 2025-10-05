@@ -2070,7 +2070,14 @@ llvm::Value *CallExprAST::codegen() {
       ArgsV.push_back(ArgVal);
       ++i;
     }
-    return Builder->CreateCall(ConstructorF, ArgsV, "structtmp");
+    llvm::Value *ConstructedValue = Builder->CreateCall(ConstructorF, ArgsV, "structtmp");
+
+    llvm::StructType *StructType = StructTypes[getCallee()];
+    llvm::AllocaInst *StructAlloca = Builder->CreateAlloca(
+        StructType, nullptr, getCallee() + "_inst");
+    Builder->CreateStore(ConstructedValue, StructAlloca);
+
+    return StructAlloca;
   }
   
   // Look up the name in the global module table
@@ -3331,74 +3338,86 @@ llvm::Type *StructAST::codegen() {
   for (const auto &Method : Methods) {
     // For constructors, need to handle them specially
     if (Method->getProto()->getName() == Name) {
-      // This is a constructor, generate it as a static method that returns a new instance
+      // This is a constructor, generate it as a static method that materializes a new instance
       std::string ConstructorName = Name + "_new";
-      TypeInfo ctorReturnType;
-      ctorReturnType.typeName = Name;
-      ctorReturnType.pointerDepth = 0;
-      ctorReturnType.isArray = false;
-      ctorReturnType.refStorage = RefStorageClass::None;
-      ctorReturnType.isMutable = true;
-      ctorReturnType.declaredRef = false;
-      auto ConstructorProto = std::make_unique<PrototypeAST>(
-          std::move(ctorReturnType), ConstructorName, Method->getProto()->getArgs());
-      
-      // Generate the constructor function
-      llvm::Function *ConstructorFunc = ConstructorProto->codegen();
-      if (!ConstructorFunc) {
-        return nullptr;
+
+      // Build parameter list matching the constructor prototype
+      const auto &CtorArgs = Method->getProto()->getArgs();
+      std::vector<llvm::Type*> ParamTypes;
+      ParamTypes.reserve(CtorArgs.size());
+      for (const auto &Param : CtorArgs) {
+        llvm::Type *ParamType = getTypeFromString(Param.DeclaredType.typeName);
+        if (!ParamType)
+          return nullptr;
+
+        if (Param.IsRef)
+          ParamType = llvm::PointerType::get(*TheContext, 0);
+
+        ParamTypes.push_back(ParamType);
       }
-      
+
+      llvm::FunctionType *CtorFnType = llvm::FunctionType::get(StructType, ParamTypes, false);
+
+      llvm::Function *ConstructorFunc = llvm::Function::Create(
+          CtorFnType, llvm::Function::ExternalLinkage, ConstructorName, TheModule.get());
+
+      // Name parameters for easier IR inspection and debugging
+      unsigned argIndex = 0;
+      for (auto &Arg : ConstructorFunc->args())
+        Arg.setName(CtorArgs[argIndex++].Name);
+
       // Create a basic block to start insertion into
       llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", ConstructorFunc);
       Builder->SetInsertPoint(BB);
-      
-      // Allocate memory for the struct
-      llvm::Value *StructPtr = Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
-      
-      // Store the struct pointer as 'this'
+
+      // Allocate stack storage for the struct instance we are building
+      llvm::AllocaInst *StructPtr = Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
+
+      // 'this' refers to the stack allocation we just created
+      NamedValues.clear();
+      LocalTypes.clear();
       NamedValues["this"] = StructPtr;
       rememberLocalType("this", makeTypeInfo(Name));
-      
-      // Set up the argument values
-      int i = 0;
+
+      // Spill parameters to the stack just like regular functions
+      argIndex = 0;
       for (auto &Arg : ConstructorFunc->args()) {
-        std::string ArgName = Method->getProto()->getArgs()[i].Name;
-        
-        // Create an alloca for this argument
+        const auto &Param = CtorArgs[argIndex];
+        std::string ArgName = Param.Name;
+
         llvm::AllocaInst *Alloca = Builder->CreateAlloca(
             Arg.getType(), nullptr, ArgName);
-        
-        // Store the initial value into the alloca
         Builder->CreateStore(&Arg, Alloca);
-        
-        // Add arguments to variable symbol table
+
         NamedValues[ArgName] = Alloca;
-        bool argIsRef = Method->getProto()->getArgs()[i].IsRef;
-        if (argIsRef) {
-          TypeInfo paramInfo = Method->getProto()->getArgs()[i].DeclaredType;
+        if (Param.IsRef) {
+          TypeInfo paramInfo = Param.DeclaredType;
           paramInfo.refStorage = RefStorageClass::RefAlias;
           paramInfo.declaredRef = true;
           rememberLocalType(ArgName, std::move(paramInfo));
         } else {
-          rememberLocalType(ArgName, Method->getProto()->getArgs()[i].DeclaredType);
+          rememberLocalType(ArgName, Param.DeclaredType);
         }
-        i++;
+        ++argIndex;
       }
-      
+
       // Generate the constructor body
       if (Method->getBody()->codegen()) {
-        // Return the struct pointer
-        Builder->CreateRet(StructPtr);
-        
-        // Validate the generated code
+        if (!Builder->GetInsertBlock()->getTerminator()) {
+          llvm::Value *StructValue = Builder->CreateLoad(
+              StructType, StructPtr, "struct_value");
+          Builder->CreateRet(StructValue);
+        }
+
         llvm::verifyFunction(*ConstructorFunc);
       } else {
         ConstructorFunc->eraseFromParent();
+        NamedValues.clear();
+        LocalTypes.clear();
         return nullptr;
       }
-      
-      // Clear local values
+
+      // Clear local values now that the constructor is done
       NamedValues.clear();
       LocalTypes.clear();
     } else {

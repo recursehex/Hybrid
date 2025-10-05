@@ -191,8 +191,52 @@ run_test() {
         fi
     fi
     
-    # Only show output if not in failures-only mode, or if test failed
+    local should_show_output=0
     if [ $FAILURES_ONLY -eq 0 ] || [ $test_passed -eq 0 ]; then
+        should_show_output=1
+    fi
+
+    if [ $VERBOSE_MODE -eq 1 ] && [ $should_show_output -eq 1 ]; then
+        echo -e "${BLUE}=== Test: $test_name ===${NC}"
+        echo "File: $test_file"
+        echo "Content:"
+        cat "$test_file"
+        echo
+        echo "Output:"
+        printf "%s\n" "$output"
+        echo
+        if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+            if [ $test_passed -eq 1 ]; then
+                echo -e "${GREEN}✓ PASSED: $test_name (correctly failed as expected)${NC}"
+            else
+                echo -e "${RED}✗ FAILED: $test_name (should have failed but didn't)${NC}"
+            fi
+        else
+            if [ $test_passed -eq 1 ]; then
+                echo -e "${GREEN}✓ PASSED: $test_name${NC}"
+            else
+                echo -e "${RED}✗ FAILED: $test_name${NC}"
+                if [ $exit_code -ne 0 ]; then
+                    echo -e "${RED}  Compilation exit code: $exit_code${NC}"
+                fi
+                if [ $runtime_exit_code -ne 0 ]; then
+                    echo -e "${RED}  Runtime exit code: $runtime_exit_code (possible assert failure or abort)${NC}"
+                fi
+                if [ $has_errors -eq 1 ]; then
+                    echo -e "${RED}  Errors found in output:${NC}"
+                    echo "$output" | grep -E "(Error:|Failed to generate|Unknown function|Unknown variable|invalid binary operator|Expected.*after)" | head -3
+                fi
+            fi
+        fi
+        if [ -n "$runtime_output" ]; then
+            echo
+            echo "Runtime output:"
+            printf "%s\n" "$runtime_output"
+        fi
+        echo
+        echo "========================================"
+        echo
+    elif [ $should_show_output -eq 1 ]; then
         echo -e "${YELLOW}Running test: $test_name${NC}"
         echo "----------------------------------------"
         
@@ -225,110 +269,6 @@ run_test() {
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
 }
 
-# Function to run a test with visible output (for debugging)
-run_test_verbose() {
-    local test_file="$1"
-    local test_name=$(basename "$test_file" .hy)
-    
-    # First check if this test will pass or fail (for failures-only mode)
-    if [ $FAILURES_ONLY -eq 1 ]; then
-        # Run test silently to check result
-        local output
-        local exit_code
-        output=$($HYBRID_EXEC < "$test_file" 2>&1)
-        exit_code=$?
-        
-        # Check for error patterns in output
-        local has_errors=0
-        if grep -q "Error:" <<< "$output" 2>/dev/null; then
-            has_errors=1
-        fi
-        if grep -q "Failed to generate" <<< "$output" 2>/dev/null; then
-            has_errors=1
-        fi
-        if grep -q "Unknown function" <<< "$output" 2>/dev/null; then
-            has_errors=1
-        fi
-        if grep -q "Unknown variable" <<< "$output" 2>/dev/null; then
-            has_errors=1
-        fi
-        if grep -q "invalid binary operator" <<< "$output" 2>/dev/null; then
-            has_errors=1
-        fi
-        if grep -q "Expected.*after" <<< "$output" 2>/dev/null; then
-            has_errors=1
-        fi
-
-        # If compilation succeeded and test is not expected to fail, compile and run with clang
-        local runtime_exit_code=0
-        if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ] && [[ "$test_name" != *"fail"* ]] && [[ "$test_name" != *"error"* ]]; then
-            if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
-                local module_start=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
-                if [ -n "$module_start" ]; then
-                    module_start=$((module_start + 1))
-                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated")
-                    local temp_ir=$(mktemp /tmp/hybrid_test.XXXXXX)
-                    mv "$temp_ir" "${temp_ir}.ll"
-                    temp_ir="${temp_ir}.ll"
-                    local temp_bin=$(mktemp /tmp/hybrid_bin.XXXXXX)
-                    echo "$clean_ir" > "$temp_ir"
-                    if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
-                        set +e
-                        "$temp_bin" &> /dev/null
-                        runtime_exit_code=$?
-                        set -e
-                        # Only consider SIGABRT (134) as error, not other exit codes
-                        if [ $runtime_exit_code -eq 134 ]; then
-                            has_errors=1
-                        fi
-                    fi
-                    rm -f "$temp_ir" "$temp_bin"
-                fi
-            fi
-        fi
-
-        # Determine if test passed or failed
-        local test_passed=0
-
-        # Special case: tests that should fail (have "fail" in name)
-        if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
-            if [ $has_errors -eq 1 ] || [ $exit_code -ne 0 ]; then
-                test_passed=1
-            else
-                test_passed=0
-            fi
-        else
-            # Normal tests should not have errors (including runtime errors)
-            if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
-                test_passed=1
-            else
-                test_passed=0
-            fi
-        fi
-
-        # Skip showing this test if it passed and in failures-only mode
-        if [ $test_passed -eq 1 ]; then
-            return
-        fi
-    fi
-    
-    # Show verbose output for this test
-    echo -e "${BLUE}=== Test: $test_name ===${NC}"
-    echo "File: $test_file"
-    echo "Content:"
-    cat "$test_file"
-    echo
-    echo "Output:"
-    if $HYBRID_EXEC < "$test_file"; then
-        echo -e "${GREEN}✓ Test completed${NC}"
-    else
-        local exit_code=$?
-        echo -e "${RED}✗ Test failed with exit code: $exit_code${NC}"
-    fi
-    echo
-    echo "========================================"
-    echo
-}
 
 # Parse command line arguments
 # (Variables already initialized at the top of the script)
@@ -416,76 +356,11 @@ fi
 if [ $VERBOSE_MODE -eq 1 ]; then
     echo "Running tests in verbose mode..."
     echo
-    for test_file in $TEST_FILES; do
-        run_test_verbose "$test_file"
-        TOTAL_TESTS=$((TOTAL_TESTS + 1))
-        # For verbose mode, check if the test passed or failed
-        # Run it again silently to check the result
-        output=$($HYBRID_EXEC < "$test_file" 2>&1)
-        exit_code=$?
-        test_name=$(basename "$test_file" .hy)
-        
-        # Check for error patterns in output
-        has_errors=0
-        if grep -q "Error:" <<< "$output"; then
-            has_errors=1
-        elif grep -q "Failed to generate" <<< "$output"; then
-            has_errors=1
-        elif grep -q "Unknown function" <<< "$output"; then
-            has_errors=1
-        elif grep -q "Unknown variable" <<< "$output"; then
-            has_errors=1
-        elif grep -q "invalid binary operator" <<< "$output"; then
-            has_errors=1
-        elif grep -q "Expected.*after" <<< "$output"; then
-            has_errors=1
-        fi
-
-        # If compilation succeeded and test is not expected to fail, compile and run with clang
-        if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ] && [[ "$test_name" != *"fail"* ]] && [[ "$test_name" != *"error"* ]]; then
-            if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
-                local module_start=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
-                if [ -n "$module_start" ]; then
-                    module_start=$((module_start + 1))
-                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated")
-                    local temp_ir=$(mktemp /tmp/hybrid_test.XXXXXX)
-                    mv "$temp_ir" "${temp_ir}.ll"
-                    temp_ir="${temp_ir}.ll"
-                    local temp_bin=$(mktemp /tmp/hybrid_bin.XXXXXX)
-                    echo "$clean_ir" > "$temp_ir"
-                    if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
-                        "$temp_bin" &> /dev/null
-                        local runtime_exit_code=$?
-                        if [ $runtime_exit_code -ne 0 ]; then
-                            has_errors=1
-                        fi
-                    fi
-                    rm -f "$temp_ir" "$temp_bin"
-                fi
-            fi
-        fi
-
-        # Special case: tests that should fail (have "fail" in name)
-        if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
-            if [ $has_errors -eq 1 ] || [ $exit_code -ne 0 ]; then
-                PASSED_TESTS=$((PASSED_TESTS + 1))
-            else
-                FAILED_TESTS=$((FAILED_TESTS + 1))
-            fi
-        else
-            # Normal tests should not have errors (including runtime errors)
-            if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
-                PASSED_TESTS=$((PASSED_TESTS + 1))
-            else
-                FAILED_TESTS=$((FAILED_TESTS + 1))
-            fi
-        fi
-    done
-else
-    for test_file in $TEST_FILES; do
-        run_test "$test_file"
-    done
 fi
+
+for test_file in $TEST_FILES; do
+    run_test "$test_file"
+done
 
 # Print summary
 echo "==============================="
