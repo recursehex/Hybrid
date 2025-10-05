@@ -267,7 +267,13 @@ string_continue:
               goto char_literal_end;
             }
           }
-          CharVal = unicode;
+          // Validate Unicode code point: reject UTF-16 surrogates (U+D800 to U+DFFF)
+          if (unicode >= 0xD800 && unicode <= 0xDFFF) {
+            fprintf(stderr, "Error: Invalid Unicode code point U+%04X (UTF-16 surrogate)\n", unicode);
+            CharVal = '?';
+          } else {
+            CharVal = unicode;
+          }
           break;
         }
         case 'U': { // Unicode escape: \UXXXXXXXX (32-bit)
@@ -286,7 +292,14 @@ string_continue:
               goto char_literal_end;
             }
           }
-          CharVal = unicode;
+          // Validate Unicode code point
+          // Valid range: U+0000 to U+10FFFF, excluding surrogates U+D800 to U+DFFF
+          if (unicode > 0x10FFFF || (unicode >= 0xD800 && unicode <= 0xDFFF)) {
+            fprintf(stderr, "Error: Invalid Unicode code point U+%08X\n", unicode);
+            CharVal = '?';
+          } else {
+            CharVal = unicode;
+          }
           break;
         }
         default: CharVal = LastChar; break;
