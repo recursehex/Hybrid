@@ -1016,8 +1016,67 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::s
       return llvm::ConstantInt::get(targetType, Val.trunc(targetBits));
     }
   }
-  
-  // For non-constant values, use the regular castToType
+
+  // For non-constant values, add runtime range checking for integer narrowing
+  if (sourceType->isIntegerTy() && targetType->isIntegerTy() &&
+      !targetType->isIntegerTy(1) && // Don't allow to bool
+      sourceType->getIntegerBitWidth() > targetType->getIntegerBitWidth()) {
+
+    unsigned targetBits = targetType->getIntegerBitWidth();
+
+    // Determine range based on target type name
+    int64_t minVal = 0, maxVal = 0;
+    if (targetBits == 8) {
+      if (isSignedType(targetTypeName)) {
+        minVal = -128; maxVal = 127;  // sbyte, char
+      } else {
+        minVal = 0; maxVal = 255;  // byte
+      }
+    } else if (targetBits == 16) {
+      if (isSignedType(targetTypeName)) {
+        minVal = -32768; maxVal = 32767;  // short
+      } else {
+        minVal = 0; maxVal = 65535;  // ushort
+      }
+    } else if (targetBits == 32) {
+      if (isSignedType(targetTypeName)) {
+        minVal = INT32_MIN; maxVal = INT32_MAX;  // int
+      } else {
+        minVal = 0; maxVal = UINT32_MAX;  // uint
+      }
+    }
+
+    // Generate runtime range check
+    llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock *InRangeBB = llvm::BasicBlock::Create(*TheContext, "range_ok", TheFunction);
+    llvm::BasicBlock *OutOfRangeBB = llvm::BasicBlock::Create(*TheContext, "range_fail", TheFunction);
+
+    // Create comparison: value >= minVal && value <= maxVal
+    llvm::Value *MinCheck = Builder->CreateICmpSGE(value,
+        llvm::ConstantInt::get(sourceType, minVal), "mincheck");
+    llvm::Value *MaxCheck = Builder->CreateICmpSLE(value,
+        llvm::ConstantInt::get(sourceType, maxVal), "maxcheck");
+    llvm::Value *InRange = Builder->CreateAnd(MinCheck, MaxCheck, "inrange");
+
+    // Branch based on range check
+    Builder->CreateCondBr(InRange, InRangeBB, OutOfRangeBB);
+
+    // Out of range block - call abort()
+    Builder->SetInsertPoint(OutOfRangeBB);
+    llvm::Function *AbortFunc = TheModule->getFunction("abort");
+    if (!AbortFunc) {
+      llvm::FunctionType *AbortType = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+      AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage, "abort", TheModule.get());
+    }
+    Builder->CreateCall(AbortFunc);
+    Builder->CreateUnreachable();
+
+    // In range block - perform the truncation
+    Builder->SetInsertPoint(InRangeBB);
+    return Builder->CreateTrunc(value, targetType, "rangecast");
+  }
+
+  // For non-constant values without range checking, use the regular castToType
   return castToType(value, targetType);
 }
 
@@ -1208,7 +1267,13 @@ llvm::Value *BinaryExprAST::codegen() {
 
           // Regular variable assignment
           llvm::Type *VarType = Alloca->getAllocatedType();
-          R = castToType(R, VarType);
+          // Get type name for proper range checking
+          const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName());
+          if (info && !info->typeName.empty()) {
+            R = castToType(R, VarType, info->typeName);
+          } else {
+            R = castToType(R, VarType);
+          }
           Builder->CreateStore(R, Variable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
@@ -1231,7 +1296,13 @@ llvm::Value *BinaryExprAST::codegen() {
 
           // Regular global variable
           llvm::Type *VarType = GV->getValueType();
-          R = castToType(R, VarType);
+          // Get type name for proper range checking
+          const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName());
+          if (info && !info->typeName.empty()) {
+            R = castToType(R, VarType, info->typeName);
+          } else {
+            R = castToType(R, VarType);
+          }
           Builder->CreateStore(R, GV);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
