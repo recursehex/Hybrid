@@ -45,6 +45,9 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
 int CurTok;
 int getNextToken() { return CurTok = gettok(); }
 
+/// Loop nesting depth tracker for validating break/skip statements
+static int LoopNestingDepth = 0;
+
 /// BinopPrecedence - This holds the precedence for each binary operator that is
 /// defined.
 std::map<std::string, int> BinopPrecedence;
@@ -1008,12 +1011,14 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   }
   
   // Parse body block
+  LoopNestingDepth++;
   auto Body = ParseBlock();
+  LoopNestingDepth--;
   if (!Body) {
     LogError("Expected block after foreach loop header");
     return nullptr;
   }
-  
+
   return std::make_unique<ForEachStmtAST>(Type, VarName, std::move(Collection), std::move(Body));
 }
 
@@ -1121,22 +1126,32 @@ std::unique_ptr<WhileStmtAST> ParseWhileStatement() {
     LogError("Expected '{' after while condition");
     return nullptr;
   }
-  
+
+  LoopNestingDepth++;
   auto Body = ParseBlock();
+  LoopNestingDepth--;
   if (!Body)
     return nullptr;
-  
+
   return std::make_unique<WhileStmtAST>(std::move(Condition), std::move(Body));
 }
 
 /// breakstmt ::= 'break'
 std::unique_ptr<BreakStmtAST> ParseBreakStatement() {
+  if (LoopNestingDepth == 0) {
+    LogError("'break' statement can only be used inside a loop");
+    return nullptr;
+  }
   getNextToken(); // eat 'break'
   return std::make_unique<BreakStmtAST>();
 }
 
 /// skipstmt ::= 'skip'
 std::unique_ptr<SkipStmtAST> ParseSkipStatement() {
+  if (LoopNestingDepth == 0) {
+    LogError("'skip' statement can only be used inside a loop");
+    return nullptr;
+  }
   getNextToken(); // eat 'skip'
   return std::make_unique<SkipStmtAST>();
 }
@@ -1531,12 +1546,14 @@ std::unique_ptr<StmtAST> ParseForStatement() {
         }
         
         // Parse body block
+        LoopNestingDepth++;
         auto Body = ParseBlock();
+        LoopNestingDepth--;
         if (!Body) {
           LogError("Expected block after foreach loop header");
           return nullptr;
         }
-        
+
         return std::make_unique<ForEachStmtAST>(type, varName, std::move(Collection), std::move(Body));
       } else if (CurTok == '=') {
         // It's a for-to loop, parse it
@@ -1597,13 +1614,15 @@ std::unique_ptr<StmtAST> ParseForStatement() {
         }
         
         // Parse body block
+        LoopNestingDepth++;
         auto Body = ParseBlock();
+        LoopNestingDepth--;
         if (!Body) {
           LogError("Expected block after for loop header");
           return nullptr;
         }
-        
-        return std::make_unique<ForLoopStmtAST>(type, varName, std::move(InitExpr), 
+
+        return std::make_unique<ForLoopStmtAST>(type, varName, std::move(InitExpr),
                                                  std::move(LimitExpr), std::move(Body),
                                                  std::move(StepExpr), StepOp,
                                                  std::move(CondExpr));
@@ -1660,7 +1679,9 @@ std::unique_ptr<StmtAST> ParseForStatement() {
   }
   
   // Parse body block
+  LoopNestingDepth++;
   auto Body = ParseBlock();
+  LoopNestingDepth--;
   if (!Body) {
     LogError("Expected block after anonymous for loop header");
     return nullptr;

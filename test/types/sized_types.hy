@@ -221,3 +221,13 @@ assert safe_result == 150
 // Verify the result is still a byte by using it in byte context
 byte verify = safe_result + 5
 assert verify == 155
+
+// Test 9: Runtime range checking for variable assignments
+// When assigning from larger to smaller types, runtime checks ensure safety
+int runtime_val = 200
+byte runtime_byte = runtime_val  // Runtime check: 200 is in range [0, 255], should pass
+assert runtime_byte == 200
+
+int runtime_short_val = 30000
+short runtime_short = runtime_short_val  // Runtime check: 30000 is in range [-32768, 32767], should pass
+assert runtime_short == 30000
