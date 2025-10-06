@@ -41,27 +41,50 @@ int compareTest(int a, int b)
     {
         return 0
     }
-    if a != b
+    else if a < b
     {
         return 1
     }
-    if a < b
+    else
     {
         return 2
     }
-    if a > b
+}
+
+bool compareNotEqual(int left, int right)
+{
+    if left != right
     {
-        return 3
+        return true
     }
-    if a <= b
+    else
     {
-        return 4
+        return false
     }
-    if a >= b
+}
+
+bool compareLessOrEqual(double value, double limit)
+{
+    if value <= limit
     {
-        return 5
+        return true
     }
-    return -1
+    else
+    {
+        return false
+    }
+}
+
+bool compareGreaterOrEqual(char lhs, char rhs)
+{
+    if lhs >= rhs
+    {
+        return true
+    }
+    else
+    {
+        return false
+    }
 }
 
 // Float comparison
@@ -160,11 +183,16 @@ int main()
 
     // Test all comparison operators
     assert compareTest(5, 5) == 0   // Equal case (a == b)
-    assert compareTest(5, 3) == 1   // Not equal case (a != b)
-    assert compareTest(3, 5) == 2   // Less than case (a < b)
-    assert compareTest(7, 5) == 3   // Greater than case (a > b)
-    assert compareTest(5, 7) == 4   // Less or equal case (a <= b)
-    assert compareTest(8, 5) == 5   // Greater or equal case (a >= b)
+    assert compareTest(3, 5) == 1   // Less than case (a < b)
+    assert compareTest(7, 5) == 2   // Greater than case (a > b)
+
+    // Additional comparison operator checks
+    assert compareNotEqual(5, 3) == true
+    assert compareNotEqual(4, 4) == false
+    assert compareLessOrEqual(4.5, 5.0) == true
+    assert compareLessOrEqual(5.5, 5.0) == false
+    assert compareGreaterOrEqual('c', 'a') == true
+    assert compareGreaterOrEqual('a', 'd') == false
 
     // Test float comparisons
     assert int: floatCompare(5.0, 5.0) == 1  // Equal floats

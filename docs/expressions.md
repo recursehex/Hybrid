@@ -4,6 +4,26 @@
 
 Expressions in Hybrid are computations that produce values. The language supports arithmetic operations, comparisons, boolean logic, function calls, and variable references. All expressions have types determined at compile time.
 
+## Numeric Literal Formats
+
+Hybrid accepts several literal prefixes so values can be written in the representation that matches the problem domain:
+
+| Format | Prefix | Example | Description |
+|--------|--------|---------|-------------|
+| Decimal | _(none)_ | `42`, `-17`, `3.1415` | Default integer or floating-point literal |
+| Binary | `0b` / `0B` | `0b1101`, `0B00101111` | Base-2 integers |
+| Octal | `0o` / `0O` | `0o755`, `0O12` | Base-8 integers |
+| Hexadecimal | `0x` / `0X` | `0xFF`, `0XDEADBEEF` | Base-16 integers |
+| Scientific | `e` / `E` | `6.022e23`, `1.2E-3` | Exponential floating-point notation |
+
+Additional conveniences:
+
+- Leading-dot floats such as `.5` are accepted and treated as `0.5`.
+- Integer literals are automatically range-checked during lexing; values that would overflow 64 bits trigger a diagnostic.
+- During code generation a literal adopts the type of its context. For example `0xFF` stored in a `byte` remains 8 bits, while the same literal in a `long` is sign-extended to 64 bits.
+
+See [Type System – Literal Type Inference](type-system.md#context-aware-literal-type-inference) for how Hybrid narrows or widens literals based on surrounding expressions.
+
 ## Operator Precedence
 
 Operators are evaluated according to precedence rules (higher numbers bind tighter):

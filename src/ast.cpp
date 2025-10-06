@@ -282,60 +282,68 @@ void ForLoopStmtAST::print() const {
 
 // Generate code for number expressions
 llvm::Value *NumberExprAST::codegen() {
-  // Check if the number is a whole number that could be an integer
-  double val = getValue();
-  if (val == floor(val)) {
-    // It's a whole number - check if it fits in int32 range
-    // Use strict comparison to avoid undefined behavior from casting
-    // out-of-range values to int32_t
-    constexpr double INT32_MIN_D = static_cast<double>(INT32_MIN);
-    constexpr double INT32_MAX_D = static_cast<double>(INT32_MAX);
+  if (Literal.isInteger()) {
+    const llvm::APInt &value = Literal.getIntegerValue();
+    unsigned requiredBits = Literal.getRequiredBitWidth();
 
-    if (val >= INT32_MIN_D && val <= INT32_MAX_D) {
-      // Safe to convert to int32
+    if (requiredBits <= 32 && Literal.fitsInSignedBits(32)) {
       setTypeName("int");
-      // Use static_cast to be explicit and safer
-      int64_t int_val = static_cast<int64_t>(val);
-      return llvm::ConstantInt::get(*TheContext, llvm::APInt(32, int_val, true));
-    } else {
-      // Integer is too large for int32, but should have been caught by lexer
-      // This is a safety fallback - treat as double to preserve the value
-      setTypeName("double");
-      return llvm::ConstantFP::get(*TheContext, llvm::APFloat(val));
+      llvm::APInt as32 = value.sextOrTrunc(32);
+      return llvm::ConstantInt::get(*TheContext, as32);
     }
-  } else {
-    // It's a floating point number
+
+    if (requiredBits <= 64 && Literal.fitsInSignedBits(64)) {
+      setTypeName("long");
+      llvm::APInt as64 = value.sextOrTrunc(64);
+      return llvm::ConstantInt::get(*TheContext, as64);
+    }
+
+    if (requiredBits <= 64 && Literal.fitsInUnsignedBits(64)) {
+      setTypeName("ulong");
+      llvm::APInt asUnsigned64 = value.zextOrTrunc(64);
+      return llvm::ConstantInt::get(*TheContext, asUnsigned64);
+    }
+
     setTypeName("double");
-    return llvm::ConstantFP::get(*TheContext, llvm::APFloat(val));
+    return llvm::ConstantFP::get(*TheContext, llvm::APFloat(Literal.toDouble()));
   }
+
+  setTypeName("double");
+  llvm::APFloat value = Literal.getFloatValue();
+  bool losesInfo = false;
+  value.convert(llvm::APFloat::IEEEdouble(), llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+  (void)losesInfo;
+  return llvm::ConstantFP::get(*TheContext, value);
 }
 
 // Generate code for numeric literal with target type context
 llvm::Value *NumberExprAST::codegen_with_target(llvm::Type *TargetType) {
-  double val = getValue();
-
-  // If target is a floating point type
   if (TargetType->isFloatingPointTy()) {
     setTypeName(TargetType->isFloatTy() ? "float" : "double");
-    return llvm::ConstantFP::get(TargetType, val);
+    return llvm::ConstantFP::get(TargetType, Literal.toDouble());
   }
 
-  // If target is an integer type and value is a whole number
-  if (TargetType->isIntegerTy() && val == floor(val)) {
-    int64_t int_val = static_cast<int64_t>(val);
+  if (TargetType->isIntegerTy() && Literal.isInteger()) {
+    const llvm::APInt &value = Literal.getIntegerValue();
     unsigned bitWidth = TargetType->getIntegerBitWidth();
 
-    // Set the appropriate type name
+    if (!value.isIntN(bitWidth))
+      return codegen();
+
+    llvm::APInt adjusted = value;
+    if (value.getBitWidth() != bitWidth)
+      adjusted = value.zextOrTrunc(bitWidth);
+
     if (bitWidth == 8) setTypeName("byte");
     else if (bitWidth == 16) setTypeName("short");
     else if (bitWidth == 32) setTypeName("int");
-    else if (bitWidth == 64) setTypeName("long");
+    else if (bitWidth == 64) {
+      setTypeName(value.isSignedIntN(64) ? "long" : "ulong");
+    }
 
-    // Create integer constant with target bit width
-    return llvm::ConstantInt::get(*TheContext, llvm::APInt(bitWidth, int_val, true));
+    return llvm::ConstantInt::get(*TheContext, adjusted);
   }
 
-  // Fallback to default codegen if target type doesn't match
   return codegen();
 }
 

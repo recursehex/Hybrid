@@ -61,14 +61,16 @@ std::unique_ptr<FieldAST> ParseField();
 
 // Constant expression evaluation
 struct ConstantValue {
-  enum Type { INTEGER, FLOAT, BOOLEAN } type;
+  enum Type { INTEGER, UNSIGNED_INTEGER, FLOAT, BOOLEAN } type;
   union {
     long long intVal;
+    unsigned long long uintVal;
     double floatVal;
     bool boolVal;
   };
 
   ConstantValue(long long val) : type(INTEGER), intVal(val) {}
+  ConstantValue(unsigned long long val) : type(UNSIGNED_INTEGER), uintVal(val) {}
   ConstantValue(double val) : type(FLOAT), floatVal(val) {}
   ConstantValue(bool val) : type(BOOLEAN), boolVal(val) {}
 };

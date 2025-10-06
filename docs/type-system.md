@@ -43,7 +43,7 @@ Hybrid uses a static type system with explicit type declarations. All variables 
 
 Arrays are declared using the `[]` syntax after the element type:
 
-```c
+```cs
 int[] numbers = [1, 2, 3, 4, 5]
 float[] temperatures = [98.6, 99.1, 97.5]
 char[] vowels = ['a', 'e', 'i', 'o', 'u']
@@ -62,7 +62,7 @@ Arrays are implemented as structs containing a pointer to elements and a size in
 
 All variables must be initialized when declared:
 
-```c
+```cs
 // Valid declarations
 int count = 0
 float rate = 0.05
@@ -91,6 +91,14 @@ While types must be explicitly declared, the compiler performs automatic type in
 - String literals in double quotes become `string`
 - `true` and `false` become `bool`
 - Integer literals are range-checked and sized to fit the target type
+- Prefixed numeric literals map directly to their radix:
+  - `0b` / `0B` for binary (`0b1110` → 14)
+  - `0o` / `0O` for octal (`0o755` → 493)
+  - `0x` / `0X` for hexadecimal (`0xDEAD` → 57005)
+  - Scientific notation is accepted for floating point (`6.022e23`, `1.2E-3`)
+
+> [!NOTE]
+> Leading-dot literals such as `.5` are interpreted as floating-point numbers (`0.5`).
 
 ### Context-Aware Literal Type Inference
 
@@ -100,7 +108,7 @@ Number literals automatically adapt to the target type in binary operations, eli
 
 When a number literal appears in a binary operation (comparison or arithmetic) with a typed variable, the literal automatically generates with the variable's type:
 
-```c
+```java
 byte b = 100
 assert b == 100      // 100 becomes i8, not i32
 assert 100 == b      // Works in both directions
@@ -115,7 +123,7 @@ short doubled = 2 * s  // 2 becomes i16
 Literal inference works with:
 
 **Comparison Operators:**
-```c
+```cs
 byte b = 50
 assert b == 50       // Equality
 assert b != 49       // Inequality
@@ -126,7 +134,7 @@ assert b >= 50       // Greater than or equal
 ```
 
 **Arithmetic Operators:**
-```c
+```cs
 byte x = 10
 byte sum = x + 5     // Addition: 5 becomes i8
 byte diff = 20 - x   // Subtraction: 20 becomes i8

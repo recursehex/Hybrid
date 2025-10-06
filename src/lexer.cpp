@@ -1,16 +1,157 @@
 #include "lexer.h"
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <cerrno>
-#include <cmath>
 #include <cstdint>
-#include <limits>
 #include <iostream>
 
-std::string IdentifierStr; // Filled in if tok_identifier
-double NumVal;             // Filled in if tok_number
-std::string StringVal;     // Filled in if tok_string_literal
-uint32_t CharVal;          // Filled in if tok_char_literal (supports full Unicode)
+#include "llvm/Support/Error.h"
+
+std::string IdentifierStr;      // Filled in if tok_identifier
+NumericLiteral LexedNumericLiteral; // Filled in if tok_number
+std::string StringVal;          // Filled in if tok_string_literal
+uint32_t CharVal;               // Filled in if tok_char_literal (supports full Unicode)
+
+namespace {
+
+static unsigned requiredBitsForDigits(size_t digitCount, unsigned radix) {
+  unsigned bitsPerDigit = 4;
+  switch (radix) {
+    case 2: bitsPerDigit = 1; break;
+    case 8: bitsPerDigit = 3; break;
+    case 16: bitsPerDigit = 4; break;
+    default: bitsPerDigit = 4; break;
+  }
+
+  unsigned parsedBits = static_cast<unsigned>(digitCount * bitsPerDigit + 2);
+  return std::max(parsedBits, 64u);
+}
+
+static bool buildIntegerLiteral(const std::string &digits,
+                                unsigned radix,
+                                const std::string &spelling,
+                                NumericLiteral &outLiteral) {
+  if (digits.empty()) {
+    std::cerr << "Error: Numeric literal '" << spelling << "' is missing digits\n";
+    return false;
+  }
+
+  unsigned parseBits = requiredBitsForDigits(digits.size(), radix);
+
+  llvm::APInt value(parseBits, digits, radix);
+  if (value.getActiveBits() > 64) {
+    std::cerr << "Error: Integer literal '" << spelling
+              << "' exceeds maximum supported 64-bit range\n";
+    return false;
+  }
+
+  unsigned requiredBits = std::max(1u, value.getActiveBits());
+  outLiteral = NumericLiteral::makeInteger(value, radix, spelling, requiredBits);
+  return true;
+}
+
+static bool buildFloatingLiteral(const std::string &literal,
+                                 bool hadDecimal,
+                                 bool hadExponent,
+                                 NumericLiteral &outLiteral) {
+  llvm::APFloat value(0.0);
+  auto statusOr = value.convertFromString(llvm::StringRef(literal),
+                                          llvm::APFloat::rmNearestTiesToEven);
+
+  if (!statusOr) {
+    llvm::consumeError(statusOr.takeError());
+    std::cerr << "Error: Invalid floating-point literal '" << literal << "'\n";
+    return false;
+  }
+
+  llvm::APFloat::opStatus status = *statusOr;
+
+  if (status & llvm::APFloat::opInvalidOp) {
+    std::cerr << "Error: Invalid floating-point literal '" << literal << "'\n";
+    return false;
+  }
+
+  if (status & llvm::APFloat::opOverflow) {
+    std::cerr << "Error: Floating-point literal '" << literal << "' overflowed the representable range\n";
+    return false;
+  }
+
+  if (status & llvm::APFloat::opUnderflow) {
+    std::cerr << "Error: Floating-point literal '" << literal << "' underflowed the representable range\n";
+    return false;
+  }
+
+  outLiteral = NumericLiteral::makeFloating(value, literal, hadDecimal, hadExponent);
+  return true;
+}
+
+static bool isBinaryDigit(int ch) {
+  return ch == '0' || ch == '1';
+}
+
+static bool isOctalDigit(int ch) {
+  return ch >= '0' && ch <= '7';
+}
+
+static bool isDecimalDigit(int ch) {
+  return ch >= '0' && ch <= '9';
+}
+
+static bool isHexDigit(int ch) {
+  return std::isxdigit(static_cast<unsigned char>(ch));
+}
+
+static int lexPrefixedIntegerLiteral(int &LastChar,
+                                     unsigned radix,
+                                     char prefixChar) {
+  auto isValidDigit = [&](int ch) {
+    switch (radix) {
+      case 2: return isBinaryDigit(ch);
+      case 8: return isOctalDigit(ch);
+      case 10: return isDecimalDigit(ch);
+      case 16: return isHexDigit(ch);
+      default: return false;
+    }
+  };
+
+  std::string digits;
+  int CurrentChar = getchar();
+
+  while (isValidDigit(CurrentChar)) {
+    digits += static_cast<char>(CurrentChar);
+    CurrentChar = getchar();
+  }
+
+  if (digits.empty()) {
+    std::cerr << "Error: Numeric literal '0" << static_cast<char>(prefixChar)
+              << "' is missing digits\n";
+    LastChar = CurrentChar;
+    return tok_error;
+  }
+
+  if (std::isalnum(static_cast<unsigned char>(CurrentChar)) || CurrentChar == '_') {
+    std::string spelling = "0";
+    spelling += static_cast<char>(prefixChar);
+    spelling += digits;
+    spelling += static_cast<char>(CurrentChar);
+    std::cerr << "Error: Invalid digit '" << static_cast<char>(CurrentChar)
+              << "' in numeric literal '" << spelling << "'\n";
+    LastChar = CurrentChar;
+    return tok_error;
+  }
+
+  LastChar = CurrentChar;
+  std::string spelling = "0";
+  spelling += static_cast<char>(prefixChar);
+  spelling += digits;
+
+  if (!buildIntegerLiteral(digits, radix, spelling, LexedNumericLiteral))
+    return tok_error;
+
+  return tok_number;
+}
+
+} // namespace
 
 /// gettok - Return the next token from standard input.
 int gettok() {
@@ -107,76 +248,104 @@ int gettok() {
   }
 
   if (isdigit(LastChar)) {
-    // Number: [0-9.]+
-    std::string NumStr;
-    do {
-      NumStr += LastChar;
-      LastChar = getchar();
-    } while (isdigit(LastChar) || LastChar == '.');
-
-    // Parse the number and check for overflow
-    errno = 0;
-    char* endptr;
-    NumVal = strtod(NumStr.c_str(), &endptr);
-
-    // Check for overflow/underflow
-    if (errno == ERANGE) {
-      std::cerr << "Error: Number literal '" << NumStr << "' is out of range (overflow/underflow)\n";
-      return tok_error;
-    }
-
-    // Check if entire string was parsed
-    if (*endptr != '\0') {
-      std::cerr << "Error: Invalid number format '" << NumStr << "'\n";
-      return tok_error;
-    }
-
-    // Additional validation: Check if the number can fit in int64 range when it's a whole number
-    // This prevents issues where strtod accepts very large integers that overflow when cast
-    if (NumVal == floor(NumVal)) {
-      // It's a whole number - verify it fits in int64 range
-      // We use int64 as the largest integer type we support
-      constexpr double INT64_MIN_D = static_cast<double>(INT64_MIN);
-      constexpr double INT64_MAX_D = static_cast<double>(INT64_MAX);
-
-      if (NumVal < INT64_MIN_D || NumVal > INT64_MAX_D) {
-        std::cerr << "Error: Integer literal '" << NumStr
-                  << "' exceeds maximum supported integer range (-9223372036854775808 to 9223372036854775807)\n";
-        return tok_error;
+    if (LastChar == '0') {
+      int NextChar = getchar();
+      if (NextChar == 'b' || NextChar == 'B') {
+        return lexPrefixedIntegerLiteral(LastChar, 2, static_cast<char>(NextChar));
+      } else if (NextChar == 'o' || NextChar == 'O') {
+        return lexPrefixedIntegerLiteral(LastChar, 8, static_cast<char>(NextChar));
+      } else if (NextChar == 'x' || NextChar == 'X') {
+        return lexPrefixedIntegerLiteral(LastChar, 16, static_cast<char>(NextChar));
+      } else {
+        ungetc(NextChar, stdin);
       }
     }
 
+    std::string literal;
+    std::string integerDigits;
+    bool hasDecimal = false;
+    bool hasExponent = false;
+
+    while (isDecimalDigit(LastChar)) {
+      literal += static_cast<char>(LastChar);
+      integerDigits += static_cast<char>(LastChar);
+      LastChar = getchar();
+    }
+
+    if (LastChar == '.') {
+      hasDecimal = true;
+      literal += '.';
+      LastChar = getchar();
+      while (isDecimalDigit(LastChar)) {
+        literal += static_cast<char>(LastChar);
+        LastChar = getchar();
+      }
+    }
+
+    if (LastChar == 'e' || LastChar == 'E') {
+      hasExponent = true;
+      literal += static_cast<char>(LastChar);
+      LastChar = getchar();
+      if (LastChar == '+' || LastChar == '-') {
+        literal += static_cast<char>(LastChar);
+        LastChar = getchar();
+      }
+      if (!isDecimalDigit(LastChar)) {
+        std::cerr << "Error: Invalid exponent in floating-point literal '" << literal << "'\n";
+        return tok_error;
+      }
+      while (isDecimalDigit(LastChar)) {
+        literal += static_cast<char>(LastChar);
+        LastChar = getchar();
+      }
+    }
+
+    if (!hasDecimal && !hasExponent) {
+      if (!buildIntegerLiteral(integerDigits, 10, literal, LexedNumericLiteral))
+        return tok_error;
+      return tok_number;
+    }
+
+    if (!buildFloatingLiteral(literal, hasDecimal, hasExponent, LexedNumericLiteral))
+      return tok_error;
     return tok_number;
   }
-  
-  // Check for decimal numbers starting with '.'
+
   if (LastChar == '.') {
     int NextChar = getchar();
     if (isdigit(NextChar)) {
-      // It's a decimal number like .5
-      std::string NumStr = ".";
-      NumStr += NextChar;
+      std::string literal = ".";
+      literal += static_cast<char>(NextChar);
+      bool hasExponent = false;
       LastChar = getchar();
-      while (isdigit(LastChar)) {
-        NumStr += LastChar;
+      while (isDecimalDigit(LastChar)) {
+        literal += static_cast<char>(LastChar);
         LastChar = getchar();
       }
 
-      // Parse with overflow checking
-      errno = 0;
-      char* endptr;
-      NumVal = strtod(NumStr.c_str(), &endptr);
-
-      if (errno == ERANGE) {
-        std::cerr << "Error: Number literal '" << NumStr << "' is out of range (overflow/underflow)\n";
-        return tok_error;
+      if (LastChar == 'e' || LastChar == 'E') {
+        hasExponent = true;
+        literal += static_cast<char>(LastChar);
+        LastChar = getchar();
+        if (LastChar == '+' || LastChar == '-') {
+          literal += static_cast<char>(LastChar);
+          LastChar = getchar();
+        }
+        if (!isDecimalDigit(LastChar)) {
+          std::cerr << "Error: Invalid exponent in floating-point literal '" << literal << "'\n";
+          return tok_error;
+        }
+        while (isDecimalDigit(LastChar)) {
+          literal += static_cast<char>(LastChar);
+          LastChar = getchar();
+        }
       }
 
+      if (!buildFloatingLiteral(literal, true, hasExponent, LexedNumericLiteral))
+        return tok_error;
       return tok_number;
     } else {
-      // Not a number, put back the character and return '.'
       ungetc(NextChar, stdin);
-      // Fall through to return '.' as a token
     }
   }
 

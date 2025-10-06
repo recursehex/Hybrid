@@ -191,6 +191,7 @@ Hybrid/
 - LLVM code generation
 - Function definitions and calls
 - All primitive types and arrays
+- Rich numeric literal formats (`0b`, `0o`, `0x`, scientific notation)
 - If-else statements
 - While loops
 - For loops with advanced features:
@@ -234,17 +235,17 @@ Hybrid/
     - `unsafe` - pointers can only be used within these blocks
 - Reference types
     - `ref type`
+- Assert statement
+    - `assert num == 42`
 
 **Planned Features**
 - Mulitidimensional arrays
 - Multiline literals
 - Stuctures
     - `class`
-    - `struct`
     - `enum`
     - `namespace`
 - OOP
-    - `this`
     - `inherits`
     - `abstract`
     - `interface`
@@ -291,7 +292,6 @@ Hybrid/
     - `catch`
     - `throw`
     - `finally`
-    - `assert`
 - Properties
     - `type var {}`
     - `get`

@@ -2,6 +2,7 @@
 #include "lexer.h"
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <utility>
 #include "llvm/Support/raw_ostream.h"
@@ -111,11 +112,17 @@ std::string ParseCompleteType()
 
     // Check for pointer level (e.g., @2 for pointer-to-pointer)
     if (CurTok == tok_number) {
-      int level = (int)NumVal;
-      if (level != NumVal || level < 1) {
+      if (!LexedNumericLiteral.isInteger() || !LexedNumericLiteral.fitsInUnsignedBits(32)) {
         fprintf(stderr, "Error: Pointer level must be a positive integer\n");
         return "";
       }
+
+      uint64_t level = LexedNumericLiteral.getUnsignedValue();
+      if (level == 0) {
+        fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+        return "";
+      }
+
       Type += "@" + std::to_string(level);
       getNextToken(); // eat number
     } else {
@@ -227,14 +234,16 @@ static std::string InferExprType(const ExprAST* expr)
   if (!expr) return "";
 
   // Check for literal types
-  if (dynamic_cast<const NumberExprAST*>(expr))
+  if (const auto *numExpr = dynamic_cast<const NumberExprAST*>(expr))
   {
-    // Check if it's a whole number for int vs float
-    const NumberExprAST* numExpr = static_cast<const NumberExprAST*>(expr);
-    double val = numExpr->getValue();
-    if (val == floor(val))
+    const NumericLiteral &literal = numExpr->getLiteral();
+    if (literal.isInteger())
     {
-      return "int";
+      if (literal.fitsInSignedBits(32))
+        return "int";
+      if (literal.fitsInSignedBits(64))
+        return "long";
+      return "ulong";
     }
     return "double";
   }
@@ -294,7 +303,7 @@ static bool AreTypesCompatible(const std::string& type1, const std::string& type
 
 /// numberexpr ::= number
 std::unique_ptr<ExprAST> ParseNumberExpr() {
-  auto Result = std::make_unique<NumberExprAST>(NumVal);
+  auto Result = std::make_unique<NumberExprAST>(LexedNumericLiteral);
   getNextToken(); // consume the number
   return std::move(Result);
 }
@@ -506,7 +515,7 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
 
   if (OpStr == "-") {
       // Represent -x as 0 - x
-      return std::make_unique<BinaryExprAST>("-", std::make_unique<NumberExprAST>(0), std::move(Operand));
+      return std::make_unique<BinaryExprAST>("-", std::make_unique<NumberExprAST>(NumericLiteral::fromSigned(0)), std::move(Operand));
   }
   return std::make_unique<UnaryExprAST>(OpStr, std::move(Operand), true /* isPrefix */);
 }
@@ -1503,7 +1512,6 @@ std::unique_ptr<StmtAST> ParseForStatement() {
   // Save position to peek ahead
   int savedTok = CurTok;
   std::string savedIdentifier = IdentifierStr;
-  double savedNumVal = NumVal;
   
   getNextToken(); // eat 'for'
   
@@ -2200,25 +2208,41 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
 bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
   if (!expr) return false;
 
-  // Handle number literals
+  auto toDouble = [](const ConstantValue &cv) -> double {
+    switch (cv.type) {
+      case ConstantValue::INTEGER:
+        return static_cast<double>(cv.intVal);
+      case ConstantValue::UNSIGNED_INTEGER:
+        return static_cast<double>(cv.uintVal);
+      case ConstantValue::FLOAT:
+        return cv.floatVal;
+      case ConstantValue::BOOLEAN:
+        return cv.boolVal ? 1.0 : 0.0;
+    }
+    return 0.0;
+  };
+
   if (auto numExpr = dynamic_cast<const NumberExprAST*>(expr)) {
-    double val = numExpr->getValue();
-    // Check if it's a whole number
-    if (val == floor(val)) {
-      result = ConstantValue((long long)val);
+    const NumericLiteral &literal = numExpr->getLiteral();
+    if (literal.isInteger()) {
+      if (literal.fitsInSignedBits(64)) {
+        result = ConstantValue(static_cast<long long>(literal.getIntegerValue().getSExtValue()));
+      } else if (literal.fitsInUnsignedBits(64)) {
+        result = ConstantValue(static_cast<unsigned long long>(literal.getIntegerValue().getZExtValue()));
+      } else {
+        result = ConstantValue(literal.toDouble());
+      }
     } else {
-      result = ConstantValue(val);
+      result = ConstantValue(literal.toDouble());
     }
     return true;
   }
 
-  // Handle boolean literals
   if (auto boolExpr = dynamic_cast<const BoolExprAST*>(expr)) {
     result = ConstantValue(boolExpr->getValue());
     return true;
   }
 
-  // Handle binary operations
   if (auto binExpr = dynamic_cast<const BinaryExprAST*>(expr)) {
     ConstantValue lhs(0LL), rhs(0LL);
     if (!EvaluateConstantExpression(binExpr->getLHS(), lhs) ||
@@ -2226,29 +2250,14 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       return false;
     }
 
-    const std::string& op = binExpr->getOp();
+    const std::string &op = binExpr->getOp();
 
-    // Comparison operators always return boolean
+    auto isSignedInt = [](const ConstantValue &cv) { return cv.type == ConstantValue::INTEGER; };
+    auto isUnsignedInt = [](const ConstantValue &cv) { return cv.type == ConstantValue::UNSIGNED_INTEGER; };
     if (op == "<" || op == ">" || op == "==" || op == "!=" ||
         op == "<=" || op == ">=") {
-
-      // Convert operands to same type for comparison
-      double leftVal, rightVal;
-      if (lhs.type == ConstantValue::INTEGER) {
-        leftVal = (double)lhs.intVal;
-      } else if (lhs.type == ConstantValue::FLOAT) {
-        leftVal = lhs.floatVal;
-      } else {
-        leftVal = lhs.boolVal ? 1.0 : 0.0;
-      }
-
-      if (rhs.type == ConstantValue::INTEGER) {
-        rightVal = (double)rhs.intVal;
-      } else if (rhs.type == ConstantValue::FLOAT) {
-        rightVal = rhs.floatVal;
-      } else {
-        rightVal = rhs.boolVal ? 1.0 : 0.0;
-      }
+      double leftVal = toDouble(lhs);
+      double rightVal = toDouble(rhs);
 
       bool compResult = false;
       if (op == "<") {
@@ -2271,27 +2280,19 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       return true;
     }
 
-    // Logical operators
     if (op == "&&" || op == "||") {
       if (lhs.type != ConstantValue::BOOLEAN || rhs.type != ConstantValue::BOOLEAN) {
         return false;
       }
 
-      bool logResult = false;
-      if (op == "&&") {
-        logResult = lhs.boolVal && rhs.boolVal;
-      } else { // ||
-        logResult = lhs.boolVal || rhs.boolVal;
-      }
-
-      result = ConstantValue(logResult);
+      bool logicalResult = (op == "&&") ? (lhs.boolVal && rhs.boolVal)
+                                         : (lhs.boolVal || rhs.boolVal);
+      result = ConstantValue(logicalResult);
       return true;
     }
 
-    // Arithmetic operators
     if (op == "+" || op == "-" || op == "*" || op == "/") {
-      // If both are integers, keep as integer
-      if (lhs.type == ConstantValue::INTEGER && rhs.type == ConstantValue::INTEGER) {
+      if (isSignedInt(lhs) && isSignedInt(rhs)) {
         long long arithResult = 0;
         if (op == "+") {
           arithResult = lhs.intVal + rhs.intVal;
@@ -2300,51 +2301,79 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
         } else if (op == "*") {
           arithResult = lhs.intVal * rhs.intVal;
         } else if (op == "/") {
-          if (rhs.intVal == 0) return false; // Division by zero
+          if (rhs.intVal == 0) return false;
           arithResult = lhs.intVal / rhs.intVal;
         }
         result = ConstantValue(arithResult);
         return true;
-      } else {
-        // Convert to float
-        double leftVal = (lhs.type == ConstantValue::INTEGER) ? (double)lhs.intVal : lhs.floatVal;
-        double rightVal = (rhs.type == ConstantValue::INTEGER) ? (double)rhs.intVal : rhs.floatVal;
+      }
 
-        double floatResult = 0.0;
+      if (isUnsignedInt(lhs) && isUnsignedInt(rhs)) {
+        unsigned long long arithResult = 0;
         if (op == "+") {
-          floatResult = leftVal + rightVal;
+          arithResult = lhs.uintVal + rhs.uintVal;
         } else if (op == "-") {
-          floatResult = leftVal - rightVal;
+          arithResult = lhs.uintVal - rhs.uintVal;
         } else if (op == "*") {
-          floatResult = leftVal * rightVal;
+          arithResult = lhs.uintVal * rhs.uintVal;
         } else if (op == "/") {
-          if (rightVal == 0.0) return false; // Division by zero
-          floatResult = leftVal / rightVal;
+          if (rhs.uintVal == 0) return false;
+          arithResult = lhs.uintVal / rhs.uintVal;
         }
-        result = ConstantValue(floatResult);
+        result = ConstantValue(arithResult);
         return true;
       }
+
+      double leftVal = toDouble(lhs);
+      double rightVal = toDouble(rhs);
+      if (op == "/" && rightVal == 0.0) {
+        return false;
+      }
+
+      double floatResult = 0.0;
+      if (op == "+") {
+        floatResult = leftVal + rightVal;
+      } else if (op == "-") {
+        floatResult = leftVal - rightVal;
+      } else if (op == "*") {
+        floatResult = leftVal * rightVal;
+      } else if (op == "/") {
+        floatResult = leftVal / rightVal;
+      }
+
+      result = ConstantValue(floatResult);
+      return true;
     }
   }
 
-  // Handle unary operations
   if (auto unaryExpr = dynamic_cast<const UnaryExprAST*>(expr)) {
     ConstantValue operand(0LL);
     if (!EvaluateConstantExpression(unaryExpr->getOperand(), operand)) {
       return false;
     }
 
-    const std::string& op = unaryExpr->getOp();
+    const std::string &op = unaryExpr->getOp();
 
-    if (op == "-") { // Negation
+    if (op == "-") {
       if (operand.type == ConstantValue::INTEGER) {
         result = ConstantValue(-operand.intVal);
         return true;
-      } else if (operand.type == ConstantValue::FLOAT) {
+      }
+
+      if (operand.type == ConstantValue::UNSIGNED_INTEGER) {
+        if (operand.uintVal <= static_cast<unsigned long long>(std::numeric_limits<long long>::max())) {
+          result = ConstantValue(-static_cast<long long>(operand.uintVal));
+        } else {
+          result = ConstantValue(-static_cast<double>(operand.uintVal));
+        }
+        return true;
+      }
+
+      if (operand.type == ConstantValue::FLOAT) {
         result = ConstantValue(-operand.floatVal);
         return true;
       }
-    } else if (op == "!") { // Logical NOT
+    } else if (op == "!") {
       if (operand.type == ConstantValue::BOOLEAN) {
         result = ConstantValue(!operand.boolVal);
         return true;
@@ -2352,6 +2381,5 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
     }
   }
 
-  // Cannot evaluate this expression as constant
   return false;
 }

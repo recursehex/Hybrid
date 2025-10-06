@@ -9,6 +9,7 @@
 #include <optional>
 #include <utility>
 #include "concepts.h"
+#include "numeric_literal.h"
 
 enum class RefStorageClass {
   None,
@@ -322,14 +323,18 @@ public:
 
 /// NumberExprAST - Expression class for numeric literals like "1.0".
 class NumberExprAST : public ExprAST {
-  double Val;
+  NumericLiteral Literal;
 
 public:
-  NumberExprAST(double Val) : Val(Val) {}
+  explicit NumberExprAST(NumericLiteral Literal)
+      : Literal(std::move(Literal)) {}
 
   llvm::Value *codegen() override;
   llvm::Value *codegen_with_target(llvm::Type *TargetType);
-  [[nodiscard]] double getValue() const { return Val; }
+
+  [[nodiscard]] const NumericLiteral &getLiteral() const { return Literal; }
+  [[nodiscard]] bool isIntegerLiteral() const { return Literal.isInteger(); }
+  [[nodiscard]] double getValue() const { return Literal.toDouble(); }
 };
 
 /// BoolExprAST - Expression class for boolean literals (true/false).
