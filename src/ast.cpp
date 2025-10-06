@@ -1,6 +1,9 @@
 #include "ast.h"
 #include <iostream>
 
+#include "compiler_session.h"
+#include "codegen_context.h"
+
 // LLVM includes for code generation
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
@@ -21,18 +24,20 @@
 #include <ranges>
 #include <string_view>
 
-// Global LLVM objects
-static std::unique_ptr<llvm::LLVMContext> TheContext;
-static std::unique_ptr<llvm::Module> TheModule;
-static std::unique_ptr<llvm::IRBuilder<>> Builder;
-static std::map<std::string, llvm::Value *> NamedValues;
-static std::map<std::string, llvm::GlobalVariable *> GlobalValues;
-static std::map<std::string, TypeInfo> GlobalTypes; // Track types of globals
-static std::map<std::string, TypeInfo> LocalTypes;  // Track types of locals
-static std::map<std::string, llvm::StructType *> StructTypes; // Track struct types
-static std::map<std::string, int64_t> ArraySizes; // Track array sizes for compile-time checks
-static std::map<std::string, std::vector<std::pair<std::string, unsigned>>> StructFieldIndices; // Track field names and indices
-static std::map<std::string, std::map<std::string, std::string>> StructFieldTypes; // Track field types: structName -> (fieldName -> typeName)
+#define CG currentCodegen()
+#define TheContext (CG.llvmContext)
+#define TheModule (CG.module)
+#define Builder (CG.builder)
+#define NamedValues (CG.namedValues)
+#define GlobalValues (CG.globalValues)
+#define GlobalTypes (CG.globalTypes)
+#define LocalTypes (CG.localTypes)
+#define StructTypes (CG.structTypes)
+#define ArraySizes (CG.arraySizes)
+#define StructFieldIndices (CG.structFieldIndices)
+#define StructFieldTypes (CG.structFieldTypes)
+#define LoopExitBlocks (CG.loopExitBlocks)
+#define LoopContinueBlocks (CG.loopContinueBlocks)
 
 static unsigned computePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -120,14 +125,9 @@ static bool isDeclaredRefLocal(const std::string &name) {
   return false;
 }
 
-// Stack to track loop exit blocks for break statements
-static std::vector<llvm::BasicBlock *> LoopExitBlocks;
-
-// Stack to track loop continue blocks for skip statements
-static std::vector<llvm::BasicBlock *> LoopContinueBlocks;
-
 // Initialize LLVM
 void InitializeModule() {
+  CG.reset();
   TheContext = std::make_unique<llvm::LLVMContext>();
   TheModule = std::make_unique<llvm::Module>("Hybrid JIT", *TheContext);
   Builder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
@@ -3905,3 +3905,18 @@ llvm::Value *TernaryExprAST::codegen() {
 
   return Result;
 }
+
+#undef LoopContinueBlocks
+#undef LoopExitBlocks
+#undef StructFieldTypes
+#undef StructFieldIndices
+#undef ArraySizes
+#undef StructTypes
+#undef LocalTypes
+#undef GlobalTypes
+#undef GlobalValues
+#undef NamedValues
+#undef Builder
+#undef TheModule
+#undef TheContext
+#undef CG

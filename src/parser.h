@@ -5,13 +5,14 @@
 #include <map>
 #include <memory>
 
-// Parser variables
-extern int CurTok;
-extern std::map<std::string, int> BinopPrecedence;
+#include "compiler_session.h"
 
 // Helper functions
 int getNextToken();
 int GetTokPrecedence();
+bool isInUnsafeContext();
+void enterUnsafeContext();
+void exitUnsafeContext();
 
 // Error handling
 std::unique_ptr<ExprAST> LogError(const char *Str);

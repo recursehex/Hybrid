@@ -5,6 +5,7 @@ set(HYBRID_SOURCES
     parser.cpp
     ast.cpp
     toplevel.cpp
+    compiler_session.cpp
 )
 
 # Define header files
@@ -13,6 +14,8 @@ set(HYBRID_HEADERS
     parser.h
     ast.h
     toplevel.h
+    compiler_session.h
+    codegen_context.h
 )
 
 # Create the executable

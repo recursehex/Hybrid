@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "lexer.h"
+#include "compiler_session.h"
 #include <cstdio>
 #include <cmath>
 #include <limits>
@@ -7,6 +8,17 @@
 #include <utility>
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Function.h"
+
+#define CurTok (currentParser().curTok)
+#define BinopPrecedence (currentParser().binopPrecedence)
+#define StructNames (currentParser().structNames)
+#define LoopNestingDepth (currentParser().loopNestingDepth)
+#define UnsafeContextLevel (currentParser().unsafeContextLevel)
+
+#define IdentifierStr (currentLexer().identifierStr)
+#define LexedNumericLiteral (currentLexer().numericLiteral)
+#define StringVal (currentLexer().stringLiteral)
+#define CharVal (currentLexer().charLiteral)
 
 static unsigned parsePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -43,21 +55,7 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
 /// CurTok/getNextToken - Provide a simple token buffer.  CurTok is the current
 /// token the parser is looking at.  getNextToken reads another token from the
 /// lexer and updates CurTok with its results.
-int CurTok;
 int getNextToken() { return CurTok = gettok(); }
-
-/// Loop nesting depth tracker for validating break/skip statements
-static int LoopNestingDepth = 0;
-
-/// BinopPrecedence - This holds the precedence for each binary operator that is
-/// defined.
-std::map<std::string, int> BinopPrecedence;
-
-/// StructNames - Track struct names as valid types
-std::set<std::string> StructNames;
-
-/// UnsafeContext - Track if we're currently in an unsafe block or function
-static int UnsafeContextLevel = 0;
 
 bool isInUnsafeContext() {
   return UnsafeContextLevel > 0;
@@ -295,8 +293,8 @@ static bool AreTypesCompatible(const std::string& type1, const std::string& type
   if ((type1 == "int" || type1 == "float" || type1 == "double") &&
       (type2 == "int" || type2 == "float" || type2 == "double"))
   {
-    return true;
-  }
+  return true;
+}
 
   return false;
 }
@@ -2407,3 +2405,13 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
 
   return false;
 }
+
+#undef CharVal
+#undef StringVal
+#undef LexedNumericLiteral
+#undef IdentifierStr
+#undef UnsafeContextLevel
+#undef LoopNestingDepth
+#undef StructNames
+#undef BinopPrecedence
+#undef CurTok

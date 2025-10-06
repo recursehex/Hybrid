@@ -2,6 +2,7 @@
 #include "parser.h"
 #include "lexer.h"
 #include "ast.h"
+#include "compiler_session.h"
 #include <cstdio>
 #include <set>
 #include <utility>
@@ -10,6 +11,10 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
+
+#define CurTok (currentParser().curTok)
+#define StructNames (currentParser().structNames)
+#define IdentifierStr (currentLexer().identifierStr)
 
 void HandleDefinition() {
   if (auto FnAST = ParseDefinition()) {
@@ -119,10 +124,6 @@ void HandleStructDefinition() {
 }
 
 void HandleUnsafe() {
-  extern int CurTok;
-  extern void enterUnsafeContext();
-  extern void exitUnsafeContext();
-
   getNextToken(); // eat 'unsafe'
 
   if (CurTok == tok_struct) {
@@ -221,10 +222,6 @@ void MainLoop() {
     case tok_identifier:
       {
         // Check if this identifier is a struct type
-        extern std::set<std::string> StructNames;
-        extern std::string IdentifierStr;
-        extern int CurTok;
-        
         if (StructNames.contains(IdentifierStr)) {
           // It's a struct type, need to look ahead to determine what it is
           std::string structName = IdentifierStr;
