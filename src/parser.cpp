@@ -323,6 +323,7 @@ std::unique_ptr<ExprAST> ParseParenExpr() {
 
 // Forward declaration
 static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix();
+static void RecoverAfterExpressionError();
 
 /// identifierexpr
 ///   ::= identifier
@@ -539,8 +540,10 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     if (CurTok == tok_colon) {
       getNextToken(); // consume ':'
       auto Operand = ParsePrimary();
-      if (!Operand)
+      if (!Operand) {
+        RecoverAfterExpressionError();
         return nullptr;
+      }
       return std::make_unique<CastExprAST>(TypeName, std::move(Operand));
     } else {
       // Not a cast, restore state and continue with default handling
@@ -775,6 +778,27 @@ std::unique_ptr<ExprAST> ParseExpression() {
     return nullptr;
 
   return ParseBinOpRHS(0, std::move(LHS));
+}
+
+static void RecoverAfterExpressionError() {
+  constexpr int RecoveryTokens[] = { tok_newline, ';', ')', ']', '}', tok_eof };
+
+  auto isRecoveryToken = [&](int tok) {
+    for (int candidate : RecoveryTokens) {
+      if (tok == candidate)
+        return true;
+    }
+    return false;
+  };
+
+  while (!isRecoveryToken(CurTok)) {
+    if (CurTok == tok_eof)
+      return;
+    getNextToken();
+  }
+
+  if (CurTok == tok_newline || CurTok == ';')
+    getNextToken();
 }
 
 /// prototype
