@@ -330,3 +330,7 @@ void MainLoop() {
     }
   }
 }
+
+#undef IdentifierStr
+#undef StructNames
+#undef CurTok

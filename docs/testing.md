@@ -20,8 +20,9 @@ The primary way to run tests is using the platform-specific test runner:
 ./run_tests.sh -v
 
 # Run specific test or pattern
-./run_tests.sh test_expr      # Runs test_expr.hy
-./run_tests.sh array         # Runs all tests containing "array"
+./run_tests.sh test_expr            # Runs test_expr.hy
+./run_tests.sh array               # Runs all tests containing "array"
+./run_tests.sh multi_unit          # Runs only multi-file directory tests
 
 # Show help
 ./run_tests.sh -h
@@ -81,6 +82,13 @@ The test runner automatically finds all `.hy` files in the `test/` directory:
 - New tests are discovered automatically
 - Tests are run in alphabetical order
 - Tests organized by subdirectories (types/, errors/, structs/, etc.)
+
+**Multi-file directories**
+
+- Any subdirectory under `test/multi_unit` is treated as a single compilation unit.
+- All `.hy` files in that directory are passed to the driver together using `hybrid file1.hy file2.hy -o a.out` semantics.
+- Directories whose name ends with `_fail` (or that contain an `EXPECT_FAIL` file) are expected to fail.
+- These directory-based tests can be run in isolation via `./run_tests.sh multi_unit`.
 
 ### Binary Execution
 

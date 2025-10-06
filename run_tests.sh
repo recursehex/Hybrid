@@ -72,7 +72,7 @@ cleanup_runtime() {
 trap cleanup_runtime EXIT
 
 # Find all test files in test/ directory and subdirectories
-TEST_FILES=$(find test/ -name "*.hy" -type f | sort)
+TEST_FILES=$(find test/ -path 'test/multi_unit' -prune -o -name "*.hy" -type f -print | sort)
 
 if [ -z "$TEST_FILES" ]; then
     echo -e "${RED}No test files found in test/ directory${NC}"
@@ -269,6 +269,68 @@ run_test() {
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
 }
 
+run_multi_unit_tests() {
+    local base_dir="test/multi_unit"
+    if [ ! -d "$base_dir" ]; then
+        return
+    fi
+
+    echo
+    echo -e "${BLUE}Multi-unit Compilation Tests${NC}"
+    echo "-------------------------------"
+
+    for dir in "$base_dir"/*/; do
+        [ -d "$dir" ] || continue
+
+        local test_name=$(basename "$dir")
+        local expect="pass"
+        if [ -f "${dir}/EXPECT_FAIL" ] || [[ "$test_name" == *_fail ]]; then
+            expect="fail"
+        fi
+
+        local cmd_files=()
+        while IFS= read -r -d '' file; do
+            cmd_files+=("$file")
+        done < <(find "$dir" -maxdepth 1 -name "*.hy" -type f -print0 | sort -z)
+
+        if [ ${#cmd_files[@]} -eq 0 ]; then
+            echo -e "${YELLOW}Skipping $test_name (no .hy files)${NC}"
+            continue
+        fi
+
+        local temp_output
+        temp_output=$(mktemp /tmp/hybrid_multi.XXXXXX.out)
+        local output_args=("-o" "$temp_output")
+
+        set +e
+        local output
+        output=$("$HYBRID_EXEC" "${cmd_files[@]}" "${output_args[@]}" 2>&1)
+        local status=$?
+        set -e
+
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+        if { [ "$expect" = "pass" ] && [ $status -eq 0 ]; } || { [ "$expect" = "fail" ] && [ $status -ne 0 ]; }; then
+            PASSED_TESTS=$((PASSED_TESTS + 1))
+            if [ $FAILURES_ONLY -eq 0 ]; then
+                echo -e "${GREEN}✓ PASSED: $test_name${NC}"
+            fi
+        else
+            FAILED_TESTS=$((FAILED_TESTS + 1))
+            echo -e "${RED}✗ FAILED: $test_name${NC}"
+            if [ "$expect" = "pass" ]; then
+                echo -e "${RED}  Expected success but command failed with status $status${NC}"
+            else
+                echo -e "${RED}  Expected failure but command succeeded${NC}"
+            fi
+            echo "--- Output ---"
+            echo "$output"
+            echo "--------------"
+        fi
+
+        rm -f "$temp_output"
+    done
+}
 
 # Parse command line arguments
 # (Variables already initialized at the top of the script)
@@ -325,9 +387,14 @@ done
 if [ -n "$TEST_PATTERN" ]; then
     # Check if it's a category name
     if [ -d "test/$TEST_PATTERN" ]; then
-        # Run all tests in that category
-        TEST_FILES=$(find "test/$TEST_PATTERN" -name "*.hy" -type f | sort)
-        echo "Running all tests in category: $TEST_PATTERN"
+        if [ "$TEST_PATTERN" = "multi_unit" ]; then
+            TEST_FILES=""
+            echo "Running multi-unit manifest tests"
+        else
+            # Run all tests in that category
+            TEST_FILES=$(find "test/$TEST_PATTERN" -name "*.hy" -type f | sort)
+            echo "Running all tests in category: $TEST_PATTERN"
+        fi
     elif [ -f "$TEST_PATTERN" ]; then
         # Specific file with path
         TEST_FILES="$TEST_PATTERN"
@@ -338,7 +405,7 @@ if [ -n "$TEST_PATTERN" ]; then
         echo "Running specific test file: test/$TEST_PATTERN"
     else
         # Pattern matching across all subdirectories
-        TEST_FILES=$(find test/ -name "*$TEST_PATTERN*.hy" -type f | sort)
+        TEST_FILES=$(find test/ -path 'test/multi_unit' -prune -o -name "*$TEST_PATTERN*.hy" -type f -print | sort)
         if [ -z "$TEST_FILES" ]; then
             echo -e "${RED}No test files found matching pattern: $TEST_PATTERN${NC}"
             exit 1
@@ -361,6 +428,8 @@ fi
 for test_file in $TEST_FILES; do
     run_test "$test_file"
 done
+
+run_multi_unit_tests
 
 # Print summary
 echo "==============================="

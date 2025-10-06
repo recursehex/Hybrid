@@ -121,11 +121,20 @@ Run interactive mode:
 
 Run a program:
 ```bash
+# Interpret a single file from stdin
 ./build/hybrid < program.hy
+
+# Compile one or more files (clang-style)
+./build/hybrid module_a.hy module_b.hy -o my_program    # produces a native binary
+./build/hybrid --emit-llvm module.hy -o module.ll       # emit LLVM IR instead
+
+# --emit-llvm is implied when -o ends with .ll/.bc or when you pass -o -
+# Without -o, the driver defaults to writing a native a.out next to the CLI
 
 # Run tests
 ./run_tests.sh
-./run_tests.sh -v       # Verbose mode
+./run_tests.sh multi_unit   # Only the multi-file directory tests
+./run_tests.sh -v           # Verbose mode
 ```
 
 #### Windows
@@ -156,6 +165,7 @@ Comprehensive documentation is available in the `docs/` directory:
 - [Architecture](docs/architecture.md) - Compiler design and internals
 - [LLVM Code Generation](docs/llvm-codegen.md) - How code is generated
 - [Testing](docs/testing.md) - Test suite and writing tests
+- [Multi-Unit Compilation](docs/multi_unit_compilation.md) - Building multiple files together
 
 ## Build System
 

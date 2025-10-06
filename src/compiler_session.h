@@ -43,6 +43,7 @@ struct ParserContext {
   std::set<std::string> structNames;
   int loopNestingDepth = 0;
   int unsafeContextLevel = 0;
+  bool hadError = false;
 
   void reset(bool clearSymbols = true);
   void clearPrecedence();

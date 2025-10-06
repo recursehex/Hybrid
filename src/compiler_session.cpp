@@ -60,6 +60,7 @@ void ParserContext::reset(bool clearSymbols) {
   curTok = 0;
   loopNestingDepth = 0;
   unsafeContextLevel = 0;
+  hadError = false;
   if (clearSymbols)
     structNames.clear();
 }
