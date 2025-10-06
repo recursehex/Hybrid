@@ -514,7 +514,12 @@ char_literal_end:
       LastChar = getchar(); // eat closing '
       return tok_char_literal;
     }
-    // Error case - missing closing quote, but continue parsing
+    std::cerr << "Error: Unterminated character literal\n";
+    while (LastChar != EOF && LastChar != '\n' && LastChar != '\r' && LastChar != '\'')
+      LastChar = getchar();
+    if (LastChar == '\'')
+      LastChar = getchar();
+    return tok_error;
   }
 
   // Check for arithmetic operators and their compound assignments
