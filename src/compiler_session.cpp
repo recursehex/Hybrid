@@ -56,12 +56,16 @@ void LexerContext::unconsumeChar(int ch) {
 
 // ParserContext ----------------------------------------------------------------
 
-void ParserContext::reset() {
+void ParserContext::reset(bool clearSymbols) {
   curTok = 0;
-  binopPrecedence.clear();
-  structNames.clear();
   loopNestingDepth = 0;
   unsafeContextLevel = 0;
+  if (clearSymbols)
+    structNames.clear();
+}
+
+void ParserContext::clearPrecedence() {
+  binopPrecedence.clear();
 }
 
 // CompilerSession --------------------------------------------------------------
@@ -76,13 +80,22 @@ CodegenContext &CompilerSession::codegen() {
   return *codegenState;
 }
 
-void CompilerSession::resetParser() { parserState.reset(); }
+void CompilerSession::resetParser() {
+  parserState.reset();
+  parserState.clearPrecedence();
+}
 
 void CompilerSession::resetAll() {
   lexerState.reset();
   parserState.reset();
+  parserState.clearPrecedence();
   if (codegenState)
     codegenState->reset();
+}
+
+void CompilerSession::beginUnit(bool preserveSymbols) {
+  lexerState.reset();
+  parserState.reset(!preserveSymbols);
 }
 
 // Session stack helpers --------------------------------------------------------

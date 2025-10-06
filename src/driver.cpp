@@ -2,20 +2,21 @@
 #include "toplevel.h"
 #include "ast.h"
 #include "compiler_session.h"
+
 #include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
-int main() {
-  CompilerSession session;
-  session.resetAll();
-  pushCompilerSession(session);
+namespace {
 
-  // Initialize LLVM
-  InitializeModule();
-  // Install standard binary operators.
-  // 1 is lowest precedence.
+void initializeOperatorPrecedence() {
   auto &precedence = currentParser().binopPrecedence;
+  precedence.clear();
   precedence["="] = 2;   // assignment (lowest)
   precedence["+="] = 2;  // compound assignments
   precedence["-="] = 2;
@@ -45,17 +46,65 @@ int main() {
   precedence["*"] = 40;  // multiplication/division/modulo
   precedence["/"] = 40;
   precedence["%"] = 40;  // modulo has same precedence as * and /
+}
 
-  // Prime the first token.
-  fprintf(stderr, "ready> ");
-  getNextToken();
+bool loadSourceFile(const char *path, std::string &outBuffer) {
+  std::ifstream input(path, std::ios::in | std::ios::binary);
+  if (!input)
+    return false;
 
-  // Run the main "interpreter loop" now.
-  MainLoop();
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  outBuffer = contents.str();
+  return true;
+}
 
-  // Print the entire generated module
-  fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
-  getModule()->print(llvm::errs(), nullptr);
+}
+
+int main(int argc, char **argv) {
+  CompilerSession session;
+  session.resetAll();
+  pushCompilerSession(session);
+
+  // Initialize LLVM
+  InitializeModule();
+  initializeOperatorPrecedence();
+
+  if (argc > 1) {
+    SetInteractiveMode(false);
+
+    for (int i = 1; i < argc; ++i) {
+      std::string source;
+      if (!loadSourceFile(argv[i], source)) {
+        fprintf(stderr, "Error: Failed to open source file '%s'\n", argv[i]);
+        popCompilerSession();
+        return 1;
+      }
+
+      session.beginUnit(i > 1);
+      currentLexer().setInputBuffer(source);
+
+      getNextToken();
+      MainLoop();
+    }
+
+    // Emit the full module once all units have been processed
+    fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
+    getModule()->print(llvm::errs(), nullptr);
+  } else {
+    SetInteractiveMode(true);
+
+    // Prime the first token.
+    fprintf(stderr, "ready> ");
+    getNextToken();
+
+    // Run the main "interpreter loop" now.
+    MainLoop();
+
+    // Print the entire generated module
+    fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
+    getModule()->print(llvm::errs(), nullptr);
+  }
 
   popCompilerSession();
 

@@ -11,5 +11,6 @@ void HandleUnsafe();
 void HandleSwitchStatement();
 void HandleAssertStatement();
 void MainLoop();
+void SetInteractiveMode(bool enabled);
 
 #endif // TOPLEVEL_H

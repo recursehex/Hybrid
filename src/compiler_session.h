@@ -44,7 +44,8 @@ struct ParserContext {
   int loopNestingDepth = 0;
   int unsafeContextLevel = 0;
 
-  void reset();
+  void reset(bool clearSymbols = true);
+  void clearPrecedence();
 };
 
 /// CompilerSession groups lexer and parser context for a single compilation
@@ -60,6 +61,7 @@ public:
 
   void resetParser();
   void resetAll();
+  void beginUnit(bool preserveSymbols);
 
 private:
   LexerContext lexerState;

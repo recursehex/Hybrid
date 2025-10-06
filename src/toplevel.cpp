@@ -12,17 +12,23 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
+static bool gInteractiveMode = true;
+
 #define CurTok (currentParser().curTok)
 #define StructNames (currentParser().structNames)
 #define IdentifierStr (currentLexer().identifierStr)
 
+void SetInteractiveMode(bool enabled) {
+  gInteractiveMode = enabled;
+}
+
 void HandleDefinition() {
   if (auto FnAST = ParseDefinition()) {
-    fprintf(stderr, "Parsed function successfully, generating code...\n");
+    if (gInteractiveMode) fprintf(stderr, "Parsed function successfully, generating code...\n");
     if (auto FnIR = FnAST->codegen()) {
-      fprintf(stderr, "Generated function IR:\n");
+      if (gInteractiveMode) fprintf(stderr, "Generated function IR:\n");
       FnIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+      if (gInteractiveMode) fprintf(stderr, "\n");
     } else {
       fprintf(stderr, "Error: Failed to generate IR for function\n");
     }
@@ -33,12 +39,13 @@ void HandleDefinition() {
   }
 }
 
+
 void HandleExtern() {
   if (auto ProtoAST = ParseExtern()) {
     if (auto FnIR = ProtoAST->codegen()) {
-      fprintf(stderr, "Generated extern IR:\n");
+      if (gInteractiveMode) fprintf(stderr, "Generated extern IR:\n");
       FnIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+      if (gInteractiveMode) fprintf(stderr, "\n");
     }
   }
  else {
@@ -51,9 +58,9 @@ void HandleTopLevelExpression() {
   // Evaluate a top-level expression into an anonymous function.
   if (auto FnAST = ParseTopLevelExpr()) {
     if (auto FnIR = FnAST->codegen()) {
-      fprintf(stderr, "Generated top-level expression IR:\n");
+      if (gInteractiveMode) fprintf(stderr, "Generated top-level expression IR:\n");
       FnIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+      if (gInteractiveMode) fprintf(stderr, "\n");
     }
   }
  else {
@@ -65,9 +72,9 @@ void HandleTopLevelExpression() {
 void HandleVariableDeclaration() {
   if (auto VarAST = ParseVariableDeclaration()) {
     if (auto VarIR = VarAST->codegen()) {
-      fprintf(stderr, "Generated variable declaration IR:\n");
+      if (gInteractiveMode) fprintf(stderr, "Generated variable declaration IR:\n");
       VarIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+      if (gInteractiveMode) fprintf(stderr, "\n");
     }
   }
  else {
@@ -90,9 +97,9 @@ void HandleAssertStatement() {
   auto Assert = ParseAssertStatement();
   if (Assert) {
     if (auto AssertIR = Assert->codegen()) {
-      fprintf(stderr, "Generated top-level assert IR:\n");
+      if (gInteractiveMode) fprintf(stderr, "Generated top-level assert IR:\n");
       AssertIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+      if (gInteractiveMode) fprintf(stderr, "\n");
     }
   } else {
     // Skip token for error recovery.
@@ -103,7 +110,7 @@ void HandleAssertStatement() {
 void HandleUseStatement() {
   auto Use = ParseUseStatement();
   if (Use) {
-    fprintf(stderr, "Parsed a use statement: %s\n", Use->getModule().c_str());
+    if (gInteractiveMode) fprintf(stderr, "Parsed a use statement: %s\n", Use->getModule().c_str());
   } else {
     // Skip token for error recovery.
     getNextToken();
@@ -113,9 +120,9 @@ void HandleUseStatement() {
 void HandleStructDefinition() {
   if (auto StructAST = ParseStructDefinition()) {
     if (auto StructType = StructAST->codegen()) {
-      fprintf(stderr, "Generated struct type:\n");
+      if (gInteractiveMode) fprintf(stderr, "Generated struct type:\n");
       StructType->print(llvm::errs());
-      fprintf(stderr, "\n");
+      if (gInteractiveMode) fprintf(stderr, "\n");
     }
   } else {
     // Skip token for error recovery.
@@ -141,11 +148,11 @@ void HandleUnsafe() {
 
 void HandleSwitchStatement() {
   if (auto SwitchAST = ParseSwitchStatement()) {
-    fprintf(stderr, "Parsed switch statement successfully, generating code...\n");
+    if (gInteractiveMode) fprintf(stderr, "Parsed switch statement successfully, generating code...\n");
     if (auto SwitchIR = SwitchAST->codegen()) {
-      fprintf(stderr, "Generated switch statement IR:\n");
+      if (gInteractiveMode) fprintf(stderr, "Generated switch statement IR:\n");
       SwitchIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+      if (gInteractiveMode) fprintf(stderr, "\n");
     } else {
       fprintf(stderr, "Error: Failed to generate IR for switch statement\n");
     }
@@ -160,7 +167,8 @@ void HandleSwitchStatement() {
 /// top ::= definition | external | expression | variabledecl | foreachstmt | usestmt | ';' | '\n'
 void MainLoop() {
   while (true) {
-    fprintf(stderr, "ready> ");
+    if (gInteractiveMode)
+      fprintf(stderr, "ready> ");
     switch (CurTok) {
     case tok_eof:
       return;
@@ -260,9 +268,9 @@ void MainLoop() {
               // Create and codegen the constructor call
               auto Call = std::make_unique<CallExprAST>(structName, std::move(Args));
               if (auto CallIR = Call->codegen()) {
-                fprintf(stderr, "Generated struct instantiation IR:\n");
+                if (gInteractiveMode) fprintf(stderr, "Generated struct instantiation IR:\n");
                 CallIR->print(llvm::errs());
-                fprintf(stderr, "\n");
+                if (gInteractiveMode) fprintf(stderr, "\n");
               } else {
                 fprintf(stderr, "Error: Failed to generate struct instantiation\n");
               }
@@ -287,9 +295,9 @@ void MainLoop() {
                   declInfo.declaredRef = false;
                   auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), varName, std::move(Init));
                   if (auto VarIR = VarDecl->codegen()) {
-                    fprintf(stderr, "Generated variable declaration IR:\n");
-                    VarIR->print(llvm::errs());
-                    fprintf(stderr, "\n");
+                  if (gInteractiveMode) fprintf(stderr, "Generated variable declaration IR:\n");
+                  VarIR->print(llvm::errs());
+                  if (gInteractiveMode) fprintf(stderr, "\n");
                   }
                 }
               } else {
