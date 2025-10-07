@@ -79,20 +79,30 @@ if [ -z "$TEST_FILES" ]; then
     exit 1
 fi
 
+MULTI_UNIT_TEST_COUNT=0
+if [ -d "test/multi_unit" ]; then
+    while IFS= read -r -d '' multi_dir; do
+        if find "$multi_dir" -maxdepth 1 -name "*.hy" -type f | grep -q .; then
+            MULTI_UNIT_TEST_COUNT=$((MULTI_UNIT_TEST_COUNT + 1))
+        fi
+    done < <(find test/multi_unit -mindepth 1 -maxdepth 1 -type d -print0)
+fi
+
 # Count tests by category
 echo "Test categories:"
 for dir in test/*/; do
     if [ -d "$dir" ]; then
         category=$(basename "$dir")
-        count=$(find "$dir" -name "*.hy" -type f | wc -l)
+        if [ "$category" = "multi_unit" ]; then
+            count=$MULTI_UNIT_TEST_COUNT
+        else
+            count=$(find "$dir" -name "*.hy" -type f | wc -l | tr -d '[:space:]')
+        fi
         if [ $count -gt 0 ]; then
             echo "  - $category: $count tests"
         fi
     fi
 done
-echo
-
-echo "Found $(echo "$TEST_FILES" | wc -l) total test files"
 echo
 
 # Function to run a single test
@@ -418,6 +428,14 @@ if [ -n "$TEST_PATTERN" ]; then
     fi
     echo
 fi
+
+SINGLE_TEST_COUNT=0
+if [ -n "$TEST_FILES" ]; then
+    SINGLE_TEST_COUNT=$(printf "%s\n" "$TEST_FILES" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+fi
+TOTAL_DISCOVERED_TESTS=$((SINGLE_TEST_COUNT + MULTI_UNIT_TEST_COUNT))
+echo "Found $TOTAL_DISCOVERED_TESTS total tests to run"
+echo
 
 # Run tests
 if [ $VERBOSE_MODE -eq 1 ]; then

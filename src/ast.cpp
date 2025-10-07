@@ -23,6 +23,7 @@
 #include <climits>
 #include <ranges>
 #include <string_view>
+#include <optional>
 
 #define CG currentCodegen()
 #define TheContext (CG.llvmContext)
@@ -357,39 +358,237 @@ llvm::Value *BoolExprAST::codegen() {
 llvm::Value *NullExprAST::codegen() {
   // Create a null pointer for string type (16-bit char*)
   llvm::Type *StringType = llvm::PointerType::get(*TheContext, 0);
+  setTypeName("string");
   return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(StringType));
+}
+
+static llvm::Value *emitUTF16StringLiteral(const std::string &value) {
+  std::vector<llvm::Constant *> charValues;
+  charValues.reserve(value.size() + 1);
+
+  // TODO: Proper UTF-8 to UTF-16 conversion should be implemented here
+  // For now, treat each byte as a separate 16-bit character.
+  for (unsigned char c : value) {
+    charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext),
+                                               static_cast<uint16_t>(c)));
+  }
+
+  // Append null terminator
+  charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 0));
+
+  auto *arrayType = llvm::ArrayType::get(llvm::Type::getInt16Ty(*TheContext), charValues.size());
+  auto *stringArray = llvm::ConstantArray::get(arrayType, charValues);
+
+  auto *global = new llvm::GlobalVariable(*TheModule, arrayType, true,
+                                          llvm::GlobalValue::PrivateLinkage,
+                                          stringArray, "str");
+
+  llvm::Value *zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+  return Builder->CreateInBoundsGEP(arrayType, global, {zero, zero}, "strptr");
 }
 
 // Generate code for string literals
 llvm::Value *StringExprAST::codegen() {
-  // Create a global 16-bit Unicode character array constant
   setTypeName("string");
-  
-  const std::string &str = getValue();
-  std::vector<llvm::Constant*> CharValues;
-  
-  // TODO: Proper UTF-8 to UTF-16 conversion should be implemented here
-  // For now, we'll treat each byte as a separate 16-bit character
-  // This allows for proper Unicode support when the lexer is updated
-  for (unsigned char c : str) {
-    CharValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 
-                                                static_cast<uint16_t>(c)));
+  return emitUTF16StringLiteral(getValue());
+}
+
+static llvm::FunctionCallee getConcatStringsFunction() {
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  llvm::Type *stringPtrPtrTy = llvm::PointerType::get(*TheContext, 0);
+  llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::FunctionType *fnType = llvm::FunctionType::get(stringPtrTy,
+                                                       {stringPtrPtrTy, int32Ty},
+                                                       false);
+  return TheModule->getOrInsertFunction("__hybrid_concat_strings", fnType);
+}
+
+static llvm::FunctionCallee getIntToStringFunction() {
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+  llvm::Type *boolTy = llvm::Type::getInt1Ty(*TheContext);
+  llvm::FunctionType *fnType = llvm::FunctionType::get(stringPtrTy,
+                                                       {int64Ty, boolTy},
+                                                       false);
+  return TheModule->getOrInsertFunction("__hybrid_string_from_int64", fnType);
+}
+
+static llvm::FunctionCallee getDoubleToStringFunction() {
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  llvm::Type *doubleTy = llvm::Type::getDoubleTy(*TheContext);
+  llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::Type *boolTy = llvm::Type::getInt1Ty(*TheContext);
+  llvm::FunctionType *fnType = llvm::FunctionType::get(stringPtrTy,
+                                                       {doubleTy, int32Ty, boolTy},
+                                                       false);
+  return TheModule->getOrInsertFunction("__hybrid_string_from_double", fnType);
+}
+
+static llvm::FunctionCallee getCharToStringFunction() {
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::FunctionType *fnType = llvm::FunctionType::get(stringPtrTy, {int32Ty}, false);
+  return TheModule->getOrInsertFunction("__hybrid_string_from_char32", fnType);
+}
+
+static llvm::Value *ensureStringPointer(llvm::Value *value) {
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  if (value->getType() == stringPtrTy)
+    return value;
+  if (value->getType()->isPointerTy())
+    return Builder->CreateBitCast(value, stringPtrTy, "str.cast");
+  return value;
+}
+
+static llvm::Value *convertValueToString(llvm::Value *value,
+                                         const std::string &typeName,
+                                         const std::optional<std::string> &formatSpec) {
+  const bool isFloatType = value->getType()->isFloatingPointTy() ||
+                           typeName == "float" || typeName == "double";
+
+  if (formatSpec.has_value() && !isFloatType) {
+    return LogErrorV("Format specifiers are only supported for floating point interpolation");
   }
-  
-  // Add null terminator
-  CharValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 0));
-  
-  // Create array type and constant
-  llvm::ArrayType *ArrayType = llvm::ArrayType::get(llvm::Type::getInt16Ty(*TheContext), CharValues.size());
-  llvm::Constant *StringArray = llvm::ConstantArray::get(ArrayType, CharValues);
-  
-  // Create global variable
-  llvm::GlobalVariable *GlobalStr = new llvm::GlobalVariable(
-    *TheModule, ArrayType, true, llvm::GlobalValue::PrivateLinkage, StringArray, "str");
-  
-  // Return pointer to the first element
-  llvm::Value *Zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
-  return Builder->CreateInBoundsGEP(ArrayType, GlobalStr, {Zero, Zero}, "strptr");
+
+  if (typeName == "string") {
+    return ensureStringPointer(value);
+  }
+
+  if (typeName == "bool" || value->getType()->isIntegerTy(1)) {
+    llvm::Value *cond = value;
+    if (!cond->getType()->isIntegerTy(1)) {
+      cond = Builder->CreateICmpNE(
+          cond,
+          llvm::ConstantInt::get(cond->getType(), 0),
+          "boolcmp");
+    }
+    llvm::Value *trueStr = emitUTF16StringLiteral("true");
+    llvm::Value *falseStr = emitUTF16StringLiteral("false");
+    return Builder->CreateSelect(cond, trueStr, falseStr, "boolstr");
+  }
+
+  if (typeName == "char" || typeName == "schar" || typeName == "lchar") {
+    llvm::Type *targetType = llvm::Type::getInt32Ty(*TheContext);
+    if (!value->getType()->isIntegerTy(32)) {
+      if (typeName == "schar")
+        value = Builder->CreateSExtOrTrunc(value, targetType, "charext");
+      else
+        value = Builder->CreateZExtOrTrunc(value, targetType, "charext");
+    }
+    return Builder->CreateCall(getCharToStringFunction(), {value}, "charstr");
+  }
+
+  if (value->getType()->isFloatingPointTy()) {
+    int precision = 0;
+    bool hasPrecision = false;
+    if (formatSpec.has_value()) {
+      try {
+        precision = std::stoi(*formatSpec);
+        hasPrecision = true;
+      } catch (...) {
+        return LogErrorV("Invalid floating-point format specifier in interpolated string");
+      }
+    }
+
+    if (!value->getType()->isDoubleTy()) {
+      value = Builder->CreateFPExt(value, llvm::Type::getDoubleTy(*TheContext), "fpexttmp");
+    }
+
+    llvm::Value *precisionVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), precision);
+    llvm::Value *hasPrecisionVal = llvm::ConstantInt::get(llvm::Type::getInt1Ty(*TheContext), hasPrecision ? 1 : 0);
+    return Builder->CreateCall(getDoubleToStringFunction(),
+                               {value, precisionVal, hasPrecisionVal},
+                               "floatstr");
+  }
+
+  if (value->getType()->isIntegerTy()) {
+    bool isUnsigned = isUnsignedType(typeName);
+    if (!isUnsigned && !isSignedType(typeName) && typeName != "") {
+      // Unrecognized integer type name; default to signed.
+      isUnsigned = false;
+    }
+
+    unsigned bitWidth = value->getType()->getIntegerBitWidth();
+    llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+    if (bitWidth != 64) {
+      if (isUnsigned)
+        value = Builder->CreateZExtOrTrunc(value, int64Ty, "zexttmp");
+      else
+        value = Builder->CreateSExtOrTrunc(value, int64Ty, "sexttmp");
+    }
+
+    llvm::Value *isUnsignedVal = llvm::ConstantInt::get(llvm::Type::getInt1Ty(*TheContext), isUnsigned ? 1 : 0);
+    return Builder->CreateCall(getIntToStringFunction(), {value, isUnsignedVal}, "intstr");
+  }
+
+  if (typeName == "string")
+    return ensureStringPointer(value);
+
+  return LogErrorV("Unsupported expression type in string interpolation");
+}
+
+llvm::Value *InterpolatedStringExprAST::codegen() {
+  std::vector<llvm::Value *> segmentValues;
+  segmentValues.reserve(Segments.size());
+
+  for (const auto &segment : Segments) {
+    if (segment.isLiteral()) {
+      segmentValues.push_back(emitUTF16StringLiteral(segment.getLiteral()));
+      continue;
+    }
+
+    ExprAST *expr = segment.getExpression();
+    if (!expr)
+      return LogErrorV("Invalid expression in interpolated string segment");
+
+    llvm::Value *exprValue = expr->codegen();
+    if (!exprValue)
+      return nullptr;
+
+    llvm::Value *asString = convertValueToString(exprValue, expr->getTypeName(), segment.getFormatSpec());
+    if (!asString)
+      return nullptr;
+
+    segmentValues.push_back(asString);
+  }
+
+  if (segmentValues.empty()) {
+    setTypeName("string");
+    return emitUTF16StringLiteral("");
+  }
+
+  if (segmentValues.size() == 1) {
+    llvm::Value *single = ensureStringPointer(segmentValues.front());
+    setTypeName("string");
+    return single;
+  }
+
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  unsigned count = static_cast<unsigned>(segmentValues.size());
+  llvm::ArrayType *arrayTy = llvm::ArrayType::get(stringPtrTy, count);
+  llvm::AllocaInst *arrayAlloca = Builder->CreateAlloca(arrayTy, nullptr, "interpSegments");
+
+  for (unsigned i = 0; i < count; ++i) {
+    llvm::Value *indices[] = {
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0),
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), i)};
+    llvm::Value *elementPtr = Builder->CreateInBoundsGEP(arrayTy, arrayAlloca, indices, "interp.segptr");
+    llvm::Value *segmentPtr = ensureStringPointer(segmentValues[i]);
+    Builder->CreateStore(segmentPtr, elementPtr);
+  }
+
+  llvm::Value *arrayPtr = Builder->CreateInBoundsGEP(
+      arrayTy, arrayAlloca,
+      {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0)},
+      "interp.base");
+
+  llvm::FunctionCallee concatFunc = getConcatStringsFunction();
+  llvm::Value *countVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), count);
+  llvm::Value *result = Builder->CreateCall(concatFunc, {arrayPtr, countVal}, "interp.result");
+
+  setTypeName("string");
+  return result;
 }
 
 // Generate code for character literals

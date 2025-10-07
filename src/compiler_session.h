@@ -23,6 +23,13 @@ struct LexerContext {
   uint32_t charLiteral = 0;
   int lastChar = ' ';
 
+  bool inInterpolatedString = false;
+  bool inInterpolatedExpression = false;
+  bool pendingInterpolatedExprStart = false;
+  bool pendingInterpolatedStringEnd = false;
+  bool pendingInterpolatedLiteralSegment = false;
+  std::string currentInterpolatedLiteral;
+
   // Optional in-memory source buffer used when the caller wants to feed the
   // lexer from a pre-loaded string rather than stdin.
   std::string bufferedInput;

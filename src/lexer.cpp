@@ -152,14 +152,155 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
 
 } // namespace
 
+static bool prepareInterpolatedLiteralSegment(LexerContext &lex, int &LastChar) {
+  std::string segment;
+
+  while (true) {
+    if (LastChar == EOF) {
+      std::cerr << "Error: Unterminated interpolated string literal\n";
+      lex.inInterpolatedString = false;
+      return false;
+    }
+
+    if (LastChar == '`') {
+      LastChar = lex.consumeChar();
+      lex.currentInterpolatedLiteral = std::move(segment);
+      lex.pendingInterpolatedExprStart = true;
+      lex.pendingInterpolatedStringEnd = false;
+      lex.inInterpolatedString = true;
+      return true;
+    }
+
+    if (LastChar == '"') {
+      LastChar = lex.consumeChar();
+      lex.currentInterpolatedLiteral = std::move(segment);
+      lex.pendingInterpolatedExprStart = false;
+      lex.pendingInterpolatedStringEnd = true;
+      lex.inInterpolatedString = false;
+      return true;
+    }
+
+    if (LastChar == '\\') {
+      LastChar = lex.consumeChar();
+      switch (LastChar) {
+        case 'n': segment += '\n'; break;
+        case 't': segment += '\t'; break;
+        case 'r': segment += '\r'; break;
+        case '\\': segment += '\\'; break;
+        case '"': segment += '"'; break;
+        case '`': segment += '`'; break;
+        case 'u': {
+          uint32_t unicode = 0;
+          bool valid = true;
+          for (int i = 0; i < 4; i++) {
+            LastChar = lex.consumeChar();
+            if (LastChar >= '0' && LastChar <= '9') {
+              unicode = (unicode << 4) | (LastChar - '0');
+            } else if (LastChar >= 'a' && LastChar <= 'f') {
+              unicode = (unicode << 4) | (LastChar - 'a' + 10);
+            } else if (LastChar >= 'A' && LastChar <= 'F') {
+              unicode = (unicode << 4) | (LastChar - 'A' + 10);
+            } else {
+              valid = false;
+              break;
+            }
+          }
+          if (!valid) {
+            segment += '?';
+            break;
+          }
+
+          if (unicode <= 0x7F) {
+            segment += static_cast<char>(unicode);
+          } else if (unicode <= 0x7FF) {
+            segment += static_cast<char>(0xC0 | (unicode >> 6));
+            segment += static_cast<char>(0x80 | (unicode & 0x3F));
+          } else {
+            segment += static_cast<char>(0xE0 | (unicode >> 12));
+            segment += static_cast<char>(0x80 | ((unicode >> 6) & 0x3F));
+            segment += static_cast<char>(0x80 | (unicode & 0x3F));
+          }
+          break;
+        }
+        default:
+          segment += static_cast<char>(LastChar);
+          break;
+      }
+      LastChar = lex.consumeChar();
+      continue;
+    }
+
+    segment += static_cast<char>(LastChar);
+    LastChar = lex.consumeChar();
+  }
+}
+
 /// gettok - Return the next token from standard input.
 int gettok() {
   LexerContext &lex = currentLexer();
   int &LastChar = lex.lastChar;
 
+  // Pending interpolated string literal segment
+  if (lex.pendingInterpolatedLiteralSegment) {
+    lex.pendingInterpolatedLiteralSegment = false;
+    lex.stringLiteral = lex.currentInterpolatedLiteral;
+    return tok_interpolated_string_segment;
+  }
+
+  // Pending interpolated expression start
+  if (lex.pendingInterpolatedExprStart) {
+    lex.pendingInterpolatedExprStart = false;
+    lex.inInterpolatedExpression = true;
+    return tok_interpolated_expr_start;
+  }
+
+  // Pending interpolated string end
+  if (lex.pendingInterpolatedStringEnd) {
+    lex.pendingInterpolatedStringEnd = false;
+    lex.stringLiteral = lex.currentInterpolatedLiteral;
+    return tok_interpolated_string_end;
+  }
+
+  // Handle end of interpolated expression
+  if (lex.inInterpolatedString && lex.inInterpolatedExpression && LastChar == '`') {
+    LastChar = lex.consumeChar();
+    lex.inInterpolatedExpression = false;
+    if (!prepareInterpolatedLiteralSegment(lex, LastChar)) {
+      return tok_error;
+    }
+    lex.pendingInterpolatedLiteralSegment = true;
+    return tok_interpolated_expr_end;
+  }
+
   // Skip any whitespace except newlines.
   while (isspace(LastChar) && LastChar != '\n' && LastChar != '\r')
     LastChar = lex.consumeChar();
+
+  if (lex.inInterpolatedString && !lex.inInterpolatedExpression) {
+    if (!prepareInterpolatedLiteralSegment(lex, LastChar)) {
+      return tok_error;
+    }
+    lex.stringLiteral = lex.currentInterpolatedLiteral;
+    return tok_interpolated_string_segment;
+  }
+
+  if (!lex.inInterpolatedString && LastChar == '$') {
+    int NextChar = lex.consumeChar();
+    if (NextChar == '"') {
+      lex.inInterpolatedString = true;
+      lex.inInterpolatedExpression = false;
+      lex.pendingInterpolatedExprStart = false;
+      lex.pendingInterpolatedStringEnd = false;
+      lex.pendingInterpolatedLiteralSegment = false;
+      LastChar = lex.consumeChar();
+      if (!prepareInterpolatedLiteralSegment(lex, LastChar)) {
+        return tok_error;
+      }
+      lex.stringLiteral = lex.currentInterpolatedLiteral;
+      return tok_interpolated_string_start;
+    }
+    lex.unconsumeChar(NextChar);
+  }
 
   if (isalpha(LastChar) || LastChar == '_') { // identifier: [a-zA-Z_][a-zA-Z0-9_]*
     lex.identifierStr = LastChar;

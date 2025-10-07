@@ -20,6 +20,10 @@ set /a FAILED_TESTS=0
 set VERBOSE_MODE=0
 set FAILURES_ONLY=0
 set TEST_PATTERN=
+set SINGLE_TESTS_ENABLED=1
+set FILTER_MODE=all
+set FILTER_PATH=
+set FILTER_MATCH=
 
 echo %BLUE%Hybrid Compiler Test Suite%NC%
 echo ===============================
@@ -66,21 +70,37 @@ if %errorlevel% equ 0 (
     if errorlevel 1 set RUNTIME_LIB=
 )
 
+:: Count multi-unit test manifests
+set /a MULTI_UNIT_TEST_COUNT=0
+if exist "test\multi_unit" (
+    for /d %%m in ("test\multi_unit\*") do (
+        set has_multi=0
+        set "multi_dir=%%~fm"
+        if exist "!multi_dir!" (
+            for %%f in ("!multi_dir!\*.hy") do (
+                if exist "%%~ff" set has_multi=1
+            )
+        )
+        if !has_multi! equ 1 set /a MULTI_UNIT_TEST_COUNT+=1
+    )
+)
+
 :: Count tests by category
 echo Test categories:
 for /d %%d in (test\*) do (
-    set count=0
-    for %%f in (%%d\*.hy) do set /a count+=1
+    set "category=%%~nd"
+    if /i "!category!"=="multi_unit" (
+        set count=%MULTI_UNIT_TEST_COUNT%
+    ) else (
+        set /a count=0
+        for /r "%%d" %%f in (*.hy) do (
+            set /a count+=1
+        )
+    )
     if !count! gtr 0 (
-        echo   - %%~nd: !count! tests
+        echo   - !category!: !count! tests
     )
 )
-echo.
-
-:: Count total test files
-set /a file_count=0
-for /r test %%f in (*.hy) do set /a file_count+=1
-echo Found %file_count% total test files
 echo.
 
 :: Parse command line arguments
@@ -134,14 +154,118 @@ exit /b 0
 
 :: Filter tests if pattern provided
 if not "%TEST_PATTERN%"=="" (
-    if exist "test\%TEST_PATTERN%" (
-        echo Running all tests in category: %TEST_PATTERN%
+    if exist "test\%TEST_PATTERN%\." (
+        if /i "%TEST_PATTERN%"=="multi_unit" (
+            set SINGLE_TESTS_ENABLED=0
+            set FILTER_MODE=none
+            echo Running multi-unit manifest tests
+        ) else (
+            set FILTER_MODE=category
+            set FILTER_PATH=test\%TEST_PATTERN%
+            echo Running all tests in category: %TEST_PATTERN%
+        )
     ) else (
-        echo Running tests matching pattern: %TEST_PATTERN%
+        if exist "%TEST_PATTERN%" (
+            set FILTER_MODE=single_path
+            set FILTER_PATH=%TEST_PATTERN%
+            echo Running specific test file: %TEST_PATTERN%
+        ) else (
+            if exist "test\%TEST_PATTERN%" (
+                set FILTER_MODE=single_path_root
+                set FILTER_PATH=test\%TEST_PATTERN%
+                echo Running specific test file: test\%TEST_PATTERN%
+            ) else (
+                set FILTER_MODE=pattern
+                set FILTER_MATCH=%TEST_PATTERN%
+                echo Running tests matching pattern: %TEST_PATTERN%
+            )
+        )
     )
     if %VERBOSE_MODE%==1 echo ^(verbose mode enabled^)
     echo.
 )
+
+:: Prepare list of single-file tests to run
+set "TEST_LIST_FILE=%TEMP%\hybrid_tests_%RANDOM%.lst"
+if exist "%TEST_LIST_FILE%" del "%TEST_LIST_FILE%" >nul 2>&1
+set /a SINGLE_TEST_COUNT=0
+
+if %SINGLE_TESTS_ENABLED%==1 (
+    if /i "%FILTER_MODE%"=="category" (
+        for /r "%FILTER_PATH%" %%f in (*.hy) do (
+            set "file=%%~ff"
+            set "no_multi=!file:\multi_unit\=!"
+            if "!no_multi!"=="!file!" (
+                >>"%TEST_LIST_FILE%" echo(!file!
+                set /a SINGLE_TEST_COUNT+=1
+            )
+        )
+    ) else (
+        if /i "%FILTER_MODE%"=="single_path" (
+            set "normalized=!FILTER_PATH:/=\!"
+            for %%s in ("!normalized!") do (
+                if exist "%%~fs" (
+                    >>"%TEST_LIST_FILE%" echo(%%~fs
+                    set /a SINGLE_TEST_COUNT+=1
+                )
+            )
+        ) else (
+            if /i "%FILTER_MODE%"=="single_path_root" (
+                set "normalized=!FILTER_PATH:/=\!"
+                for %%s in ("!normalized!") do (
+                    if exist "%%~fs" (
+                        >>"%TEST_LIST_FILE%" echo(%%~fs
+                        set /a SINGLE_TEST_COUNT+=1
+                    )
+                )
+            ) else (
+                if /i "%FILTER_MODE%"=="pattern" (
+                    set "pattern=!FILTER_MATCH!"
+                    for /r "test" %%f in (*.hy) do (
+                        set "file=%%~ff"
+                        set "no_multi=!file:\multi_unit\=!"
+                        if "!no_multi!"=="!file!" (
+                            set include=0
+                            echo %%~nf | findstr /C:"!pattern!" >nul
+                            if !errorlevel! equ 0 set include=1
+                            if !include! equ 0 (
+                                echo !file! | findstr /C:"!pattern!" >nul
+                                if !errorlevel! equ 0 set include=1
+                            )
+                            if !include! equ 1 (
+                                >>"%TEST_LIST_FILE%" echo(!file!
+                                set /a SINGLE_TEST_COUNT+=1
+                            )
+                        )
+                    )
+                ) else (
+                    if /i "%FILTER_MODE%"=="none" (
+                        rem Multi-unit only, no single-file tests collected
+                    ) else (
+                        for /r "test" %%f in (*.hy) do (
+                            set "file=%%~ff"
+                            set "no_multi=!file:\multi_unit\=!"
+                            if "!no_multi!"=="!file!" (
+                                >>"%TEST_LIST_FILE%" echo(!file!
+                                set /a SINGLE_TEST_COUNT+=1
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+)
+
+if %SINGLE_TESTS_ENABLED%==1 if /i "%FILTER_MODE%"=="pattern" if %SINGLE_TEST_COUNT% equ 0 (
+    if exist "%TEST_LIST_FILE%" del "%TEST_LIST_FILE%" >nul 2>&1
+    echo %RED%No test files found matching pattern: %TEST_PATTERN%%NC%
+    exit /b 1
+)
+
+set /a TOTAL_DISCOVERED_TESTS=SINGLE_TEST_COUNT+MULTI_UNIT_TEST_COUNT
+echo Found %TOTAL_DISCOVERED_TESTS% total tests to run
+echo.
 
 :: Run tests
 if %VERBOSE_MODE%==1 (
@@ -149,28 +273,18 @@ if %VERBOSE_MODE%==1 (
     echo.
 )
 
-:: Process all test files
-for /r test %%f in (*.hy) do (
-    set test_file=%%f
-    set test_name=%%~nf
-    set should_run=0
-
-    :: Check if test matches pattern
-    if "%TEST_PATTERN%"=="" (
-        set should_run=1
-    ) else (
-        echo !test_name! | findstr /i "%TEST_PATTERN%" >nul
-        if !errorlevel! equ 0 set should_run=1
-
-        :: Also check directory name
-        echo %%~dpf | findstr /i "%TEST_PATTERN%" >nul
-        if !errorlevel! equ 0 set should_run=1
-    )
-
-    if !should_run!==1 (
-        call :run_test "!test_file!" "!test_name!"
+:: Run single-file tests from list
+if %SINGLE_TEST_COUNT% gtr 0 (
+    for /f "usebackq delims=" %%f in ("%TEST_LIST_FILE%") do (
+        call :run_test "%%f" "%%~nf"
     )
 )
+
+:: Run multi-unit manifest tests
+call :run_multi_unit_tests
+
+:: Cleanup collected test list
+if exist "%TEST_LIST_FILE%" del "%TEST_LIST_FILE%" >nul 2>&1
 
 :: Cleanup runtime library
 if not "%RUNTIME_LIB%"=="" (
@@ -185,6 +299,10 @@ echo Total tests:  %TOTAL_TESTS%
 echo Passed:       %GREEN%%PASSED_TESTS%%NC%
 echo Failed:       %RED%%FAILED_TESTS%%NC%
 
+if %FAILURES_ONLY% equ 1 if %FAILED_TESTS% equ 0 (
+    echo %GREEN%(No failures shown - all tests passed)%NC%
+)
+
 if %FAILED_TESTS% gtr 0 (
     echo %RED%Some tests failed!%NC%
     echo.
@@ -195,6 +313,75 @@ if %FAILED_TESTS% gtr 0 (
     echo %GREEN%All tests passed!%NC%
     exit /b 0
 )
+
+:: Run multi-unit compilation tests
+:run_multi_unit_tests
+if %MULTI_UNIT_TEST_COUNT% leq 0 goto :eof
+
+echo.
+echo %BLUE%Multi-unit Compilation Tests%NC%
+echo -------------------------------
+
+for /d %%d in ("test\multi_unit\*") do (
+    set "multi_dir=%%~fd"
+    if exist "!multi_dir!" (
+        set "multi_name=%%~nd"
+        set "multi_expect=pass"
+        if exist "!multi_dir!\EXPECT_FAIL" set "multi_expect=fail"
+        if /i "!multi_name:~-5!"=="_fail" set "multi_expect=fail"
+
+        set "multi_files="
+        set /a multi_file_count=0
+        for %%f in ("!multi_dir!\*.hy") do (
+            if exist "%%~ff" (
+                set "multi_files=!multi_files! "%%~ff""
+                set /a multi_file_count+=1
+            )
+        )
+
+        if !multi_file_count! equ 0 (
+            if %FAILURES_ONLY% equ 0 (
+                echo %YELLOW%Skipping !multi_name! ^(no .hy files^)%NC%
+            )
+        ) else (
+            set "multi_temp=%TEMP%\hybrid_multi_%RANDOM%"
+            set "multi_output=!multi_temp!.out"
+            set "multi_stdout=!multi_temp!.log"
+            cmd /c ""%HYBRID_EXEC%"!multi_files! -o "!multi_output!"" > "!multi_stdout!" 2>&1
+            set multi_status=!errorlevel!
+
+            set /a TOTAL_TESTS+=1
+            set passed=0
+            if /i "!multi_expect!"=="pass" (
+                if !multi_status! equ 0 set passed=1
+            ) else (
+                if not !multi_status! equ 0 set passed=1
+            )
+
+            if !passed! equ 1 (
+                set /a PASSED_TESTS+=1
+                if %FAILURES_ONLY% equ 0 (
+                    echo %GREEN%✓ PASSED: !multi_name!%NC%
+                )
+            ) else (
+                set /a FAILED_TESTS+=1
+                echo %RED%✗ FAILED: !multi_name!%NC%
+                if /i "!multi_expect!"=="pass" (
+                    echo %RED%  Expected success but command failed with status !multi_status!%NC%
+                ) else (
+                    echo %RED%  Expected failure but command succeeded%NC%
+                )
+                echo --- Output ---
+                type "!multi_stdout!"
+                echo --------------
+            )
+
+            if exist "!multi_output!" del "!multi_output!" >nul 2>&1
+            if exist "!multi_stdout!" del "!multi_stdout!" >nul 2>&1
+        )
+    )
+)
+goto :eof
 
 :: Function to run a single test
 :run_test

@@ -367,6 +367,60 @@ public:
   const std::string &getValue() const { return Val; }
 };
 
+/// InterpolatedStringExprAST - Expression class for interpolated strings.
+class InterpolatedStringExprAST : public ExprAST {
+public:
+  struct Segment {
+    enum class Kind { Literal, Expression };
+
+    Kind kind = Kind::Literal;
+    std::string literalValue;
+    std::unique_ptr<ExprAST> expressionValue;
+    std::optional<std::string> formatSpec;
+
+    static Segment makeLiteral(std::string text) {
+      Segment seg;
+      seg.kind = Kind::Literal;
+      seg.literalValue = std::move(text);
+      return seg;
+    }
+
+    static Segment makeExpression(std::unique_ptr<ExprAST> expr,
+                                  std::optional<std::string> fmt) {
+      Segment seg;
+      seg.kind = Kind::Expression;
+      seg.expressionValue = std::move(expr);
+      seg.formatSpec = std::move(fmt);
+    return seg;
+    }
+
+    bool isLiteral() const { return kind == Kind::Literal; }
+    bool isExpression() const { return kind == Kind::Expression; }
+
+    const std::string &getLiteral() const { return literalValue; }
+    void appendLiteral(const std::string &more) { literalValue += more; }
+
+    ExprAST *getExpression() const { return expressionValue.get(); }
+    std::unique_ptr<ExprAST> takeExpression() {
+      return std::move(expressionValue);
+    }
+
+    const std::optional<std::string> &getFormatSpec() const {
+      return formatSpec;
+    }
+  };
+
+private:
+  std::vector<Segment> Segments;
+
+public:
+  explicit InterpolatedStringExprAST(std::vector<Segment> Segments)
+      : Segments(std::move(Segments)) {}
+
+  llvm::Value *codegen() override;
+  const std::vector<Segment> &getSegments() const { return Segments; }
+};
+
 /// CharExprAST - Expression class for character literals like 'a'.
 class CharExprAST : public ExprAST {
   uint32_t Val;

@@ -106,6 +106,25 @@ false     // Boolean false
 ""                  // Empty string
 ```
 
+### String Interpolation
+
+Hybrid supports interpolation for building strings with embedded expressions. Use the `$"..."` prefix and wrap expressions in backticks:
+
+```cs
+string name = "World"
+int count = 3
+float pi = 3.14159
+
+string greeting = $"Hello, `name`!"               // "Hello, World!"
+string summary = $"Name: `name`, Count: `count`"  // multiple substitutions
+string math = $"Next: `count + 1`"                // arbitrary expressions
+string precise = $"Pi: `pi:2`"                    // format specifier for floats
+```
+
+- Expressions inside backticks can be any valid expression.
+- Format specifiers are optional and currently supported for floating-point values using `:digits` to control precision (e.g., `pi:3`).
+- To emit a literal backtick inside an interpolated string, escape it with `\``.
+
 ### Character Literals
 
 ```c

@@ -18,6 +18,12 @@ void LexerContext::reset() {
   stringLiteral.clear();
   charLiteral = 0;
   lastChar = ' ';
+  inInterpolatedString = false;
+  inInterpolatedExpression = false;
+  pendingInterpolatedExprStart = false;
+  pendingInterpolatedStringEnd = false;
+  pendingInterpolatedLiteralSegment = false;
+  currentInterpolatedLiteral.clear();
   bufferedInput.clear();
   bufferedCursor = 0;
   useBufferedInput = false;

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <optional>
 #include <utility>
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Function.h"
@@ -19,6 +20,9 @@
 #define LexedNumericLiteral (currentLexer().numericLiteral)
 #define StringVal (currentLexer().stringLiteral)
 #define CharVal (currentLexer().charLiteral)
+
+static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr();
+static void RecoverAfterExpressionError();
 
 static unsigned parsePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -224,6 +228,100 @@ std::unique_ptr<PrototypeAST> LogErrorP(const char *Str) {
 std::unique_ptr<StmtAST> LogErrorS(const char *Str) {
   LogError(Str);
   return nullptr;
+}
+
+static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
+  std::vector<InterpolatedStringExprAST::Segment> segments;
+  segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
+  bool hasExpression = false;
+
+  getNextToken(); // consume start token
+
+  while (true) {
+    if (CurTok == tok_interpolated_expr_start) {
+      getNextToken(); // consume expression start
+      auto Expr = ParseExpression();
+      if (!Expr) {
+        RecoverAfterExpressionError();
+        return nullptr;
+      }
+
+      std::optional<std::string> formatSpec;
+      if (CurTok == tok_colon) {
+        getNextToken(); // consume ':'
+        if (CurTok != tok_number || !LexedNumericLiteral.isInteger()) {
+          return LogError("Expected integer format specifier in interpolated string expression");
+        }
+        formatSpec = LexedNumericLiteral.getSpelling();
+        getNextToken(); // consume format specifier token
+      }
+
+      if (CurTok != tok_interpolated_expr_end) {
+        return LogError("Expected ` to close interpolated expression");
+      }
+
+      segments.push_back(InterpolatedStringExprAST::Segment::makeExpression(std::move(Expr), std::move(formatSpec)));
+      hasExpression = true;
+
+      getNextToken(); // consume expr end
+
+      if (CurTok == tok_interpolated_string_segment) {
+        segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
+        getNextToken(); // consume literal segment token
+        continue;
+      }
+
+      if (CurTok == tok_interpolated_string_end) {
+        segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
+        getNextToken(); // consume end token
+        break;
+      }
+
+      if (CurTok == tok_interpolated_expr_start) {
+        segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(""));
+        continue;
+      }
+
+      return LogError("Expected interpolated string segment or end after expression");
+    }
+
+    if (CurTok == tok_interpolated_string_end) {
+      segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
+      getNextToken(); // consume end token
+      break;
+    }
+
+    // No more interpolation-specific tokens; finish.
+    break;
+  }
+
+  // Merge consecutive literal segments
+  std::vector<InterpolatedStringExprAST::Segment> merged;
+  merged.reserve(segments.size());
+
+  for (auto &segment : segments) {
+    if (segment.isLiteral()) {
+      if (!merged.empty() && merged.back().isLiteral()) {
+        merged.back().appendLiteral(segment.getLiteral());
+      } else {
+        merged.push_back(InterpolatedStringExprAST::Segment::makeLiteral(segment.getLiteral()));
+      }
+    } else {
+      merged.push_back(std::move(segment));
+    }
+  }
+
+  if (!hasExpression) {
+    std::string combined;
+    combined.reserve(64);
+    for (const auto &segment : merged) {
+      if (segment.isLiteral())
+        combined += segment.getLiteral();
+    }
+    return std::make_unique<StringExprAST>(combined);
+  }
+
+  return std::make_unique<InterpolatedStringExprAST>(std::move(merged));
 }
 
 /// InferExprType - Infer the type of an expression at parse time
@@ -576,6 +674,8 @@ std::unique_ptr<ExprAST> ParsePrimary() {
       getNextToken(); // consume the string literal
       return std::move(Result);
     }
+  case tok_interpolated_string_start:
+    return ParseInterpolatedStringExpr();
   case tok_char_literal:
     {
       auto Result = std::make_unique<CharExprAST>(CharVal);

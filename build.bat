@@ -1,110 +1,214 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: Build script for Hybrid on Windows
-:: Usage: build.bat [options]
-::   -d, --debug    Build in debug mode (default: release)
-::   -c, --clean    Clean build directory before building
-::   -t, --test     Run tests after building
-::   -h, --help     Display this help message
+:: Hybrid Compiler Build Script for Windows
+:: Mirrors the behaviour of build.sh
 
+:: ANSI colors (supported on modern Windows terminals)
+set BLUE=[34m
+set GREEN=[32m
+set YELLOW=[33m
+set RED=[31m
+set NC=[0m
+
+:: Defaults
 set BUILD_TYPE=Release
+set BUILD_DIR=build
 set CLEAN_BUILD=0
 set RUN_TESTS=0
+set VERBOSE_BUILD=0
 
-:: Parse command line arguments
-:parse_args
-if "%1"=="" goto end_parse
-if "%1"=="-d" goto set_debug
-if "%1"=="--debug" goto set_debug
-if "%1"=="-c" goto set_clean
-if "%1"=="--clean" goto set_clean
-if "%1"=="-t" goto set_test
-if "%1"=="--test" goto set_test
-if "%1"=="-h" goto show_help
-if "%1"=="--help" goto show_help
-goto invalid_arg
-
-:set_debug
-set BUILD_TYPE=Debug
-shift
-goto parse_args
-
-:set_clean
-set CLEAN_BUILD=1
-shift
-goto parse_args
-
-:set_test
-set RUN_TESTS=1
-shift
-goto parse_args
-
+:: ---------------------------------------------------------------------------
+:: Helpers
+:: ---------------------------------------------------------------------------
 :show_help
-echo Build script for Hybrid on Windows
-echo Usage: build.bat [options]
-echo   -d, --debug    Build in debug mode (default: release)
-echo   -c, --clean    Clean build directory before building
-echo   -t, --test     Run tests after building
-echo   -h, --help     Display this help message
+echo Hybrid Compiler Build Script
+echo Usage: build.bat [OPTIONS]
+echo.
+echo Options:
+echo   -d, --debug       Build in Debug mode ^(default: Release^)
+echo   -c, --clean       Remove the build directory before configuring
+echo   -t, --test        Run the test suite after building
+echo   -v, --verbose     Enable verbose build output
+echo   -h, --help        Show this help message
+echo.
+echo Examples:
+echo   build.bat              ^# Build in Release mode
+echo   build.bat -d           ^# Build in Debug mode
+echo   build.bat -c -t        ^# Clean build and run tests
+echo   build.bat -d -v        ^# Debug build with verbose output
 exit /b 0
 
-:invalid_arg
-echo Invalid argument: %1
-echo Use -h or --help for usage information
-exit /b 1
-
-:end_parse
-
-:: Set build preset based on build type
-if "%BUILD_TYPE%"=="Debug" (
-    set PRESET=debug
+:: ---------------------------------------------------------------------------
+:: Argument parsing
+:: ---------------------------------------------------------------------------
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="-d" (
+    set BUILD_TYPE=Debug
+) else if /i "%~1"=="--debug" (
+    set BUILD_TYPE=Debug
+) else if /i "%~1"=="-c" (
+    set CLEAN_BUILD=1
+) else if /i "%~1"=="--clean" (
+    set CLEAN_BUILD=1
+) else if /i "%~1"=="-t" (
+    set RUN_TESTS=1
+) else if /i "%~1"=="--test" (
+    set RUN_TESTS=1
+) else if /i "%~1"=="-v" (
+    set VERBOSE_BUILD=1
+) else if /i "%~1"=="--verbose" (
+    set VERBOSE_BUILD=1
+) else if /i "%~1"=="-h" (
+    call :show_help
+) else if /i "%~1"=="--help" (
+    call :show_help
 ) else (
-    set PRESET=release
+    echo %RED%Unknown option: %~1%NC%
+    echo Use -h or --help for usage information.
+    exit /b 1
+)
+shift
+goto parse_args
+:args_done
+
+echo %BLUE%Hybrid Compiler Build System%NC%
+echo ==============================
+echo Build Type: %BUILD_TYPE%
+echo Build Directory: %BUILD_DIR%
+echo.
+
+:: ---------------------------------------------------------------------------
+:: Locate LLVM
+:: ---------------------------------------------------------------------------
+set "PRESET_LLVM_DIR=%LLVM_DIR%"
+set "LLVM_DIR="
+where llvm-config >nul 2>nul
+if %errorlevel%==0 (
+    for /f "usebackq delims=" %%i in (`llvm-config --prefix 2^>nul`) do (
+        if not defined LLVM_DIR set "LLVM_DIR=%%~fi\lib\cmake\llvm"
+    )
+)
+if not defined LLVM_DIR (
+    if exist "%ProgramFiles%\LLVM\lib\cmake\llvm" (
+        set "LLVM_DIR=%ProgramFiles%\LLVM\lib\cmake\llvm"
+    ) else if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\LLVM\lib\cmake\llvm" (
+        set "LLVM_DIR=%ProgramFiles(x86)%\LLVM\lib\cmake\llvm"
+    )
+)
+if not defined LLVM_DIR if defined PRESET_LLVM_DIR (
+    set "LLVM_DIR=%PRESET_LLVM_DIR%"
 )
 
-echo Building Hybrid in %BUILD_TYPE% mode...
+if not defined LLVM_DIR (
+    echo %RED%Error: LLVM not found!%NC%
+    echo Install LLVM and ensure llvm-config or LLVM_DIR is available.
+    echo Suggested installation: https://releases.llvm.org/download.html
+    exit /b 1
+)
 
-:: Clean if requested
+echo Found LLVM at: %LLVM_DIR%
+
+:: ---------------------------------------------------------------------------
+:: Locate clang/clang++
+:: ---------------------------------------------------------------------------
+set "CLANG_BIN="
+set "CLANGXX_BIN="
+if exist "%ProgramFiles%\LLVM\bin\clang.exe" (
+    set "CLANG_BIN=%ProgramFiles%\LLVM\bin\clang.exe"
+    set "CLANGXX_BIN=%ProgramFiles%\LLVM\bin\clang++.exe"
+) else (
+    where clang >nul 2>nul
+    if %errorlevel%==0 (
+        for /f "usebackq delims=" %%i in (`where clang 2^>nul`) do (
+            if not defined CLANG_BIN set "CLANG_BIN=%%~fi"
+        )
+        for /f "usebackq delims=" %%i in (`where clang++ 2^>nul`) do (
+            if not defined CLANGXX_BIN set "CLANGXX_BIN=%%~fi"
+        )
+    )
+)
+if defined CLANG_BIN (
+    echo Using C compiler: %CLANG_BIN%
+)
+if defined CLANGXX_BIN (
+    echo Using C++ compiler: %CLANGXX_BIN%
+)
+echo.
+
+:: ---------------------------------------------------------------------------
+:: Clean
+:: ---------------------------------------------------------------------------
 if %CLEAN_BUILD%==1 (
-    echo Cleaning build directory...
-    if exist build rd /s /q build
+    echo %YELLOW%Cleaning build directory...%NC%
+    if exist "%BUILD_DIR%" rd /s /q "%BUILD_DIR%"
+    echo.
 )
 
-:: Check for Ninja
+:: ---------------------------------------------------------------------------
+:: Configure
+:: ---------------------------------------------------------------------------
+set "GENERATOR_ARG="
 where ninja >nul 2>nul
-if errorlevel 1 (
-    echo Warning: Ninja not found. Using default generator.
-    echo For better performance, install Ninja: https://ninja-build.org/
+if %errorlevel%==0 (
+    set "GENERATOR_ARG=-G Ninja"
 )
 
-:: Configure with CMake
-echo Configuring with CMake preset: %PRESET%
-cmake --preset=%PRESET%
+echo %YELLOW%Configuring CMake...%NC%
+set "CONFIGURE_CMD=cmake -B \"%BUILD_DIR%\" %GENERATOR_ARG% -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DLLVM_DIR=\"%LLVM_DIR%\" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+if defined CLANG_BIN (
+    set "CONFIGURE_CMD=%CONFIGURE_CMD% -DCMAKE_C_COMPILER=\"%CLANG_BIN%\""
+)
+if defined CLANGXX_BIN (
+    set "CONFIGURE_CMD=%CONFIGURE_CMD% -DCMAKE_CXX_COMPILER=\"%CLANGXX_BIN%\""
+)
+
+call %CONFIGURE_CMD%
 if errorlevel 1 (
-    echo CMake configuration failed!
+    echo %RED%CMake configuration failed!%NC%
     exit /b 1
 )
+echo.
 
+:: ---------------------------------------------------------------------------
 :: Build
-echo Building...
-cmake --build --preset=%PRESET%
+:: ---------------------------------------------------------------------------
+set "JOBS=%NUMBER_OF_PROCESSORS%"
+if not defined JOBS set JOBS=1
+
+echo %YELLOW%Building...%NC%
+if %VERBOSE_BUILD%==1 (
+    cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS% --verbose
+) else (
+    cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS%
+)
 if errorlevel 1 (
-    echo Build failed!
+    echo %RED%Build failed!%NC%
     exit /b 1
 )
 
-echo Build successful!
+echo.
+echo %GREEN%Build completed successfully!%NC%
+if exist "%BUILD_DIR%\hybrid.exe" (
+    echo Executable: %BUILD_DIR%\hybrid.exe
+) else (
+    echo Executable: %BUILD_DIR%\hybrid
+)
 
-:: Run tests if requested
+:: ---------------------------------------------------------------------------
+:: Run tests
+:: ---------------------------------------------------------------------------
 if %RUN_TESTS%==1 (
-    echo Running tests...
+    echo.
+    echo %YELLOW%Running tests...%NC%
     call run_tests.bat
     if errorlevel 1 (
-        echo Some tests failed!
+        echo %RED%Tests failed!%NC%
         exit /b 1
     )
 )
 
-echo Done!
+echo.
+echo %GREEN%Done!%NC%
 exit /b 0

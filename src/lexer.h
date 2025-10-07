@@ -125,8 +125,15 @@ enum Token {
   // reference type
   tok_ref = -77,              // ref
 
+  // interpolated string tokens
+  tok_interpolated_string_start = -78,    // $"
+  tok_interpolated_string_segment = -79,
+  tok_interpolated_string_end = -80,      // "
+  tok_interpolated_expr_start = -81,      // `
+  tok_interpolated_expr_end = -82,        // `
+
   // error token
-  tok_error = -78             // error during lexing
+  tok_error = -83             // error during lexing
 };
 
 // gettok - Return the next token from standard input.
