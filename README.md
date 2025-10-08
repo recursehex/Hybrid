@@ -247,6 +247,13 @@ Hybrid/
     - `ref type`
 - Assert statement
     - `assert num == 42`
+- String interpolation
+    - $"Hello, \`name\`!"
+- Nullable types
+    - `type?`
+- Nullity operators
+    - `?.`
+    - `?[]`
 
 **Planned Features**
 - Mulitidimensional arrays
@@ -273,11 +280,7 @@ Hybrid/
     - `free`
 - 128 bit base 10 floating point type
     - `decimal`
-- Nullable types
-    - `type?`
 - Nullity operators
-    - `?.`
-    - `?[]`
     - `??`
     - `??=`
 - Smart pointers
@@ -286,8 +289,6 @@ Hybrid/
     - `weak`
 - Tuples
     - `(type1, type2) var`
-- String interpolation
-    - $"Hello, \`name\`!"
 - Generics
     - `<type>`
 - Type checking
