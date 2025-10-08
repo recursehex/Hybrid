@@ -254,6 +254,8 @@ Hybrid/
 - Nullity operators
     - `?.`
     - `?[]`
+    - `??`
+    - `??=`
 
 **Planned Features**
 - Mulitidimensional arrays
@@ -280,9 +282,6 @@ Hybrid/
     - `free`
 - 128 bit base 10 floating point type
     - `decimal`
-- Nullity operators
-    - `??`
-    - `??=`
 - Smart pointers
     - `unique`
     - `shared`

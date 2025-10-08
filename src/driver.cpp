@@ -35,11 +35,13 @@ void initializeOperatorPrecedence() {
   precedence["*="] = 2;
   precedence["/="] = 2;
   precedence["%="] = 2;
+  precedence["\?\?="] = 2;
   precedence["&="] = 2;  // bitwise compound assignments
   precedence["|="] = 2;
   precedence["^="] = 2;
   precedence["<<="] = 2;
   precedence[">>="] = 2;
+  precedence["\?\?"] = 3;  // null-coalescing
   precedence["||"] = 5;  // logical OR
   precedence["&&"] = 6;  // logical AND
   precedence["|"] = 7;   // bitwise OR

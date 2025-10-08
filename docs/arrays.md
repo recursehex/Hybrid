@@ -105,7 +105,7 @@ string[]? maybeLines = readFile() // Array reference itself may be null
 - `T?[]` allows `null` per element while keeping the array reference non-nullable.
 - `T[]?` allows the array reference to be `null` while preserving non-nullable elements.
 - Indexing a nullable array (`T[]?`) without first proving it non-null emits `Cannot index nullable array without null-safe operator`.
-- Null-safe array indexing syntax (`?[`) is not yet implemented, guard the array reference manually before indexing.
+- The null-safe element access operator (`?[]`) lets you safely index nullable array references. The operator returns `null` when the receiver is `null`; otherwise it yields the element (which may itself be nullable, depending on the element type).
 
 ## Arrays in Functions
 

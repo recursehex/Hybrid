@@ -267,6 +267,10 @@ int GetTokPrecedence() {
     return BinopPrecedence["<<="];
   } else if (CurTok == tok_right_shift_eq) {
     return BinopPrecedence[">>="];
+  } else if (CurTok == tok_null_coalescing) {
+    return BinopPrecedence["\?\?"];
+  } else if (CurTok == tok_null_coalescing_assign) {
+    return BinopPrecedence["\?\?="];
   } else if (CurTok == tok_if) {
     return 4; // Ternary operator precedence (higher than assignment, lower than logical OR)
   }
@@ -645,6 +649,20 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
   return Result;
 }
 
+std::unique_ptr<ExprAST> ParseNullSafeArrayIndex(std::unique_ptr<ExprAST> Array) {
+  getNextToken(); // eat '?['
+
+  auto Index = ParseExpression();
+  if (!Index)
+    return nullptr;
+
+  if (CurTok != ']')
+    return LogError("Expected ']' after null-safe array index");
+  getNextToken(); // eat ']'
+
+  return std::make_unique<NullSafeArrayIndexExprAST>(std::move(Array), std::move(Index));
+}
+
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
   // If the token is not a unary operator, it must be a primary expression.
   if (CurTok != '-' && CurTok != tok_not && CurTok != tok_inc && CurTok != tok_dec &&
@@ -836,6 +854,10 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       BinOp = "<<=";
     } else if (CurTok == tok_right_shift_eq) {
       BinOp = ">>=";
+    } else if (CurTok == tok_null_coalescing) {
+      BinOp = "\?\?";
+    } else if (CurTok == tok_null_coalescing_assign) {
+      BinOp = "\?\?=";
     } else if (isascii(CurTok)) {
       BinOp = std::string(1, (char)CurTok);
     } else {
@@ -868,14 +890,14 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     // Also check compound assignments on the LHS
     if ((BinOp == "=" || BinOp == "+=" || BinOp == "-=" || BinOp == "*=" ||
          BinOp == "/=" || BinOp == "%=" || BinOp == "&=" || BinOp == "|=" ||
-         BinOp == "^=" || BinOp == "<<=" || BinOp == ">>=")) {
+         BinOp == "^=" || BinOp == "<<=" || BinOp == ">>=" || BinOp == "\?\?=")) {
       if (BinaryExprAST *RHSBinary = dynamic_cast<BinaryExprAST*>(RHS.get())) {
         if (RHSBinary->getOp() == "=" || RHSBinary->getOp() == "+=" ||
             RHSBinary->getOp() == "-=" || RHSBinary->getOp() == "*=" ||
             RHSBinary->getOp() == "/=" || RHSBinary->getOp() == "%=" ||
             RHSBinary->getOp() == "&=" || RHSBinary->getOp() == "|=" ||
             RHSBinary->getOp() == "^=" || RHSBinary->getOp() == "<<=" ||
-            RHSBinary->getOp() == ">>=") {
+            RHSBinary->getOp() == ">>=" || RHSBinary->getOp() == "\?\?=") {
           return LogError("Chained assignment is not allowed - variables must be assigned one at a time");
         }
       }
@@ -897,6 +919,10 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
   while (true) {
     if (CurTok == '[') {
       LHS = ParseArrayIndex(std::move(LHS));
+      if (!LHS)
+        return nullptr;
+    } else if (CurTok == tok_null_array_access) {
+      LHS = ParseNullSafeArrayIndex(std::move(LHS));
       if (!LHS)
         return nullptr;
     } else if (CurTok == tok_inc || CurTok == tok_dec) {

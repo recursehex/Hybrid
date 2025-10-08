@@ -735,8 +735,24 @@ string? city = maybeUser?.address?.city
 
 - Each `?.` short-circuits if its receiver is `null`, propagating `null` to the final result.
 - Attempting to access a nullable value with `.` causes `Cannot access nullable type 'T?' without null-safe operator`.
-- The null-safe operator returns a nullable result; combine with explicit null checks or helper functions to obtain non-nullable values.
-- Null-safe array indexing (`?[`) not yet implemented, guard nullable arrays before using `[]`.
+- The null-safe member access operator (`?.`) returns a nullable result; combine with explicit null checks or helper functions to obtain non-nullable values.
+- The null-safe element access operator (`?[]`) safely dereferences nullable array references, returning `null` if the array itself is `null`.
+
+### Null Coalescing Operators
+
+Use `??` to provide a fallback when a nullable expression evaluates to `null`, and `??=` to assign a fallback when the receiver is `null`.
+
+```cs
+string? name = findUser()
+string display = name ?? "Unknown"  // if name is null, use fallback
+
+string? cached = null
+cached ??= computeName()   // assign only when cached is null
+```
+
+- `??` short-circuits: the right-hand side is evaluated only when the left operand is `null`.
+- `??=` evaluates and assigns the right-hand expression only when the left operand is `null`, and yields the resulting value.
+- Both operators preserve nullability: if either operand is nullable, the result is nullable.
 
 ## LLVM Code Generation
 

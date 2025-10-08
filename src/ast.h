@@ -466,6 +466,22 @@ public:
   ExprAST *getIndex() const { return Index.get(); }
 };
 
+/// NullSafeArrayIndexExprAST - Expression class for null-safe array indexing like arr?[0].
+class NullSafeArrayIndexExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Array;
+  std::unique_ptr<ExprAST> Index;
+
+public:
+  NullSafeArrayIndexExprAST(std::unique_ptr<ExprAST> Array,
+                            std::unique_ptr<ExprAST> Index)
+      : Array(std::move(Array)), Index(std::move(Index)) {}
+
+  llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
+  ExprAST *getArray() const { return Array.get(); }
+  ExprAST *getIndex() const { return Index.get(); }
+};
+
 /// VariableExprAST - Expression class for referencing a variable, like "var".
 class VariableExprAST : public ExprAST {
   std::string Name;
@@ -492,6 +508,10 @@ public:
   [[nodiscard]] const std::string &getOp() const { return Op; }
   ExprAST *getLHS() const { return LHS.get(); }
   ExprAST *getRHS() const { return RHS.get(); }
+
+private:
+  llvm::Value *codegenNullCoalescing(llvm::Value *lhsValue);
+  llvm::Value *codegenNullCoalescingAssign(llvm::Value *lhsValue);
 };
 
 /// UnaryExprAST - Expression class for a unary operator.

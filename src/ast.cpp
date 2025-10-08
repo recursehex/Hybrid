@@ -197,6 +197,14 @@ static bool expressionIsNullable(const ExprAST *expr) {
     return false;
   if (exprIsNullLiteral(expr))
     return true;
+  if (const auto *Binary = dynamic_cast<const BinaryExprAST *>(expr)) {
+    const std::string &Op = Binary->getOp();
+    if (Op == "\?\?" || Op == "\?\?=") {
+      const ExprAST *rhsExpr = unwrapRefExpr(Binary->getRHS());
+      if (!expressionIsNullable(rhsExpr))
+        return false;
+    }
+  }
   std::string typeName = expr->getTypeName();
   if (typeName.empty())
     return false;
@@ -798,10 +806,33 @@ llvm::Value *ArrayExprAST::codegen() {
   
   // Get the array size
   size_t ArraySize = getElements().size();
-  
-  // Allocate space for the array on the stack
-  llvm::AllocaInst *ArrayAlloca = Builder->CreateAlloca(
-      ElemType, llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize)), "arraytmp");
+  bool useGlobalStorage = false;
+  llvm::Function *CurrentFunction = nullptr;
+  if (auto *CurrentBB = Builder->GetInsertBlock()) {
+    CurrentFunction = CurrentBB->getParent();
+    if (CurrentFunction && CurrentFunction->getName() == "__anon_var_decl") {
+      useGlobalStorage = true;
+    }
+  }
+
+  llvm::Value *ArrayDataPtr = nullptr;
+  llvm::ArrayType *ArrayMemType = llvm::ArrayType::get(ElemType, ArraySize);
+
+  static unsigned GlobalArrayLiteralCounter = 0;
+
+  if (useGlobalStorage) {
+    std::string GlobalName = "__array_literal_" + std::to_string(GlobalArrayLiteralCounter++);
+    llvm::GlobalVariable *GlobalArray = new llvm::GlobalVariable(
+        *TheModule, ArrayMemType, false, llvm::GlobalValue::PrivateLinkage,
+        llvm::ConstantAggregateZero::get(ArrayMemType), GlobalName);
+
+    llvm::Value *Zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+    ArrayDataPtr = Builder->CreateInBoundsGEP(
+        ArrayMemType, GlobalArray, {Zero, Zero}, GlobalName + ".ptr");
+  } else {
+    ArrayDataPtr = Builder->CreateAlloca(
+        ElemType, llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize)), "arraytmp");
+  }
   
   // Store each element
   for (size_t i = 0; i < ArraySize; ++i) {
@@ -814,7 +845,7 @@ llvm::Value *ArrayExprAST::codegen() {
     
     // Calculate the address of the i-th element
     llvm::Value *Idx = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, i));
-    llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayAlloca, Idx, "elemptr");
+    llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayDataPtr, Idx, "elemptr");
     
     // Store the element
     Builder->CreateStore(ElemVal, ElemPtr);
@@ -826,7 +857,9 @@ llvm::Value *ArrayExprAST::codegen() {
   
   // Store the pointer (field 0)
   llvm::Value *PtrField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 0, "ptrField");
-  Builder->CreateStore(ArrayAlloca, PtrField);
+  llvm::Value *ArrayPtrForStruct =
+      Builder->CreateBitCast(ArrayDataPtr, llvm::PointerType::get(*TheContext, 0), "array.ptrcast");
+  Builder->CreateStore(ArrayPtrForStruct, PtrField);
   
   // Store the size (field 1)
   llvm::Value *SizeField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 1, "sizeField");
@@ -1087,6 +1120,153 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
 }
 
+llvm::Value *NullSafeArrayIndexExprAST::codegen() {
+  llvm::Value *ArrayVal = getArray()->codegen();
+  if (!ArrayVal)
+    return nullptr;
+
+  llvm::Value *IndexVal = getIndex()->codegen();
+  if (!IndexVal)
+    return nullptr;
+
+  if (!IndexVal->getType()->isIntegerTy(32)) {
+    if (IndexVal->getType()->isIntegerTy()) {
+      IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "nsarray.idxtmp");
+    } else if (IndexVal->getType()->isFloatingPointTy()) {
+      IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "nsarray.idxtmp");
+    } else {
+      return LogErrorV("Array index must be an integer");
+    }
+  }
+
+  std::string arrayTypeName = getArray()->getTypeName();
+  ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
+  if (!arrayDesc.isArray) {
+    return LogErrorV("Null-safe array indexing requires an array value");
+  }
+  if (!arrayDesc.isNullable) {
+    return LogErrorV("Null-safe array indexing requires nullable array type");
+  }
+
+  llvm::Value *ArrayPtr = nullptr;
+  llvm::Value *ArraySize = nullptr;
+  if (ArrayVal->getType()->isStructTy()) {
+    ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "nsarray.ptr");
+    ArraySize = Builder->CreateExtractValue(ArrayVal, 1, "nsarray.size");
+  } else if (ArrayVal->getType()->isPointerTy()) {
+    ArrayPtr = ArrayVal;
+  } else {
+    return LogErrorV("Null-safe array indexing requires array storage");
+  }
+
+  if (!ArrayPtr->getType()->isPointerTy())
+    return LogErrorV("Null-safe array indexing requires pointer-compatible storage");
+
+  bool elementAllowsNull = arrayDesc.elementNullable;
+  std::string elemTypeStr;
+  if (!arrayTypeName.empty()) {
+    std::string sanitized = stripNullableAnnotations(arrayTypeName);
+    if (sanitized.size() > 2 && sanitized.substr(sanitized.size() - 2) == "[]") {
+      elemTypeStr = sanitized.substr(0, sanitized.size() - 2);
+    }
+  }
+
+  if (elemTypeStr.empty()) {
+    if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
+      if (const TypeInfo *info = lookupTypeInfo(VarExpr->getName())) {
+        if (info->isArray && info->typeName.size() > 2) {
+          elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
+          elementAllowsNull = elementAllowsNull || info->elementNullable;
+        }
+      }
+    }
+  }
+
+  if (elemTypeStr.empty())
+    elemTypeStr = "int";
+
+  llvm::Type *ElemType = getTypeFromString(elemTypeStr);
+  if (!ElemType)
+    return LogErrorV("Unknown element type in array");
+
+  if (!ElemType->isPointerTy())
+    return LogErrorV("Null-safe array indexing is only supported for reference-type elements");
+
+  llvm::PointerType *ArrayPtrType = llvm::cast<llvm::PointerType>(ArrayPtr->getType());
+  llvm::Value *NullPtr = llvm::ConstantPointerNull::get(ArrayPtrType);
+  llvm::Value *IsNull = Builder->CreateICmpEQ(ArrayPtr, NullPtr, "nsarray.isnull");
+
+  llvm::Function *Func = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *NullBB = llvm::BasicBlock::Create(*TheContext, "nsarray.null", Func);
+  llvm::BasicBlock *NotNullBB = llvm::BasicBlock::Create(*TheContext, "nsarray.notnull", Func);
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "nsarray.merge", Func);
+
+  Builder->CreateCondBr(IsNull, NullBB, NotNullBB);
+
+  // Not-null branch
+  Builder->SetInsertPoint(NotNullBB);
+
+  if (ArraySize) {
+    if (auto *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
+      if (ConstIndex->getSExtValue() < 0)
+        return LogErrorV("Array index cannot be negative");
+      if (auto *ConstSize = llvm::dyn_cast<llvm::ConstantInt>(ArraySize)) {
+        if (ConstIndex->getSExtValue() >= ConstSize->getSExtValue())
+          return LogErrorV("Array index out of bounds");
+      }
+    }
+  }
+
+  llvm::BasicBlock *ValueBB = NotNullBB;
+  if (ArraySize) {
+    llvm::BasicBlock *BoundsErrorBB = llvm::BasicBlock::Create(*TheContext, "nsarray.bounds_error", Func);
+    ValueBB = llvm::BasicBlock::Create(*TheContext, "nsarray.value", Func);
+
+    llvm::Value *IsNegative = Builder->CreateICmpSLT(IndexVal,
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0), "nsarray.isneg");
+    llvm::Value *IsOutOfBounds = Builder->CreateICmpSGE(IndexVal, ArraySize, "nsarray.isoob");
+    llvm::Value *IsBadIndex = Builder->CreateOr(IsNegative, IsOutOfBounds, "nsarray.badindex");
+    Builder->CreateCondBr(IsBadIndex, BoundsErrorBB, ValueBB);
+
+    Builder->SetInsertPoint(BoundsErrorBB);
+    llvm::Function *AbortFunc = TheModule->getFunction("abort");
+    if (!AbortFunc) {
+      llvm::FunctionType *AbortType = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+      AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage,
+                                         "abort", TheModule.get());
+    }
+    Builder->CreateCall(AbortFunc);
+    Builder->CreateUnreachable();
+
+    Builder->SetInsertPoint(ValueBB);
+  }
+
+  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "nsarray.elemptr");
+  llvm::Value *LoadedValue = Builder->CreateLoad(ElemType, ElemPtr, "nsarray.elem");
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NotNullEnd = Builder->GetInsertBlock();
+
+  // Null branch
+  Builder->SetInsertPoint(NullBB);
+  llvm::Value *NullValue = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ElemType));
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NullEnd = Builder->GetInsertBlock();
+
+  // Merge
+  Builder->SetInsertPoint(MergeBB);
+  llvm::PHINode *Phi = Builder->CreatePHI(ElemType, 2, "nsarray.maybe");
+  Phi->addIncoming(LoadedValue, NotNullEnd);
+  Phi->addIncoming(NullValue, NullEnd);
+
+  std::string resultTypeName = elemTypeStr;
+  if (elementAllowsNull)
+    resultTypeName = ensureOuterNullable(resultTypeName);
+  resultTypeName = ensureOuterNullable(resultTypeName);
+  setTypeName(resultTypeName);
+
+  return Phi;
+}
+
 // Variable pointer code generation for increment/decrement
 llvm::Value *VariableExprAST::codegen_ptr() {
   llvm::Value *V = NamedValues[getName()];
@@ -1218,6 +1398,141 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
   Builder->SetInsertPoint(SafeBB);
 
   return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
+}
+
+llvm::Value *NullSafeArrayIndexExprAST::codegen_ptr() {
+  llvm::Value *ArrayVal = getArray()->codegen();
+  if (!ArrayVal)
+    return nullptr;
+
+  llvm::Value *IndexVal = getIndex()->codegen();
+  if (!IndexVal)
+    return nullptr;
+
+  if (!IndexVal->getType()->isIntegerTy(32)) {
+    if (IndexVal->getType()->isIntegerTy()) {
+      IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "nsarray.idxtmp");
+    } else if (IndexVal->getType()->isFloatingPointTy()) {
+      IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "nsarray.idxtmp");
+    } else {
+      return LogErrorV("Array index must be an integer");
+    }
+  }
+
+  std::string arrayTypeName = getArray()->getTypeName();
+  ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
+  if (!arrayDesc.isArray) {
+    return LogErrorV("Null-safe array indexing requires an array value");
+  }
+  if (!arrayDesc.isNullable) {
+    return LogErrorV("Null-safe array indexing requires nullable array type");
+  }
+
+  llvm::Value *ArrayPtr = nullptr;
+  llvm::Value *ArraySize = nullptr;
+  if (ArrayVal->getType()->isStructTy()) {
+    ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "nsarray.ptr");
+    ArraySize = Builder->CreateExtractValue(ArrayVal, 1, "nsarray.size");
+  } else if (ArrayVal->getType()->isPointerTy()) {
+    ArrayPtr = ArrayVal;
+  } else {
+    return LogErrorV("Null-safe array indexing requires array storage");
+  }
+
+  if (!ArrayPtr->getType()->isPointerTy())
+    return LogErrorV("Null-safe array indexing requires pointer-compatible storage");
+
+  std::string elemTypeStr;
+  if (!arrayTypeName.empty()) {
+    std::string sanitized = stripNullableAnnotations(arrayTypeName);
+    if (sanitized.size() > 2 && sanitized.substr(sanitized.size() - 2) == "[]") {
+      elemTypeStr = sanitized.substr(0, sanitized.size() - 2);
+    }
+  }
+
+  if (elemTypeStr.empty()) {
+    if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
+      if (const TypeInfo *info = lookupTypeInfo(VarExpr->getName())) {
+        if (info->isArray && info->typeName.size() > 2) {
+          elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
+        }
+      }
+    }
+  }
+
+  if (elemTypeStr.empty())
+    elemTypeStr = "int";
+
+  llvm::Type *ElemType = getTypeFromString(elemTypeStr);
+  if (!ElemType)
+    return LogErrorV("Unknown element type in array");
+
+  llvm::PointerType *ArrayPtrType = llvm::cast<llvm::PointerType>(ArrayPtr->getType());
+  llvm::Value *NullPtr = llvm::ConstantPointerNull::get(ArrayPtrType);
+  llvm::Value *IsNull = Builder->CreateICmpEQ(ArrayPtr, NullPtr, "nsarray.isnull");
+
+  llvm::Function *Func = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *NullBB = llvm::BasicBlock::Create(*TheContext, "nsarray.null", Func);
+  llvm::BasicBlock *NotNullBB = llvm::BasicBlock::Create(*TheContext, "nsarray.notnull", Func);
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "nsarray.merge", Func);
+
+  Builder->CreateCondBr(IsNull, NullBB, NotNullBB);
+
+  // Not-null branch
+  Builder->SetInsertPoint(NotNullBB);
+
+  if (ArraySize) {
+    if (auto *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
+      if (ConstIndex->getSExtValue() < 0)
+        return LogErrorV("Array index cannot be negative");
+      if (auto *ConstSize = llvm::dyn_cast<llvm::ConstantInt>(ArraySize)) {
+        if (ConstIndex->getSExtValue() >= ConstSize->getSExtValue())
+          return LogErrorV("Array index out of bounds");
+      }
+    }
+  }
+
+  llvm::BasicBlock *ValueBB = NotNullBB;
+  if (ArraySize) {
+    llvm::BasicBlock *BoundsErrorBB = llvm::BasicBlock::Create(*TheContext, "nsarray.bounds_error", Func);
+    ValueBB = llvm::BasicBlock::Create(*TheContext, "nsarray.value", Func);
+
+    llvm::Value *IsNegative = Builder->CreateICmpSLT(IndexVal,
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0), "nsarray.isneg");
+    llvm::Value *IsOutOfBounds = Builder->CreateICmpSGE(IndexVal, ArraySize, "nsarray.isoob");
+    llvm::Value *IsBadIndex = Builder->CreateOr(IsNegative, IsOutOfBounds, "nsarray.badindex");
+    Builder->CreateCondBr(IsBadIndex, BoundsErrorBB, ValueBB);
+
+    Builder->SetInsertPoint(BoundsErrorBB);
+    llvm::Function *AbortFunc = TheModule->getFunction("abort");
+    if (!AbortFunc) {
+      llvm::FunctionType *AbortType = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+      AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage,
+                                         "abort", TheModule.get());
+    }
+    Builder->CreateCall(AbortFunc);
+    Builder->CreateUnreachable();
+
+    Builder->SetInsertPoint(ValueBB);
+  }
+
+  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "nsarray.elemptr");
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NotNullEnd = Builder->GetInsertBlock();
+
+  // Null branch
+  Builder->SetInsertPoint(NullBB);
+  llvm::Value *NullElementPtr = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ElemPtr->getType()));
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NullEnd = Builder->GetInsertBlock();
+
+  // Merge
+  Builder->SetInsertPoint(MergeBB);
+  llvm::PHINode *Phi = Builder->CreatePHI(ElemPtr->getType(), 2, "nsarray.ptrmaybe");
+  Phi->addIncoming(ElemPtr, NotNullEnd);
+  Phi->addIncoming(NullElementPtr, NullEnd);
+
+  return Phi;
 }
 
 // Generate code for variable expressions
@@ -1535,12 +1850,196 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
   return {L, R};
 }
 
+llvm::Value *BinaryExprAST::codegenNullCoalescing(llvm::Value *lhsValue) {
+  const ExprAST *lhsExpr = unwrapRefExpr(getLHS());
+  if (!expressionIsNullable(lhsExpr))
+    return LogErrorV("Null-coalescing operator '\?\?' requires nullable left-hand side");
+
+  std::string leftTypeName = getLHS()->getTypeName();
+  ParsedTypeDescriptor leftDesc = parseTypeString(leftTypeName);
+
+  bool lhsIsArray = leftDesc.isArray;
+  bool lhsIsPointer = lhsValue->getType()->isPointerTy();
+
+  if (!lhsIsPointer && !lhsIsArray)
+    return LogErrorV("Null-coalescing operator '\?\?' requires reference or array type on the left-hand side");
+
+  llvm::Function *Func = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *NullBB = llvm::BasicBlock::Create(*TheContext, "nullcoal.null", Func);
+  llvm::BasicBlock *NotNullBB = llvm::BasicBlock::Create(*TheContext, "nullcoal.notnull", Func);
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "nullcoal.merge", Func);
+
+  llvm::Value *IsNull = nullptr;
+  if (lhsIsArray) {
+    if (!lhsValue->getType()->isStructTy())
+      return LogErrorV("Null-coalescing operator '\?\?' expected array struct value");
+    llvm::Value *ArrayPtr = Builder->CreateExtractValue(lhsValue, 0, "nullcoal.arrptr");
+    if (!ArrayPtr->getType()->isPointerTy())
+      return LogErrorV("Nullable array pointer field must be a pointer");
+    llvm::Value *NullPtr = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ArrayPtr->getType()));
+    IsNull = Builder->CreateICmpEQ(ArrayPtr, NullPtr, "nullcoal.check");
+  } else {
+    llvm::PointerType *PtrTy = llvm::cast<llvm::PointerType>(lhsValue->getType());
+    llvm::Value *NullPtr = llvm::ConstantPointerNull::get(PtrTy);
+    IsNull = Builder->CreateICmpEQ(lhsValue, NullPtr, "nullcoal.check");
+  }
+
+  Builder->CreateCondBr(IsNull, NullBB, NotNullBB);
+
+  // Not-null branch
+  Builder->SetInsertPoint(NotNullBB);
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NotNullEnd = Builder->GetInsertBlock();
+
+  // Null branch
+  Builder->SetInsertPoint(NullBB);
+  llvm::Value *rhsValueRaw = getRHS()->codegen();
+  if (!rhsValueRaw)
+    return nullptr;
+  std::string rhsTypeName = getRHS()->getTypeName();
+  llvm::Value *ResultWhenNull = rhsValueRaw;
+
+  if (lhsIsArray) {
+    if (rhsValueRaw->getType() != lhsValue->getType())
+      return LogErrorV("Null-coalescing operator '\?\?' requires fallback to match array type");
+  } else {
+    if (!rhsValueRaw->getType()->isPointerTy())
+      return LogErrorV("Null-coalescing operator '\?\?' fallback must be a reference type");
+    if (rhsValueRaw->getType() != lhsValue->getType())
+      ResultWhenNull = Builder->CreateBitCast(rhsValueRaw, lhsValue->getType(), "nullcoal.cast");
+  }
+
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NullEnd = Builder->GetInsertBlock();
+
+  Builder->SetInsertPoint(MergeBB);
+  llvm::PHINode *Phi = Builder->CreatePHI(lhsValue->getType(), 2, "nullcoal.result");
+  Phi->addIncoming(lhsValue, NotNullEnd);
+  Phi->addIncoming(ResultWhenNull, NullEnd);
+
+  bool rhsNullable = expressionIsNullable(unwrapRefExpr(getRHS()));
+  std::string baseTypeName = leftDesc.sanitized;
+  if (baseTypeName.empty()) {
+    ParsedTypeDescriptor rhsDesc = parseTypeString(rhsTypeName);
+    baseTypeName = rhsDesc.sanitized;
+  }
+  if (baseTypeName.empty())
+    baseTypeName = rhsTypeName;
+
+  if (!baseTypeName.empty()) {
+    if (rhsNullable)
+      setTypeName(ensureOuterNullable(baseTypeName));
+    else
+      setTypeName(baseTypeName);
+  }
+
+  return Phi;
+}
+
+llvm::Value *BinaryExprAST::codegenNullCoalescingAssign(llvm::Value *lhsValue) {
+  const ExprAST *lhsExpr = unwrapRefExpr(getLHS());
+  if (!expressionIsNullable(lhsExpr))
+    return LogErrorV("Null-coalescing assignment '\?\?=' requires nullable left-hand side");
+
+  std::string leftTypeName = getLHS()->getTypeName();
+  ParsedTypeDescriptor leftDesc = parseTypeString(leftTypeName);
+
+  bool lhsIsArray = leftDesc.isArray;
+  bool lhsIsPointerValue = lhsValue->getType()->isPointerTy();
+
+  if (!lhsIsPointerValue && !lhsIsArray)
+    return LogErrorV("Null-coalescing assignment '\?\?=' requires reference or array type on the left-hand side");
+
+  llvm::Value *lhsPtr = getLHS()->codegen_ptr();
+  if (!lhsPtr)
+    return nullptr;
+  if (!lhsPtr->getType()->isPointerTy())
+    return LogErrorV("destination of '\?\?=' must be assignable");
+
+  llvm::PointerType *lhsPtrType = llvm::cast<llvm::PointerType>(lhsPtr->getType());
+  llvm::Value *NullStoragePtr = llvm::ConstantPointerNull::get(lhsPtrType);
+  llvm::Value *PtrValid = Builder->CreateICmpNE(lhsPtr, NullStoragePtr, "nullassign.ptrvalid");
+
+  llvm::Value *ValueIsNull = nullptr;
+  if (lhsIsArray) {
+    if (!lhsValue->getType()->isStructTy())
+      return LogErrorV("Null-coalescing assignment '\?\?=' expected array struct value");
+    llvm::Value *ArrayPtr = Builder->CreateExtractValue(lhsValue, 0, "nullassign.arrptr");
+    if (!ArrayPtr->getType()->isPointerTy())
+      return LogErrorV("Nullable array pointer field must be a pointer");
+    llvm::Value *NullArrayPtr = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ArrayPtr->getType()));
+    ValueIsNull = Builder->CreateICmpEQ(ArrayPtr, NullArrayPtr, "nullassign.value");
+  } else {
+    llvm::PointerType *PtrTy = llvm::cast<llvm::PointerType>(lhsValue->getType());
+    llvm::Value *NullPtrValue = llvm::ConstantPointerNull::get(PtrTy);
+    ValueIsNull = Builder->CreateICmpEQ(lhsValue, NullPtrValue, "nullassign.value");
+  }
+
+  llvm::Value *ShouldAssign = Builder->CreateAnd(ValueIsNull, PtrValid, "nullassign.should");
+
+  llvm::Function *Func = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *AssignBB = llvm::BasicBlock::Create(*TheContext, "nullassign.assign", Func);
+  llvm::BasicBlock *DoneBB = llvm::BasicBlock::Create(*TheContext, "nullassign.done", Func);
+  llvm::BasicBlock *CurrentBB = Builder->GetInsertBlock();
+
+  Builder->CreateCondBr(ShouldAssign, AssignBB, DoneBB);
+
+  Builder->SetInsertPoint(AssignBB);
+  llvm::Value *rhsValueRaw = getRHS()->codegen();
+  if (!rhsValueRaw)
+    return nullptr;
+  std::string rhsTypeName = getRHS()->getTypeName();
+  llvm::Value *AssignedValue = rhsValueRaw;
+
+  if (lhsIsArray) {
+    if (rhsValueRaw->getType() != lhsValue->getType())
+      return LogErrorV("Null-coalescing assignment '\?\?=' requires fallback to match array type");
+  } else {
+    if (!rhsValueRaw->getType()->isPointerTy())
+      return LogErrorV("Null-coalescing assignment '\?\?=' fallback must be a reference type");
+    if (rhsValueRaw->getType() != lhsValue->getType())
+      AssignedValue = Builder->CreateBitCast(rhsValueRaw, lhsValue->getType(), "nullassign.cast");
+  }
+
+  Builder->CreateStore(AssignedValue, lhsPtr);
+  Builder->CreateBr(DoneBB);
+  llvm::BasicBlock *AssignEnd = Builder->GetInsertBlock();
+
+  Builder->SetInsertPoint(DoneBB);
+  llvm::PHINode *Phi = Builder->CreatePHI(lhsValue->getType(), 2, "nullassign.result");
+  Phi->addIncoming(lhsValue, CurrentBB);
+  Phi->addIncoming(AssignedValue, AssignEnd);
+
+  bool rhsNullable = expressionIsNullable(unwrapRefExpr(getRHS()));
+  std::string baseTypeName = leftDesc.sanitized;
+  if (baseTypeName.empty()) {
+    ParsedTypeDescriptor rhsDesc = parseTypeString(rhsTypeName);
+    baseTypeName = rhsDesc.sanitized;
+  }
+  if (baseTypeName.empty())
+    baseTypeName = rhsTypeName;
+
+  if (!baseTypeName.empty()) {
+    if (rhsNullable)
+      setTypeName(ensureOuterNullable(baseTypeName));
+    else
+      setTypeName(baseTypeName);
+  }
+
+  return Phi;
+}
+
 // Generate code for binary expressions like +, -, *, /, <, >
 llvm::Value *BinaryExprAST::codegen() {
   // Generate left operand first
   llvm::Value *L = getLHS()->codegen();
   if (!L)
     return nullptr;
+  
+  if (Op == "\?\?")
+    return codegenNullCoalescing(L);
+  if (Op == "\?\?=")
+    return codegenNullCoalescingAssign(L);
 
   // For comparisons, arithmetic, and equality operators, try to generate right operand with left's type as target
   // This allows number literals to automatically match the target type
@@ -3726,6 +4225,17 @@ llvm::Function *FunctionAST::codegen() {
     i++;
   }
   
+  // Emit global variable initializers once at the beginning of main()
+  static bool InitializedGlobalsEmitted = false;
+  if (!InitializedGlobalsEmitted && TheFunction->getName() == "main") {
+    if (auto *InitFunc = TheModule->getFunction("__anon_var_decl")) {
+      if (!InitFunc->empty()) {
+        Builder->CreateCall(InitFunc);
+        InitializedGlobalsEmitted = true;
+      }
+    }
+  }
+
   // Generate code for the function body
   if (getBody()->codegen()) {
     // Finish off the function if no explicit return
@@ -4421,6 +4931,8 @@ llvm::Value *TernaryExprAST::codegen() {
   llvm::Value *CondV = getCondition()->codegen();
   if (!CondV)
     return nullptr;
+  ExprAST *ThenExprNode = getThenExpr();
+  ExprAST *ElseExprNode = getElseExpr();
 
   // Convert condition to i1 bool
   if (CondV->getType()->isIntegerTy(8)) {
@@ -4477,6 +4989,8 @@ llvm::Value *TernaryExprAST::codegen() {
 
   // Determine result type and handle type promotion
   llvm::Type *ResultType = ThenV->getType();
+  std::string thenTypeName = ThenExprNode ? ThenExprNode->getTypeName() : "";
+  std::string elseTypeName = ElseExprNode ? ElseExprNode->getTypeName() : "";
 
   // Type-cast expressions to match if needed
   if (ThenV->getType() != ElseV->getType()) {
@@ -4493,23 +5007,52 @@ llvm::Value *TernaryExprAST::codegen() {
     } else if (ElseV->getType()->isFloatTy() && ThenV->getType()->isIntegerTy(32)) {
       ThenV = Builder->CreateSIToFP(ThenV, ElseV->getType(), "int_to_float");
       ResultType = ElseV->getType();
+    } else if (ResultType->isStructTy() && ElseV->getType()->isPointerTy() &&
+               llvm::isa<llvm::ConstantPointerNull>(ElseV)) {
+      ElseV = llvm::ConstantAggregateZero::get(llvm::cast<llvm::StructType>(ResultType));
+    } else if (ElseV->getType()->isStructTy() && ThenV->getType()->isPointerTy() &&
+               llvm::isa<llvm::ConstantPointerNull>(ThenV)) {
+      llvm::StructType *StructTy = llvm::cast<llvm::StructType>(ElseV->getType());
+      ThenV = llvm::ConstantAggregateZero::get(StructTy);
+      ResultType = ElseV->getType();
     } else {
       return LogErrorV("Ternary expression branches must have compatible types");
     }
   }
 
-  // Set the expression's type name based on result type
-  if (ResultType->isIntegerTy(32)) {
-    setTypeName("int");
-  } else if (ResultType->isDoubleTy()) {
-    setTypeName("double");
-  } else if (ResultType->isFloatTy()) {
-    setTypeName("float");
-  } else if (ResultType->isIntegerTy(8)) {
-    setTypeName("bool");
-  } else if (ResultType->isPointerTy()) {
-    setTypeName("string");
+  auto pickMeaningfulTypeName = [](const std::string &name) -> std::string {
+    if (name.empty() || name == "null" || name == "void")
+      return {};
+    return name;
+  };
+
+  std::string resultTypeName = pickMeaningfulTypeName(thenTypeName);
+  if (resultTypeName.empty())
+    resultTypeName = pickMeaningfulTypeName(elseTypeName);
+  if (resultTypeName.empty())
+    resultTypeName = !thenTypeName.empty() ? thenTypeName : elseTypeName;
+
+  const ExprAST *ThenExprForNullability = unwrapRefExpr(ThenExprNode);
+  const ExprAST *ElseExprForNullability = unwrapRefExpr(ElseExprNode);
+  bool thenNullable = expressionIsNullable(ThenExprForNullability);
+  bool elseNullable = expressionIsNullable(ElseExprForNullability);
+
+  if (resultTypeName.empty()) {
+    if (ResultType->isIntegerTy(32))
+      resultTypeName = "int";
+    else if (ResultType->isDoubleTy())
+      resultTypeName = "double";
+    else if (ResultType->isFloatTy())
+      resultTypeName = "float";
+    else if (ResultType->isIntegerTy(8))
+      resultTypeName = "bool";
   }
+
+  if (!resultTypeName.empty() && (thenNullable || elseNullable))
+    resultTypeName = ensureOuterNullable(resultTypeName);
+
+  if (!resultTypeName.empty())
+    setTypeName(resultTypeName);
 
   // Create PHI node to merge the results
   llvm::PHINode *Result = Builder->CreatePHI(ResultType, 2, "ternary_result");

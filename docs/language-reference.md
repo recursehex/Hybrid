@@ -76,6 +76,14 @@ The following keywords are reserved:
 - Exception handling: `assert`
 - Memory safety: `unsafe`
 
+### Null Safety
+
+- Types are non-nullable unless annotated with `?` (for example `int?`, `User?`, `float?[]`, `string[]?`)
+- Use `?.` for null-safe member access on nullable struct references
+- Use `?[` for null-safe element access on nullable array references
+- Use `??` to supply a fallback when a nullable value is `null`
+- Use `??=` to assign a fallback when a nullable variable is `null`
+
 ## Literals
 
 ### Numeric Literals
