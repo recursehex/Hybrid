@@ -858,6 +858,36 @@ char_literal_end:
     return tok_hash;
   }
 
+  // Check for nullable related tokens ( ?, ?. , ?[, ??, ??= )
+  if (LastChar == '?') {
+    int NextChar = lex.consumeChar();
+
+    if (NextChar == '.') {
+      LastChar = lex.consumeChar();
+      return tok_null_safe_access;
+    }
+
+    if (NextChar == '[') {
+      LastChar = lex.consumeChar();
+      return tok_null_array_access;
+    }
+
+    if (NextChar == '?') {
+      int ThirdChar = lex.consumeChar();
+      if (ThirdChar == '=') {
+        LastChar = lex.consumeChar();
+        return tok_null_coalescing_assign;
+      }
+      lex.unconsumeChar(ThirdChar);
+      LastChar = lex.consumeChar();
+      return tok_null_coalescing;
+    }
+
+    lex.unconsumeChar(NextChar);
+    LastChar = lex.consumeChar();
+    return tok_nullable;
+  }
+
   // Check for newline.
   if (LastChar == '\n' || LastChar == '\r') {
     if (LastChar == '\r') {

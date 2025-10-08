@@ -3,6 +3,7 @@
 #include "compiler_session.h"
 #include <cstdio>
 #include <cmath>
+#include <cctype>
 #include <limits>
 #include <set>
 #include <optional>
@@ -47,9 +48,64 @@ static unsigned parsePointerDepth(const std::string &typeName) {
 
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef) {
   TypeInfo info;
-  info.typeName = typeName;
-  info.pointerDepth = parsePointerDepth(typeName);
-  info.isArray = typeName.size() > 2 && typeName.substr(typeName.size() - 2) == "[]";
+  std::string sanitized;
+  sanitized.reserve(typeName.size());
+
+  bool pendingNullable = false;
+  bool arraySeen = false;
+  bool explicitNullable = false;
+
+  for (size_t i = 0; i < typeName.size(); ++i) {
+    char c = typeName[i];
+
+    if (c == '?') {
+      pendingNullable = true;
+      continue;
+    }
+
+    if (c == '@') {
+      sanitized.push_back(c);
+      ++i;
+      while (i < typeName.size() && std::isdigit(static_cast<unsigned char>(typeName[i]))) {
+        sanitized.push_back(typeName[i]);
+        ++i;
+      }
+      --i; // compensate for extra increment in while loop
+      if (pendingNullable) {
+        explicitNullable = true;
+        pendingNullable = false;
+      }
+      continue;
+    }
+
+    if (c == '[' && i + 1 < typeName.size() && typeName[i + 1] == ']') {
+      sanitized.append("[]");
+      arraySeen = true;
+      if (pendingNullable) {
+        info.elementNullable = true;
+        pendingNullable = false;
+      }
+      ++i; // Skip ']'
+      continue;
+    }
+
+    sanitized.push_back(c);
+  }
+
+  if (pendingNullable)
+    explicitNullable = true;
+
+  info.typeName = sanitized;
+  info.pointerDepth = parsePointerDepth(info.typeName);
+  info.isArray = arraySeen || (info.typeName.size() > 2 && info.typeName.substr(info.typeName.size() - 2) == "[]");
+
+  info.isNullable = explicitNullable;
+
+  // Pointer types are always nullable even without explicit '?'
+  if (info.pointerDepth > 0 && !info.isArray) {
+    info.isNullable = true;
+  }
+
   info.refStorage = declaredRef ? RefStorageClass::RefValue : RefStorageClass::None;
   info.isMutable = true;
   info.declaredRef = declaredRef;
@@ -102,45 +158,59 @@ std::string ParseCompleteType()
   std::string Type = IdentifierStr;
   getNextToken(); // eat base type
 
-  // Check for pointer type with @ operator (e.g., int@, int@2)
-  if (CurTok == tok_at) {
-    // Check if we're in an unsafe context
-    if (!isInUnsafeContext()) {
-      fprintf(stderr, "Error: Pointer types can only be used within unsafe blocks or unsafe functions\n");
-      return "";
+  bool pointerSeen = false;
+  bool arraySeen = false;
+
+  while (true) {
+    if (CurTok == tok_nullable) {
+      Type += "?";
+      getNextToken();
+      continue;
     }
 
-    getNextToken(); // eat '@'
-
-    // Check for pointer level (e.g., @2 for pointer-to-pointer)
-    if (CurTok == tok_number) {
-      if (!LexedNumericLiteral.isInteger() || !LexedNumericLiteral.fitsInUnsignedBits(32)) {
-        fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+    if (CurTok == tok_at && !pointerSeen) {
+      if (!isInUnsafeContext()) {
+        fprintf(stderr, "Error: Pointer types can only be used within unsafe blocks or unsafe functions\n");
         return "";
       }
 
-      uint64_t level = LexedNumericLiteral.getUnsignedValue();
-      if (level == 0) {
-        fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+      pointerSeen = true;
+      getNextToken(); // eat '@'
+
+      if (CurTok == tok_number) {
+        if (!LexedNumericLiteral.isInteger() || !LexedNumericLiteral.fitsInUnsignedBits(32)) {
+          fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+          return "";
+        }
+
+        uint64_t level = LexedNumericLiteral.getUnsignedValue();
+        if (level == 0) {
+          fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+          return "";
+        }
+
+        Type += "@";
+        Type += std::to_string(level);
+        getNextToken(); // eat number
+      } else {
+        Type += "@";
+      }
+      continue;
+    }
+
+    if (CurTok == '[' && !arraySeen) {
+      getNextToken(); // eat '['
+      if (CurTok != ']') {
+        fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
         return "";
       }
-
-      Type += "@" + std::to_string(level);
-      getNextToken(); // eat number
-    } else {
-      Type += "@"; // Single level pointer
+      getNextToken(); // eat ']'
+      Type += "[]";
+      arraySeen = true;
+      continue;
     }
-  }
 
-  // Check for array type
-  if (CurTok == '[') {
-    getNextToken(); // eat [
-    if (CurTok != ']') {
-      fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
-      return "";
-    }
-    getNextToken(); // eat ]
-    Type += "[]"; // Add array indicator to type
+    break;
   }
 
   return Type;
@@ -844,6 +914,16 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       std::string MemberName = IdentifierStr;
       getNextToken(); // eat member name
       LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName);
+    } else if (CurTok == tok_null_safe_access) {
+      // Null-safe member access
+      getNextToken(); // eat '?.'
+      if (CurTok != tok_identifier) {
+        LogError("Expected member name after '?.'");
+        return nullptr;
+      }
+      std::string MemberName = IdentifierStr;
+      getNextToken(); // eat member name
+      LHS = std::make_unique<NullSafeAccessExprAST>(std::move(LHS), MemberName);
     } else if (CurTok == tok_arrow) {
       // Pointer member access (-> is syntactic sugar for (@ptr).member)
       if (!isInUnsafeContext()) {

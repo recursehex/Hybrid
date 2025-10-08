@@ -1,2 +1,2 @@
-string nothing = null
+string? nothing = null
 string something = "hello"

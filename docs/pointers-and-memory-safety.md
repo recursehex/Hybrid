@@ -180,7 +180,7 @@ unsafe struct Node
     Node(int val)
     {
         this.value = val
-        this.next = null  // Assuming null support
+        this.next = null
     }
 }
 
@@ -291,14 +291,13 @@ When you use `unsafe`:
 ### Current Limitations
 
 1. **No pointer arithmetic** - Unlike C/C++, you cannot yet do `ptr + 1` or `ptr++`
-2. **No null pointer literal** - Currently no way to represent null pointers
+2. **Manual null checks** - The compiler does not insert runtime null guards for pointers; check before dereferencing
 3. **Limited type tracking** - Type information may be lost in complex scenarios (e.g., pointer arrays in struct fields)
 4. **No dynamic memory allocation** - No `malloc`/`free` or `new`/`delete` equivalents
 
 ### Future Enhancements
 
 Potential future additions:
-- Null pointer support
 - Runtime bounds checking in debug mode
 - Smart pointer types (like C++'s `std::unique_ptr` and `std::shared_ptr`)
 - Lifetime annotations for compile-time borrow checking
@@ -312,7 +311,7 @@ Potential future additions:
 | Dereference | `@ptr` | `*ptr` | `*ptr` |
 | Safety requirement | `unsafe` block | None | `unsafe` block |
 | Pointer arithmetic | No (currently) | Yes | In unsafe only |
-| Null pointers | No (currently) | Yes (`nullptr`) | Yes (`null`) |
+| Null pointers | Yes (`null`) | Yes (`nullptr`) | Yes (`null`) |
 
 ## Summary
 

@@ -82,6 +82,22 @@ Fields can be of any supported type:
 | Struct types | `Point`, `Rectangle` | Nested structures |
 | Sized integers | `byte`, `short`, `long` | Specific integer sizes |
 
+### Nullable Fields
+
+Append `?` to a field's type when the value is optional:
+
+```cs
+struct User {
+    string name
+    Address? address
+    string? alias
+}
+```
+
+- Nullable fields must be accessed with the `?.` operator (for example, `user.address?.city`).
+- Assigning a nullable expression to a non-nullable field triggers a compile-time error.
+- Constructors can initialize nullable fields with `null` to signal the absence of a value.
+
 ### Nested Structs
 
 Structs can contain fields of other struct types:

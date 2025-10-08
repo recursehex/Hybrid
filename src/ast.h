@@ -21,6 +21,8 @@ struct TypeInfo {
   std::string typeName;           // canonical language-visible type
   unsigned pointerDepth = 0;      // number of explicit pointer levels (@)
   bool isArray = false;           // whether type is an array ("[]")
+  bool isNullable = false;        // whether the type itself can be null
+  bool elementNullable = false;   // whether array elements can be null
   RefStorageClass refStorage = RefStorageClass::None;
   bool isMutable = true;
   bool declaredRef = false;       // whether declared via `ref`
@@ -620,6 +622,21 @@ public:
   MemberAccessExprAST(std::unique_ptr<ExprAST> Object, const std::string &MemberName)
       : Object(std::move(Object)), MemberName(MemberName) {}
   
+  llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
+  ExprAST *getObject() const { return Object.get(); }
+  const std::string &getMemberName() const { return MemberName; }
+};
+
+/// NullSafeAccessExprAST - Expression class for null-safe member access (e.g., obj?.field).
+class NullSafeAccessExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Object;
+  std::string MemberName;
+
+public:
+  NullSafeAccessExprAST(std::unique_ptr<ExprAST> Object, std::string MemberName)
+      : Object(std::move(Object)), MemberName(std::move(MemberName)) {}
+
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
   ExprAST *getObject() const { return Object.get(); }

@@ -138,7 +138,8 @@ string precise = $"Pi: `pi:2`"                    // format specifier for floats
 ### Null Literal
 
 ```c
-null      // Used for string initialization
+string? alias = null   // Nullable reference
+int@ handle = null     // Pointers are implicitly nullable
 ```
 
 ### Array Literals
@@ -178,6 +179,15 @@ int y         // Compilation error - no initialization
 ### Static Type Checking
 
 All types are checked at compile time, preventing type-related runtime errors.
+
+## Nullability
+
+- Types are non-nullable unless explicitly annotated with `?` (for example, `int?`, `User?`, `string[]?`).
+- The null-safe member access operator `?.` must be used when dereferencing nullable struct values: `user?.address?.city`.
+- Assigning `null` or any nullable expression to a non-nullable variable, field, or array element results in a compile-time error.
+- Flow analysis does not currently narrow nullable types. Use helper functions or explicit conversions after performing manual null checks.
+
+See the [Type System](type-system.md#nullable-types), [Structs](structs.md#nullable-fields), and [Expressions](expressions.md#null-safe-member-access) guides for details.
 
 ## Supported Constructs
 

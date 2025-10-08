@@ -290,6 +290,8 @@ void MainLoop() {
                   declInfo.typeName = structName;
                   declInfo.pointerDepth = 0;
                   declInfo.isArray = false;
+                  declInfo.isNullable = false;
+                  declInfo.elementNullable = false;
                   declInfo.refStorage = RefStorageClass::None;
                   declInfo.isMutable = true;
                   declInfo.declaredRef = false;
@@ -304,7 +306,7 @@ void MainLoop() {
                 fprintf(stderr, "Error: Expected '=' after variable name (all variables must be initialized)\n");
                 getNextToken(); // error recovery
               }
-            } else if (CurTok == '[') {
+            } else if (CurTok == '[' || CurTok == tok_nullable || CurTok == tok_at) {
               // Array type - put back the struct name processing
               // Need to restore the state
               IdentifierStr = structName;

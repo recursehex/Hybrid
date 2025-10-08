@@ -724,6 +724,20 @@ bool valid = (age >= 18 && age <= 65) || hasPermission
 bool inRange = x > min && x < max && isEnabled
 ```
 
+## Null-Safe Member Access
+
+Use the `?.` operator to safely traverse nullable structs:
+
+```cs
+User? maybeUser = getUser()
+string? city = maybeUser?.address?.city
+```
+
+- Each `?.` short-circuits if its receiver is `null`, propagating `null` to the final result.
+- Attempting to access a nullable value with `.` causes `Cannot access nullable type 'T?' without null-safe operator`.
+- The null-safe operator returns a nullable result; combine with explicit null checks or helper functions to obtain non-nullable values.
+- Null-safe array indexing (`?[`) not yet implemented, guard nullable arrays before using `[]`.
+
 ## LLVM Code Generation
 
 Expressions generate appropriate LLVM IR based on their types:

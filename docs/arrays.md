@@ -93,6 +93,20 @@ int index = 2
 scores[index] = 92
 ```
 
+## Nullable Arrays
+
+Use nullable annotations to express optional arrays or optional elements:
+
+```cs
+int?[] scores = [100, null, 85]   // Elements can be null
+string[]? maybeLines = readFile() // Array reference itself may be null
+```
+
+- `T?[]` allows `null` per element while keeping the array reference non-nullable.
+- `T[]?` allows the array reference to be `null` while preserving non-nullable elements.
+- Indexing a nullable array (`T[]?`) without first proving it non-null emits `Cannot index nullable array without null-safe operator`.
+- Null-safe array indexing syntax (`?[`) is not yet implemented, guard the array reference manually before indexing.
+
 ## Arrays in Functions
 
 ### Pass-by-Reference Semantics

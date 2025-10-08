@@ -132,8 +132,14 @@ enum Token {
   tok_interpolated_expr_start = -81,      // `
   tok_interpolated_expr_end = -82,        // `
 
+  tok_nullable = -83,               // ? (nullable type)
+  tok_null_safe_access = -84,       // ?. (null-safe member access)
+  tok_null_array_access = -85,      // ?[ (null-safe array access)
+  tok_null_coalescing = -86,        // ?? (null-coalescing operator)
+  tok_null_coalescing_assign = -87, // ??= (null-coalescing assignment)
+
   // error token
-  tok_error = -83             // error during lexing
+  tok_error = -88             // error during lexing
 };
 
 // gettok - Return the next token from standard input.

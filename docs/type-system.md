@@ -68,7 +68,7 @@ int count = 0
 float rate = 0.05
 bool isActive = true
 string message = "Hello"
-string empty = null  // Special case for strings
+string? empty = null  // Nullable string
 
 // Sized type declarations
 byte b = 100
@@ -80,6 +80,24 @@ uint ui = 4000000000
 int x              // Error: variable must be initialized
 float y            // Error: variable must be initialized
 ```
+
+## Nullable Types
+
+All value and reference types are non-nullable by default. Append `?` to the type name to allow `null` assignments and propagate nullable results:
+
+```cs
+string? maybeAlias = null
+int? optionalCount = parseNumber(input)
+Address? address = user?.primaryAddress
+```
+
+- Nullable annotations apply anywhere a type appears: variables, struct fields, function parameters, and return types.
+- `int?[]` describes an array whose elements can be `null` while the array reference itself remains non-nullable. `int[]?` flips that relationship, so the array itself can be `null` but its elements cannot.
+- Pointer types (`int@`, `float@2`, ...) implicitly allow `null` regardless of annotation because they are raw references.
+- Assigning a nullable expression to a non-nullable target is a compile-time error. Use helper functions or explicit conversions that validate nullability.
+- Accessing members on a nullable struct requires the null-safe access operator `?.`. See [Structs](structs.md) and [Expressions](expressions.md) for examples.
+
+The compiler currently requires explicit conversions when you prove a nullable value is non-null (flow-sensitive narrowing is not yet implemented). A manual `if maybeAlias != null` check does not change the static type of `maybeAlias`.
 
 ## Type Inference
 
@@ -501,7 +519,7 @@ The type system enforces several safety rules:
 4. **Function calls**: Arguments must match parameter types exactly (except for int-to-float promotion)
 5. **Bool isolation**: Boolean values cannot be converted to or from other types
 6. **Range checking**: Integer literals must fit in the target type's range
-7. **Null safety**: Only strings can be initialized with `null`
+7. **Null safety**: All types are non-nullable by default; append `?` to opt into storing `null`. Nullable types must be accessed with null-safe operators `?.` and `?[]`.
 
 ## LLVM Type Mapping
 

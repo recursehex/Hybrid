@@ -24,6 +24,8 @@
 #include <ranges>
 #include <string_view>
 #include <optional>
+#include <algorithm>
+#include <cctype>
 
 #define CG currentCodegen()
 #define TheContext (CG.llvmContext)
@@ -39,6 +41,8 @@
 #define StructFieldTypes (CG.structFieldTypes)
 #define LoopExitBlocks (CG.loopExitBlocks)
 #define LoopContinueBlocks (CG.loopContinueBlocks)
+
+llvm::Value *LogErrorV(const char *Str);
 
 static unsigned computePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -65,6 +69,151 @@ static bool isArrayTypeName(const std::string &typeName) {
   return typeName.size() > 2 && typeName.substr(typeName.size() - 2) == "[]";
 }
 
+static std::string stripNullableAnnotations(const std::string &typeName) {
+  std::string cleaned;
+  cleaned.reserve(typeName.size());
+  for (char c : typeName) {
+    if (c != '?')
+      cleaned.push_back(c);
+  }
+  return cleaned;
+}
+
+static std::string ensureOuterNullable(const std::string &typeName) {
+  if (!typeName.empty() && typeName.back() == '?')
+    return typeName;
+  return typeName + "?";
+}
+
+static std::string typeNameFromInfo(const TypeInfo &info) {
+  if (info.pointerDepth > 0)
+    return info.typeName;
+
+  if (info.isArray) {
+    std::string elementBase = info.typeName;
+    if (elementBase.size() > 2 && elementBase.substr(elementBase.size() - 2) == "[]")
+      elementBase = elementBase.substr(0, elementBase.size() - 2);
+    if (info.elementNullable && (elementBase.empty() || elementBase.back() != '?'))
+      elementBase += "?";
+
+    std::string result = elementBase + "[]";
+    if (info.isNullable)
+      result = ensureOuterNullable(result);
+    return result;
+  }
+
+  std::string result = info.typeName;
+  if (info.isNullable)
+    result = ensureOuterNullable(result);
+  return result;
+}
+
+struct ParsedTypeDescriptor {
+  std::string sanitized;
+  bool isArray = false;
+  bool isNullable = false;
+  bool elementNullable = false;
+  unsigned pointerDepth = 0;
+};
+
+static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
+  ParsedTypeDescriptor desc;
+  std::string sanitized;
+  sanitized.reserve(typeName.size());
+
+  bool pendingNullable = false;
+  bool arraySeen = false;
+
+  for (size_t i = 0; i < typeName.size(); ++i) {
+    char c = typeName[i];
+
+    if (c == '?') {
+      pendingNullable = true;
+      continue;
+    }
+
+    if (c == '@') {
+      sanitized.push_back(c);
+      ++i;
+      while (i < typeName.size() && std::isdigit(static_cast<unsigned char>(typeName[i]))) {
+        sanitized.push_back(typeName[i]);
+        ++i;
+      }
+      if (i > 0)
+        --i;
+      if (pendingNullable) {
+        desc.isNullable = true;
+        pendingNullable = false;
+      }
+      continue;
+    }
+
+    if (c == '[' && i + 1 < typeName.size() && typeName[i + 1] == ']') {
+      sanitized.append("[]");
+      arraySeen = true;
+      if (pendingNullable) {
+        desc.elementNullable = true;
+        pendingNullable = false;
+      }
+      ++i;
+      continue;
+    }
+
+    sanitized.push_back(c);
+  }
+
+  if (pendingNullable)
+    desc.isNullable = true;
+
+  desc.sanitized = sanitized;
+  desc.isArray = arraySeen || isArrayTypeName(desc.sanitized);
+  desc.pointerDepth = computePointerDepth(desc.sanitized);
+  if (desc.pointerDepth > 0 && !desc.isArray)
+    desc.isNullable = true;
+
+  return desc;
+}
+
+static bool exprIsNullLiteral(const ExprAST *expr) {
+  return dynamic_cast<const NullExprAST*>(expr) != nullptr;
+}
+
+static const ExprAST *unwrapRefExpr(const ExprAST *expr) {
+  if (const auto *Ref = dynamic_cast<const RefExprAST*>(expr))
+    return Ref->getOperand();
+  return expr;
+}
+
+static bool typeAllowsNull(const TypeInfo &info) {
+  return info.isNullable || (!info.isArray && info.pointerDepth > 0);
+}
+
+static bool typeAllowsNull(const ParsedTypeDescriptor &desc) {
+  return desc.isNullable || (!desc.isArray && desc.pointerDepth > 0);
+}
+
+static bool expressionIsNullable(const ExprAST *expr) {
+  if (!expr)
+    return false;
+  if (exprIsNullLiteral(expr))
+    return true;
+  std::string typeName = expr->getTypeName();
+  if (typeName.empty())
+    return false;
+  ParsedTypeDescriptor desc = parseTypeString(typeName);
+  return typeAllowsNull(desc);
+}
+
+static bool validateNullableAssignment(const TypeInfo &targetInfo,
+                                       const ExprAST *expr,
+                                       const std::string &targetDescription) {
+  if (!typeAllowsNull(targetInfo) && expressionIsNullable(expr)) {
+    LogErrorV(("Cannot assign nullable value to non-nullable " + targetDescription).c_str());
+    return false;
+  }
+  return true;
+}
+
 static TypeInfo makeTypeInfo(std::string typeName,
                              RefStorageClass storage = RefStorageClass::None,
                              bool isMutable = true,
@@ -73,6 +222,8 @@ static TypeInfo makeTypeInfo(std::string typeName,
   info.typeName = std::move(typeName);
   info.pointerDepth = computePointerDepth(info.typeName);
   info.isArray = isArrayTypeName(info.typeName);
+  info.isNullable = info.pointerDepth > 0 && !info.isArray;
+  info.elementNullable = false;
   info.refStorage = storage;
   info.isMutable = isMutable;
   info.declaredRef = declaredRef;
@@ -176,43 +327,44 @@ constexpr bool isUnsignedType(std::string_view TypeStr) {
 
 // Type conversion helper
 llvm::Type *getTypeFromString(const std::string &TypeStr) {
-  if (TypeStr == "int")
+  std::string CleanType = stripNullableAnnotations(TypeStr);
+  if (CleanType == "int")
     return llvm::Type::getInt32Ty(*TheContext);
-  else if (TypeStr == "float")
+  else if (CleanType == "float")
     return llvm::Type::getFloatTy(*TheContext);
-  else if (TypeStr == "double")
+  else if (CleanType == "double")
     return llvm::Type::getDoubleTy(*TheContext);
-  else if (TypeStr == "char")
+  else if (CleanType == "char")
     return llvm::Type::getInt16Ty(*TheContext);
-  else if (TypeStr == "bool")
+  else if (CleanType == "bool")
     return llvm::Type::getInt8Ty(*TheContext);
-  else if (TypeStr == "void")
+  else if (CleanType == "void")
     return llvm::Type::getVoidTy(*TheContext);
-  else if (TypeStr == "string")
+  else if (CleanType == "string")
     return llvm::PointerType::get(*TheContext, 0); // Strings as opaque pointer
   // New sized integer types
-  else if (TypeStr == "byte")
+  else if (CleanType == "byte")
     return llvm::Type::getInt8Ty(*TheContext);   // 8-bit unsigned
-  else if (TypeStr == "sbyte")
+  else if (CleanType == "sbyte")
     return llvm::Type::getInt8Ty(*TheContext);   // 8-bit signed
-  else if (TypeStr == "short")
+  else if (CleanType == "short")
     return llvm::Type::getInt16Ty(*TheContext);  // 16-bit signed
-  else if (TypeStr == "ushort")
+  else if (CleanType == "ushort")
     return llvm::Type::getInt16Ty(*TheContext);  // 16-bit unsigned
-  else if (TypeStr == "uint")
+  else if (CleanType == "uint")
     return llvm::Type::getInt32Ty(*TheContext);  // 32-bit unsigned
-  else if (TypeStr == "long")
+  else if (CleanType == "long")
     return llvm::Type::getInt64Ty(*TheContext);  // 64-bit signed
-  else if (TypeStr == "ulong")
+  else if (CleanType == "ulong")
     return llvm::Type::getInt64Ty(*TheContext);  // 64-bit unsigned
   // Sized character types
-  else if (TypeStr == "schar")
+  else if (CleanType == "schar")
     return llvm::Type::getInt8Ty(*TheContext);   // 8-bit character
-  else if (TypeStr == "lchar")
+  else if (CleanType == "lchar")
     return llvm::Type::getInt32Ty(*TheContext);  // 32-bit character (Unicode)
-  else if (TypeStr.size() > 2 && TypeStr.substr(TypeStr.size() - 2) == "[]") {
+  else if (CleanType.size() > 2 && CleanType.substr(CleanType.size() - 2) == "[]") {
     // Array type: return the array struct type {ptr, size}
-    std::string ElementType = TypeStr.substr(0, TypeStr.size() - 2);
+    std::string ElementType = CleanType.substr(0, CleanType.size() - 2);
     llvm::Type *ElemType = getTypeFromString(ElementType);
     if (ElemType) {
       // Create struct type for array: { element_ptr, size }
@@ -223,14 +375,14 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     return nullptr;
   }
   // Check for pointer types (e.g., "int@", "float@2")
-  else if (TypeStr.find('@') != std::string::npos) {
-    size_t atPos = TypeStr.find('@');
-    std::string BaseType = TypeStr.substr(0, atPos);
+  else if (CleanType.find('@') != std::string::npos) {
+    size_t atPos = CleanType.find('@');
+    std::string BaseType = CleanType.substr(0, atPos);
 
     // Parse pointer level (default is 1)
     int level = 1;
-    if (atPos + 1 < TypeStr.size()) {
-      std::string levelStr = TypeStr.substr(atPos + 1);
+    if (atPos + 1 < CleanType.size()) {
+      std::string levelStr = CleanType.substr(atPos + 1);
       if (!levelStr.empty()) {
         level = std::stoi(levelStr);
       }
@@ -251,7 +403,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   }
 
   // Check if it's a struct type
-  auto structIt = StructTypes.find(TypeStr);
+  auto structIt = StructTypes.find(CleanType);
   if (structIt != StructTypes.end()) {
     return llvm::PointerType::get(*TheContext, 0); // Struct instances are opaque pointers
   }
@@ -356,10 +508,9 @@ llvm::Value *BoolExprAST::codegen() {
 
 // Generate code for null expressions
 llvm::Value *NullExprAST::codegen() {
-  // Create a null pointer for string type (16-bit char*)
-  llvm::Type *StringType = llvm::PointerType::get(*TheContext, 0);
-  setTypeName("string");
-  return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(StringType));
+  llvm::PointerType *OpaquePtr = llvm::PointerType::get(*TheContext, 0);
+  setTypeName("null");
+  return llvm::ConstantPointerNull::get(OpaquePtr);
 }
 
 static llvm::Value *emitUTF16StringLiteral(const std::string &value) {
@@ -697,6 +848,16 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   llvm::Value *IndexVal = getIndex()->codegen();
   if (!IndexVal)
     return nullptr;
+
+  bool elementIsNullable = false;
+  std::string arrayTypeName = getArray()->getTypeName();
+  if (!arrayTypeName.empty()) {
+    ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
+    if (arrayDesc.isNullable) {
+      return LogErrorV("Cannot index nullable array without null-safe operator");
+    }
+    elementIsNullable = arrayDesc.elementNullable;
+  }
   
   // Make sure index is an integer
   if (!IndexVal->getType()->isIntegerTy(32)) {
@@ -755,8 +916,12 @@ llvm::Value *ArrayIndexExprAST::codegen() {
 
         const TypeInfo *info = lookupTypeInfo(varName);
         if (info && info->isArray) {
+          if (info->isNullable) {
+            return LogErrorV("Cannot index nullable array without null-safe operator");
+          }
           elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
           ElemType = getTypeFromString(elemTypeStr);
+          elementIsNullable = info->elementNullable;
 
           // Check for compile-time bounds checking if array size is known
           if (ArraySizes.count(varName)) {
@@ -782,10 +947,15 @@ llvm::Value *ArrayIndexExprAST::codegen() {
         // Get the type from the member access expression
         std::string memberType = getArray()->getTypeName();
 
-        // If the member type ends with [], it's an array
-        if (!memberType.empty() && memberType.size() > 2 && memberType.substr(memberType.size() - 2) == "[]") {
-          elemTypeStr = memberType.substr(0, memberType.size() - 2);
+        ParsedTypeDescriptor memberDesc = parseTypeString(memberType);
+        if (memberDesc.isNullable) {
+          return LogErrorV("Cannot index nullable array without null-safe operator");
+        }
+        if (memberDesc.isArray && memberDesc.sanitized.size() > 2 &&
+            memberDesc.sanitized.substr(memberDesc.sanitized.size() - 2) == "[]") {
+          elemTypeStr = memberDesc.sanitized.substr(0, memberDesc.sanitized.size() - 2);
           ElemType = getTypeFromString(elemTypeStr);
+          elementIsNullable = memberDesc.elementNullable;
         }
       }
 
@@ -807,6 +977,9 @@ llvm::Value *ArrayIndexExprAST::codegen() {
 
       const TypeInfo *info = lookupTypeInfo(varName);
       if (info && info->isArray) {
+        if (info->isNullable) {
+          return LogErrorV("Cannot index nullable array without null-safe operator");
+        }
         // It's an array type, extract the element type
         elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
         if (elemTypeStr == "int") {
@@ -818,6 +991,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
         } else if (elemTypeStr == "bool") {
           ElemType = llvm::Type::getInt8Ty(*TheContext);
         }
+        elementIsNullable = info->elementNullable;
       }
     }
   } else {
@@ -850,7 +1024,10 @@ llvm::Value *ArrayIndexExprAST::codegen() {
         llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
 
         // Set the type name for proper type checking
-        setTypeName(elemTypeStr);
+        std::string displayTypeName = elemTypeStr;
+        if (elementIsNullable)
+          displayTypeName = ensureOuterNullable(displayTypeName);
+        setTypeName(displayTypeName);
 
         // Load and return the value
         return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
@@ -901,7 +1078,10 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
 
   // Set the type name for proper type checking
-  setTypeName(elemTypeStr);
+  std::string displayTypeName = elemTypeStr;
+  if (elementIsNullable)
+    displayTypeName = ensureOuterNullable(displayTypeName);
+  setTypeName(displayTypeName);
 
   // Load and return the value
   return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
@@ -1049,7 +1229,7 @@ llvm::Value *VariableExprAST::codegen() {
     llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
     // Set type name from local types
     if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
-      setTypeName(info->typeName);
+      setTypeName(typeNameFromInfo(*info));
 
       if (info->isAlias()) {
         llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
@@ -1071,7 +1251,7 @@ llvm::Value *VariableExprAST::codegen() {
     // Global variable - load from global
     // Set type name from global types
     if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
-      setTypeName(info->typeName);
+      setTypeName(typeNameFromInfo(*info));
 
       if (info->isAlias()) {
         llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
@@ -1134,6 +1314,10 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
       
       return llvm::ConstantInt::get(targetType, Val.trunc(targetBits));
     }
+  }
+
+  if (sourceType->isPointerTy() && targetType->isPointerTy()) {
+    return Builder->CreateBitCast(value, targetType, "ptrcast");
   }
   
   // Check if types are compatible for implicit casting
@@ -1222,6 +1406,10 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::s
       
       return llvm::ConstantInt::get(targetType, Val.trunc(targetBits));
     }
+  }
+
+  if (sourceType->isPointerTy() && targetType->isPointerTy()) {
+    return Builder->CreateBitCast(value, targetType, "ptrcast");
   }
 
   // For non-constant values, add runtime range checking for integer narrowing
@@ -1454,6 +1642,9 @@ llvm::Value *BinaryExprAST::codegen() {
       return Builder->CreateZExt(L, llvm::Type::getInt8Ty(*TheContext), "booltmp");
     case '=':
       // Assignment operator - LHS must be a variable or array element
+      {
+        const ExprAST *rhsCheckExpr = unwrapRefExpr(getRHS());
+        bool rhsIsNullable = expressionIsNullable(rhsCheckExpr);
       if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
         // Simple variable assignment - check local first, then global
         llvm::Value *Variable = NamedValues[LHSE->getName()];
@@ -1474,13 +1665,18 @@ llvm::Value *BinaryExprAST::codegen() {
 
           // Regular variable assignment
           llvm::Type *VarType = Alloca->getAllocatedType();
+          if (const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName())) {
+            if (rhsIsNullable && !typeAllowsNull(*info)) {
+              return LogErrorV(("Cannot assign nullable value to non-nullable variable '" + LHSE->getName() + "'").c_str());
+            }
+          }
           // Get type name for proper range checking
           const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName());
-          if (info && !info->typeName.empty()) {
-            R = castToType(R, VarType, info->typeName);
-          } else {
-            R = castToType(R, VarType);
-          }
+    if (info && !info->typeName.empty()) {
+      R = castToType(R, VarType, info->typeName);
+    } else {
+      R = castToType(R, VarType);
+    }
           Builder->CreateStore(R, Variable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
@@ -1503,6 +1699,11 @@ llvm::Value *BinaryExprAST::codegen() {
 
           // Regular global variable
           llvm::Type *VarType = GV->getValueType();
+          if (const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName())) {
+            if (!info->isAlias() && rhsIsNullable && !typeAllowsNull(*info)) {
+              return LogErrorV(("Cannot assign nullable value to non-nullable variable '" + LHSE->getName() + "'").c_str());
+            }
+          }
           // Get type name for proper range checking
           const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName());
           if (info && !info->typeName.empty()) {
@@ -1570,7 +1771,22 @@ llvm::Value *BinaryExprAST::codegen() {
         
         if (!ArrayPtr || !ElemType)
           return LogErrorV("Invalid array type for indexing");
-        
+
+        bool elementAllowsNull = false;
+        if (auto *VarExpr = dynamic_cast<VariableExprAST*>(LHSAI->getArray())) {
+          if (const TypeInfo *info = lookupTypeInfo(VarExpr->getName()))
+            elementAllowsNull = info->elementNullable;
+        } else {
+          std::string arrayTypeName = LHSAI->getArray()->getTypeName();
+          if (!arrayTypeName.empty()) {
+            ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
+            elementAllowsNull = arrayDesc.elementNullable;
+          }
+        }
+        if (rhsIsNullable && !elementAllowsNull) {
+          return LogErrorV("Cannot assign nullable value to non-nullable array element");
+        }
+
         // Calculate the address and store
         llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
         Builder->CreateStore(R, ElemPtr);
@@ -1582,6 +1798,20 @@ llvm::Value *BinaryExprAST::codegen() {
         llvm::Value *FieldPtr = LHSMA->codegen_ptr();
         if (!FieldPtr)
           return nullptr;
+
+        bool fieldAllowsNull = false;
+        std::string objectTypeName = LHSMA->getObject()->getTypeName();
+        ParsedTypeDescriptor objectDesc = parseTypeString(objectTypeName);
+        std::string structName = objectDesc.sanitized;
+        if (auto FieldTypesIt = StructFieldTypes.find(structName); FieldTypesIt != StructFieldTypes.end()) {
+          if (auto TypeIt = FieldTypesIt->second.find(LHSMA->getMemberName()); TypeIt != FieldTypesIt->second.end()) {
+            ParsedTypeDescriptor fieldDesc = parseTypeString(TypeIt->second);
+            fieldAllowsNull = typeAllowsNull(fieldDesc);
+          }
+        }
+        if (rhsIsNullable && !fieldAllowsNull) {
+          return LogErrorV(("Cannot assign nullable value to non-nullable field '" + LHSMA->getMemberName() + "'").c_str());
+        }
 
         // Cast RHS to the field type if necessary
         // Need to determine the field type from the struct definition
@@ -1614,6 +1844,7 @@ llvm::Value *BinaryExprAST::codegen() {
       }
     }
   }
+      }
   
   // Handle multi-character operators
   if (Op == "==") {
@@ -2377,6 +2608,12 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   bool isRefVar = isRef();
   TypeInfo declaredInfo = getTypeInfo();
 
+  const ExprAST *InitializerExpr = getInitializer();
+  const RefExprAST *RefInitializer = dynamic_cast<const RefExprAST*>(InitializerExpr);
+  const ExprAST *NullableCheckExpr = unwrapRefExpr(InitializerExpr);
+  const bool shouldCheckNullability = NullableCheckExpr && !RefInitializer;
+  std::string targetDescription = "variable '" + getName() + "'";
+
   // Check if at global scope
   llvm::Function *TheFunction = nullptr;
   bool isGlobal = false;
@@ -2472,6 +2709,9 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         if (!InitVal)
           return nullptr;
 
+        if (shouldCheckNullability && !validateNullableAssignment(declaredInfo, NullableCheckExpr, targetDescription))
+          return nullptr;
+
         // Cast and store the value
         InitVal = castToType(InitVal, VarType, getType());
         Builder->CreateStore(InitVal, GV);
@@ -2529,6 +2769,9 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
           // Generate code to store the actual initial value
           llvm::Value *InitVal = getInitializer()->codegen();
           if (!InitVal)
+            return nullptr;
+
+          if (shouldCheckNullability && !validateNullableAssignment(declaredInfo, NullableCheckExpr, targetDescription))
             return nullptr;
 
           // Cast the initializer to the variable type if needed
@@ -2623,6 +2866,9 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         if (!InitVal)
           return nullptr;
 
+        if (shouldCheckNullability && !validateNullableAssignment(declaredInfo, NullableCheckExpr, targetDescription))
+          return nullptr;
+
         // Only create the alloca after successful initialization
         llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
 
@@ -2669,6 +2915,9 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         if (getInitializer()) {
           InitVal = getInitializer()->codegen();
           if (!InitVal)
+            return nullptr;
+
+          if (shouldCheckNullability && !validateNullableAssignment(declaredInfo, NullableCheckExpr, targetDescription))
             return nullptr;
         }
 
@@ -3497,6 +3746,7 @@ llvm::Function *FunctionAST::codegen() {
   
   // Error reading body, remove function
   TheFunction->eraseFromParent();
+  Builder->ClearInsertionPoint();
   return nullptr;
 }
 
@@ -3621,6 +3871,7 @@ llvm::Type *StructAST::codegen() {
         ConstructorFunc->eraseFromParent();
         NamedValues.clear();
         LocalTypes.clear();
+        Builder->ClearInsertionPoint();
         return nullptr;
       }
 
@@ -3658,8 +3909,13 @@ llvm::Value *MemberAccessExprAST::codegen() {
   
   // Get the type name of the object AFTER codegen (should be set now)
   std::string ObjectTypeName = Object->getTypeName();
-  
-  
+  ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+  if (ObjectTypeDesc.isNullable) {
+    return LogErrorV(("Cannot access nullable type '" + ObjectTypeName + "' without null-safe operator").c_str());
+  }
+  std::string StructLookupName = ObjectTypeDesc.sanitized;
+
+
   // If ObjectTypeName is empty but have a valid pointer, it might be a nested struct access
   // In that case, the ObjectPtr is already a pointer to a struct
   if (ObjectTypeName.empty() && ObjectPtr->getType()->isPointerTy()) {
@@ -3669,13 +3925,13 @@ llvm::Value *MemberAccessExprAST::codegen() {
   }
   
   // Find the struct type
-  auto StructIt = StructTypes.find(ObjectTypeName);
+  auto StructIt = StructTypes.find(StructLookupName);
   if (StructIt == StructTypes.end()) {
     return LogErrorV(("Object is not a struct type: " + ObjectTypeName).c_str());
   }
   
   // Find the field index
-  auto FieldIndicesIt = StructFieldIndices.find(ObjectTypeName);
+  auto FieldIndicesIt = StructFieldIndices.find(StructLookupName);
   if (FieldIndicesIt == StructFieldIndices.end()) {
     return LogErrorV("Internal error: struct field indices not found");
   }
@@ -3710,7 +3966,7 @@ llvm::Value *MemberAccessExprAST::codegen() {
   
   // Set the type name for this expression
   std::string FieldTypeName;
-  auto FieldTypesIt = StructFieldTypes.find(ObjectTypeName);
+  auto FieldTypesIt = StructFieldTypes.find(StructLookupName);
   if (FieldTypesIt != StructFieldTypes.end()) {
     auto TypeIt = FieldTypesIt->second.find(MemberName);
     if (TypeIt != FieldTypesIt->second.end()) {
@@ -3732,15 +3988,20 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
   
   // Get the type name of the object
   std::string ObjectTypeName = Object->getTypeName();
+  ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+  if (ObjectTypeDesc.isNullable) {
+    return LogErrorV(("Cannot access nullable type '" + ObjectTypeName + "' without null-safe operator").c_str());
+  }
+  std::string StructLookupName = ObjectTypeDesc.sanitized;
   
   // Find the struct type
-  auto StructIt = StructTypes.find(ObjectTypeName);
+  auto StructIt = StructTypes.find(StructLookupName);
   if (StructIt == StructTypes.end()) {
     return LogErrorV(("Object is not a struct type: " + ObjectTypeName).c_str());
   }
   
   // Find the field index
-  auto FieldIndicesIt = StructFieldIndices.find(ObjectTypeName);
+  auto FieldIndicesIt = StructFieldIndices.find(StructLookupName);
   if (FieldIndicesIt == StructFieldIndices.end()) {
     return LogErrorV("Internal error: struct field indices not found");
   }
@@ -3767,6 +4028,159 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
   };
   
   return Builder->CreateGEP(StructIt->second, ObjectPtr, Indices, MemberName + "_ptr");
+}
+
+llvm::Value *NullSafeAccessExprAST::codegen() {
+  llvm::Value *ObjectPtr = Object->codegen();
+  if (!ObjectPtr)
+    return nullptr;
+
+  if (!ObjectPtr->getType()->isPointerTy())
+    return LogErrorV("Null-safe access requires pointer-compatible object type");
+
+  std::string ObjectTypeName = Object->getTypeName();
+  ParsedTypeDescriptor ObjectDesc = parseTypeString(ObjectTypeName);
+  std::string StructName = ObjectDesc.sanitized;
+
+  auto StructIt = StructTypes.find(StructName);
+  if (StructIt == StructTypes.end()) {
+    return LogErrorV(("Object is not a struct type: " + ObjectTypeName).c_str());
+  }
+
+  auto FieldIndicesIt = StructFieldIndices.find(StructName);
+  if (FieldIndicesIt == StructFieldIndices.end()) {
+    return LogErrorV("Internal error: struct field indices not found");
+  }
+
+  unsigned FieldIndex = 0;
+  bool FieldFound = false;
+  for (const auto &Field : FieldIndicesIt->second) {
+    if (Field.first == MemberName) {
+      FieldIndex = Field.second;
+      FieldFound = true;
+      break;
+    }
+  }
+
+  if (!FieldFound)
+    return LogErrorV(("Field not found in struct: " + MemberName).c_str());
+
+  llvm::Type *FieldType = StructIt->second->getElementType(FieldIndex);
+  if (!FieldType->isPointerTy()) {
+    return LogErrorV("Null-safe access is only supported for reference-type fields");
+  }
+
+  llvm::BasicBlock *CurrentBB = Builder->GetInsertBlock();
+  llvm::Function *Func = CurrentBB->getParent();
+
+  llvm::BasicBlock *NotNullBB = llvm::BasicBlock::Create(*TheContext, "nullsafe.notnull", Func);
+  llvm::BasicBlock *NullBB = llvm::BasicBlock::Create(*TheContext, "nullsafe.null", Func);
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "nullsafe.merge", Func);
+
+  llvm::Value *NullPtr = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ObjectPtr->getType()));
+  llvm::Value *IsNull = Builder->CreateICmpEQ(ObjectPtr, NullPtr, "nullsafe.check");
+  Builder->CreateCondBr(IsNull, NullBB, NotNullBB);
+
+  // Not-null branch
+  Builder->SetInsertPoint(NotNullBB);
+  std::vector<llvm::Value *> Indices = {
+      llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)),
+      llvm::ConstantInt::get(*TheContext, llvm::APInt(32, FieldIndex))};
+  llvm::Value *FieldPtr = Builder->CreateGEP(StructIt->second, ObjectPtr, Indices, MemberName + "_ptr");
+  llvm::Value *LoadedField = Builder->CreateLoad(FieldType, FieldPtr, MemberName + ".val");
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NotNullEnd = Builder->GetInsertBlock();
+
+  // Null branch
+  Builder->SetInsertPoint(NullBB);
+  llvm::Value *NullValue = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(FieldType));
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NullEnd = Builder->GetInsertBlock();
+
+  // Merge
+  Builder->SetInsertPoint(MergeBB);
+  llvm::PHINode *Phi = Builder->CreatePHI(FieldType, 2, MemberName + ".maybe");
+  Phi->addIncoming(LoadedField, NotNullEnd);
+  Phi->addIncoming(NullValue, NullEnd);
+
+  std::string FieldTypeName;
+  if (auto FieldTypesIt = StructFieldTypes.find(StructName); FieldTypesIt != StructFieldTypes.end()) {
+    if (auto TypeIt = FieldTypesIt->second.find(MemberName); TypeIt != FieldTypesIt->second.end()) {
+      FieldTypeName = TypeIt->second;
+    }
+  }
+  if (!FieldTypeName.empty())
+    setTypeName(ensureOuterNullable(FieldTypeName));
+  else
+    setTypeName("unknown?");
+
+  return Phi;
+}
+
+llvm::Value *NullSafeAccessExprAST::codegen_ptr() {
+  llvm::Value *ObjectPtr = Object->codegen();
+  if (!ObjectPtr)
+    return nullptr;
+
+  if (!ObjectPtr->getType()->isPointerTy())
+    return LogErrorV("Null-safe access requires pointer-compatible object type");
+
+  std::string ObjectTypeName = Object->getTypeName();
+  ParsedTypeDescriptor ObjectDesc = parseTypeString(ObjectTypeName);
+  std::string StructName = ObjectDesc.sanitized;
+
+  auto StructIt = StructTypes.find(StructName);
+  if (StructIt == StructTypes.end())
+    return LogErrorV(("Object is not a struct type: " + ObjectTypeName).c_str());
+
+  auto FieldIndicesIt = StructFieldIndices.find(StructName);
+  if (FieldIndicesIt == StructFieldIndices.end())
+    return LogErrorV("Internal error: struct field indices not found");
+
+  unsigned FieldIndex = 0;
+  bool FieldFound = false;
+  for (const auto &Field : FieldIndicesIt->second) {
+    if (Field.first == MemberName) {
+      FieldIndex = Field.second;
+      FieldFound = true;
+      break;
+    }
+  }
+
+  if (!FieldFound)
+    return LogErrorV(("Field not found in struct: " + MemberName).c_str());
+
+  std::vector<llvm::Value *> Indices = {
+      llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)),
+      llvm::ConstantInt::get(*TheContext, llvm::APInt(32, FieldIndex))};
+
+  llvm::BasicBlock *CurrentBB = Builder->GetInsertBlock();
+  llvm::Function *Func = CurrentBB->getParent();
+
+  llvm::BasicBlock *NotNullBB = llvm::BasicBlock::Create(*TheContext, "nullsafe.ptr.notnull", Func);
+  llvm::BasicBlock *NullBB = llvm::BasicBlock::Create(*TheContext, "nullsafe.ptr.null", Func);
+  llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "nullsafe.ptr.merge", Func);
+
+  llvm::Value *NullPtr = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ObjectPtr->getType()));
+  llvm::Value *IsNull = Builder->CreateICmpEQ(ObjectPtr, NullPtr, "nullsafe.ptr.check");
+  Builder->CreateCondBr(IsNull, NullBB, NotNullBB);
+
+  Builder->SetInsertPoint(NotNullBB);
+  llvm::Value *FieldPtr = Builder->CreateGEP(StructIt->second, ObjectPtr, Indices, MemberName + "_ptr");
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NotNullEnd = Builder->GetInsertBlock();
+
+  Builder->SetInsertPoint(NullBB);
+  llvm::Value *NullFieldPtr = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(FieldPtr->getType()));
+  Builder->CreateBr(MergeBB);
+  llvm::BasicBlock *NullEnd = Builder->GetInsertBlock();
+
+  Builder->SetInsertPoint(MergeBB);
+  llvm::PHINode *Phi = Builder->CreatePHI(FieldPtr->getType(), 2, MemberName + ".ptrmaybe");
+  Phi->addIncoming(FieldPtr, NotNullEnd);
+  Phi->addIncoming(NullFieldPtr, NullEnd);
+
+  return Phi;
 }
 
 // Generate code for 'this' expressions
