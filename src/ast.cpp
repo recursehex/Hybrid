@@ -1120,7 +1120,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
 }
 
-llvm::Value *NullSafeArrayIndexExprAST::codegen() {
+llvm::Value *NullSafeElementAccessExprAST::codegen() {
   llvm::Value *ArrayVal = getArray()->codegen();
   if (!ArrayVal)
     return nullptr;
@@ -1400,7 +1400,7 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
   return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
 }
 
-llvm::Value *NullSafeArrayIndexExprAST::codegen_ptr() {
+llvm::Value *NullSafeElementAccessExprAST::codegen_ptr() {
   llvm::Value *ArrayVal = getArray()->codegen();
   if (!ArrayVal)
     return nullptr;

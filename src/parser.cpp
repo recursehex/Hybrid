@@ -649,7 +649,7 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
   return Result;
 }
 
-std::unique_ptr<ExprAST> ParseNullSafeArrayIndex(std::unique_ptr<ExprAST> Array) {
+std::unique_ptr<ExprAST> ParseNullSafeElementAccess(std::unique_ptr<ExprAST> Array) {
   getNextToken(); // eat '?['
 
   auto Index = ParseExpression();
@@ -660,7 +660,7 @@ std::unique_ptr<ExprAST> ParseNullSafeArrayIndex(std::unique_ptr<ExprAST> Array)
     return LogError("Expected ']' after null-safe array index");
   getNextToken(); // eat ']'
 
-  return std::make_unique<NullSafeArrayIndexExprAST>(std::move(Array), std::move(Index));
+  return std::make_unique<NullSafeElementAccessExprAST>(std::move(Array), std::move(Index));
 }
 
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
@@ -922,7 +922,7 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       if (!LHS)
         return nullptr;
     } else if (CurTok == tok_null_array_access) {
-      LHS = ParseNullSafeArrayIndex(std::move(LHS));
+      LHS = ParseNullSafeElementAccess(std::move(LHS));
       if (!LHS)
         return nullptr;
     } else if (CurTok == tok_inc || CurTok == tok_dec) {

@@ -56,15 +56,15 @@ enum Token {
   tok_lchar = -35,
 
   // primary literals
-  tok_identifier = -36,
-  tok_number = -37,
-  tok_string_literal = -38,
-  tok_char_literal = -39,
+  tok_identifier = -36,     // e.g. foo, bar, baz
+  tok_number = -37,         // e.g. 12345, 3.14
+  tok_string_literal = -38, // e.g. "hello"
+  tok_char_literal = -39,   // e.g. 'a'
 
   // boolean literals
-  tok_true = -40,
-  tok_false = -41,
-  tok_null = -42,
+  tok_true = -40,       // true
+  tok_false = -41,      // false
+  tok_null = -42,       // null
 
   // delimiters
   tok_newline = -43,
@@ -132,6 +132,7 @@ enum Token {
   tok_interpolated_expr_start = -81,      // `
   tok_interpolated_expr_end = -82,        // `
 
+  // nullity operators
   tok_nullable = -83,               // ? (nullable type)
   tok_null_safe_access = -84,       // ?. (null-safe member access)
   tok_null_array_access = -85,      // ?[ (null-safe array access)

@@ -466,13 +466,13 @@ public:
   ExprAST *getIndex() const { return Index.get(); }
 };
 
-/// NullSafeArrayIndexExprAST - Expression class for null-safe array indexing like arr?[0].
-class NullSafeArrayIndexExprAST : public ExprAST {
+/// NullSafeElementAccessExprAST - Expression class for null-safe element access like arr?[0].
+class NullSafeElementAccessExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Array;
   std::unique_ptr<ExprAST> Index;
 
 public:
-  NullSafeArrayIndexExprAST(std::unique_ptr<ExprAST> Array,
+  NullSafeElementAccessExprAST(std::unique_ptr<ExprAST> Array,
                             std::unique_ptr<ExprAST> Index)
       : Array(std::move(Array)), Index(std::move(Index)) {}
 
