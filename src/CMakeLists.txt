@@ -6,6 +6,7 @@ set(HYBRID_SOURCES
     ast.cpp
     toplevel.cpp
     compiler_session.cpp
+    runtime_support.cpp
 )
 
 # Define header files

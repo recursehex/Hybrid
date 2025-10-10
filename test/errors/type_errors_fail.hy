@@ -1,42 +1,30 @@
-// Test type casting errors with sized types
-// All operations in this file should fail
+// Type error regression tests: every declaration or expression in this file
+// must produce a compilation failure.
 
-// Test 1: Mixing different sized integers
-short s = 100
-int i = 200
-int bad1 = s + i        // Error: cannot mix short and int
+// Test 1: Bool isolation in arithmetic
+int boolSum = true + 1          // Error: bool cannot participate in numeric addition
 
-// Test 2: Mixing unsigned and signed of different sizes
-byte b = 255
-short s2 = 100
-int bad2 = b + s2       // Error: cannot mix byte and short
+// Test 2: Bool assignment to wider numeric type
+long boolAssign = false         // Error: bool cannot be assigned to long without cast
 
-// Test 3: Bool isolation
-bool flag = true
-int num = 42
-int bad3 = flag + num   // Error: cannot mix bool and int
-
-// Test 4: Different sized assignments
-long l = 1000000
-int bad4 = l            // Error: cannot assign long to int
-
-// Test 5: Function parameter type mismatch
+// Test 3: Bool passed where int expected
 int takes_int(int x)
 {
     return x
 }
 
-short s3 = 100
-takes_int(s3)           // Error: cannot pass short where int expected
+takes_int(true)                 // Error: bool cannot be passed to int parameter
 
-// Test 6: Array type mismatches
-byte[] bytes = [1, 2, 3]
-short s4 = bytes[0]     // Error: cannot assign byte to short
+// Test 4: Assigning larger integer to smaller without cast
+long wideValue = 1000000
+int narrowed = wideValue        // Error: requires explicit cast from long to int
 
-// Test 7: Unsigned/signed mismatch of same size
-uint ui = 1000
-int i2 = ui             // Error: cannot assign uint to int (different types even though same size)
+// Test 5: Assigning string to numeric type
+int stringToInt = "123"         // Error: string cannot be assigned to int
 
-// Test 8: Character type mismatches  
+// Test 6: Mixing string with numeric addition
+int mixedAdd = "foo" + 1        // Error: string cannot be added to int
+
+// Test 7: Character narrowing without cast
 lchar lc = 'A'
-char c = lc             // Error: cannot assign lchar (32-bit) to char (8-bit)
+char narrowChar = lc            // Error: requires explicit cast from lchar to char

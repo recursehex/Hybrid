@@ -426,10 +426,12 @@ The compiler reports errors for:
 
 ### Runtime Errors
 
-Currently no runtime error checking. Future enhancements:
-- Array bounds checking
+The generated IR includes runtime guards for array bounds. Each indexed access branches to an error block that calls `abort()` when the index is negative or exceeds the recorded array size.
+
+Future enhancements:
 - Null pointer checks
 - Division by zero checks
+- Safer handling for raw pointer arithmetic
 
 ## Examples
 

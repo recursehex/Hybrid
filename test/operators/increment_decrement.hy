@@ -302,25 +302,25 @@ float test_postfix_float()
 }
 
 // Run all tests
-test_basic_prefix()
-test_prefix_assignment()
-test_multiple_vars()
-test_in_expressions()
-test_float_inc_dec()
-test_loop_increment()
-test_for_loop()
-test_complex_expressions()
-test_with_arrays()
-test_chain_operations()
-test_with_function_calls()
-test_in_conditionals()
-test_basic_postfix()
-test_postfix_vs_prefix()
-test_postfix_expressions()
-test_multiple_postfix()
-test_postfix_function_calls()
-test_postfix_arrays()
-test_complex_postfix()
-test_postfix_conditionals()
-test_mixed_operations()
-test_postfix_float()
+assert test_basic_prefix() == 12
+assert test_prefix_assignment() == 16
+assert test_multiple_vars() == 7
+assert test_in_expressions() == 20
+assert test_float_inc_dec() == 16.75
+assert test_loop_increment() == 10
+assert test_for_loop() == 20
+assert test_complex_expressions() == 21
+assert test_with_arrays() == 60
+assert test_chain_operations() == 8
+assert test_with_function_calls() == 12
+assert test_in_conditionals() == 15
+assert test_basic_postfix() == 31
+assert test_postfix_vs_prefix() == 11
+assert test_postfix_expressions() == 31
+assert test_multiple_postfix() == 15
+assert test_postfix_function_calls() == 16
+assert test_postfix_arrays() == 60
+assert test_complex_postfix() == 65
+assert test_postfix_conditionals() == 15
+assert test_mixed_operations() == 22
+assert test_postfix_float() == 15.75

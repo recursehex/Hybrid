@@ -41,6 +41,8 @@ int runNullableDemo()
     alias = null
 
     string? city = user.address?.city
+    setAlias(user, null)
+    assert user.alias == null
 
     user.address = Address("New York")
     string? confirmedCity = user.address?.city
@@ -49,5 +51,13 @@ int runNullableDemo()
     string? missingAlias = getAlias(nobody)
 
     string actualName = user.name
+    assert alias == null
+    assert city == null
+    assert confirmedCity == "New York"
+    assert missingAlias == null
+    assert actualName == "Alice"
+    assert user.address?.city == "New York"
     return 0
 }
+
+assert runNullableDemo() == 0

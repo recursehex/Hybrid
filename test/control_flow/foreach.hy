@@ -41,7 +41,7 @@ int nested_foreach()
     {
         for int y in inner
         {
-        result = result + (x * y)
+            result = result + (x * y)
         }
     }
     
@@ -58,7 +58,7 @@ int foreach_with_break()
     {
         if num > 30
         {
-        break
+            break
         }
         sum = sum + num
     }
@@ -66,7 +66,7 @@ int foreach_with_break()
     return sum
 }
 
-sum_array()
-avg_array()
-nested_foreach()
-foreach_with_break()
+assert sum_array() == 15
+assert avg_array() == 3.0
+assert nested_foreach() == 180
+assert foreach_with_break() == 60

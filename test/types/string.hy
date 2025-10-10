@@ -30,6 +30,9 @@ int testStringOps()
     string message = getMessage()
     bool same = compareStrings(local_greeting, "Hello")
     
+    assert message == "Hello from function"
+    assert same
+
     if same
     {
         return 1
@@ -43,5 +46,6 @@ int testStringOps()
 int main()
 {
     int result = testStringOps()
+    assert result == 1
     return result
 }

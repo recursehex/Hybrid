@@ -18,9 +18,9 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Casting.h"
 
-#include <map>
 #include <cmath>
 #include <climits>
+#include <map>
 #include <ranges>
 #include <string_view>
 #include <optional>
@@ -333,6 +333,30 @@ constexpr bool isUnsignedType(std::string_view TypeStr) {
          TypeStr == "ulong" || TypeStr == "schar" || TypeStr == "lchar";
 }
 
+static std::string sanitizeBaseTypeName(std::string_view typeName) {
+  if (typeName.empty())
+    return {};
+
+  ParsedTypeDescriptor desc = parseTypeString(std::string(typeName));
+  return desc.sanitized;
+}
+
+static std::optional<bool> unsignedHintFromTypeName(const std::string &typeName) {
+  if (typeName.empty())
+    return std::nullopt;
+
+  if (typeName == "char" || typeName == "lchar")
+    return true;
+
+  if (isUnsignedType(typeName))
+    return true;
+
+  if (isSignedType(typeName))
+    return false;
+
+  return std::nullopt;
+}
+
 // Type conversion helper
 llvm::Type *getTypeFromString(const std::string &TypeStr) {
   std::string CleanType = stripNullableAnnotations(TypeStr);
@@ -522,25 +546,36 @@ llvm::Value *NullExprAST::codegen() {
 }
 
 static llvm::Value *emitUTF16StringLiteral(const std::string &value) {
-  std::vector<llvm::Constant *> charValues;
-  charValues.reserve(value.size() + 1);
+  static std::map<std::string, llvm::GlobalVariable*> StringLiteralCache;
 
-  // TODO: Proper UTF-8 to UTF-16 conversion should be implemented here
-  // For now, treat each byte as a separate 16-bit character.
-  for (unsigned char c : value) {
-    charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext),
-                                               static_cast<uint16_t>(c)));
+  llvm::GlobalVariable *global = nullptr;
+
+  if (auto it = StringLiteralCache.find(value); it != StringLiteralCache.end()) {
+    global = it->second;
+  } else {
+    std::vector<llvm::Constant *> charValues;
+    charValues.reserve(value.size() + 1);
+
+    // TODO: Proper UTF-8 to UTF-16 conversion should be implemented here
+    // For now, treat each byte as a separate 16-bit character.
+    for (unsigned char c : value) {
+      charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext),
+                                                 static_cast<uint16_t>(c)));
+    }
+
+    // Append null terminator
+    charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 0));
+
+    auto *arrayType = llvm::ArrayType::get(llvm::Type::getInt16Ty(*TheContext), charValues.size());
+    auto *stringArray = llvm::ConstantArray::get(arrayType, charValues);
+
+    global = new llvm::GlobalVariable(*TheModule, arrayType, true,
+                                      llvm::GlobalValue::PrivateLinkage,
+                                      stringArray, "str");
+    StringLiteralCache.emplace(value, global);
   }
 
-  // Append null terminator
-  charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 0));
-
-  auto *arrayType = llvm::ArrayType::get(llvm::Type::getInt16Ty(*TheContext), charValues.size());
-  auto *stringArray = llvm::ConstantArray::get(arrayType, charValues);
-
-  auto *global = new llvm::GlobalVariable(*TheModule, arrayType, true,
-                                          llvm::GlobalValue::PrivateLinkage,
-                                          stringArray, "str");
+  auto *arrayType = llvm::cast<llvm::ArrayType>(global->getValueType());
 
   llvm::Value *zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
   return Builder->CreateInBoundsGEP(arrayType, global, {zero, zero}, "strptr");
@@ -751,24 +786,65 @@ llvm::Value *InterpolatedStringExprAST::codegen() {
 }
 
 // Generate code for character literals
-llvm::Value *CharExprAST::codegen() {
-  uint32_t val = getValue();
-  
-  // Determine the appropriate type based on the context
-  // For now, use the default char (16-bit) unless the value requires more
-  if (val > 0xFFFF) {
-    // Value requires 32-bit (lchar)
-    setTypeName("lchar");
-    return llvm::ConstantInt::get(*TheContext, llvm::APInt(32, val));
-  } else if (val > 0xFF) {
-    // Value requires 16-bit (char)
+llvm::Value *CharExprAST::codegen_with_target(llvm::Type *TargetType,
+                                              const std::string &TargetTypeName) {
+  uint32_t value = getValue();
+
+  auto emitDefault = [&]() -> llvm::Value * {
+    if (value > 0xFFFF) {
+      setTypeName("lchar");
+      return llvm::ConstantInt::get(*TheContext, llvm::APInt(32, value));
+    }
     setTypeName("char");
-    return llvm::ConstantInt::get(*TheContext, llvm::APInt(16, val));
-  } else {
-    // Value fits in 16-bit (default char)
-    setTypeName("char");
-    return llvm::ConstantInt::get(*TheContext, llvm::APInt(16, val));
+    return llvm::ConstantInt::get(*TheContext, llvm::APInt(16, value));
+  };
+
+  if (!TargetType || !TargetType->isIntegerTy())
+    return emitDefault();
+
+  unsigned bitWidth = TargetType->getIntegerBitWidth();
+  if (bitWidth != 8 && bitWidth != 16 && bitWidth != 32)
+    return emitDefault();
+
+  if ((bitWidth == 32 && value > 0x10FFFF) ||
+      (bitWidth == 16 && value > 0xFFFF) ||
+      (bitWidth == 8 && value > 0xFF))
+    return emitDefault();
+
+  std::string cleanTarget = sanitizeBaseTypeName(TargetTypeName);
+  std::optional<bool> unsignedHint = unsignedHintFromTypeName(cleanTarget);
+
+  if (bitWidth == 8) {
+    if (unsignedHint.has_value() && !unsignedHint.value() && value > 0x7F)
+      return emitDefault();
+  } else if (bitWidth == 16) {
+    if (cleanTarget == "short" && value > 0x7FFF)
+      return emitDefault();
+  } else if (bitWidth == 32) {
+    if (unsignedHint.has_value() && !unsignedHint.value() && value > static_cast<uint32_t>(INT32_MAX))
+      return emitDefault();
   }
+
+  llvm::APInt literal(bitWidth, value, /*isSigned=*/false);
+  llvm::Value *constant = llvm::ConstantInt::get(*TheContext, literal);
+
+  if (!cleanTarget.empty()) {
+    setTypeName(cleanTarget);
+  } else if (bitWidth == 8) {
+    setTypeName(unsignedHint.value_or(true) ? "schar" : "sbyte");
+  } else if (bitWidth == 16) {
+    setTypeName("char");
+  } else {
+    setTypeName("lchar");
+  }
+
+  return constant;
+}
+
+llvm::Value *CharExprAST::codegen() {
+  if (getValue() > 0xFFFF)
+    return codegen_with_target(llvm::Type::getInt32Ty(*TheContext), "lchar");
+  return codegen_with_target(llvm::Type::getInt16Ty(*TheContext), "char");
 }
 
 // Forward declaration for castToType
@@ -781,9 +857,13 @@ bool areTypesCompatible(llvm::Type* type1, llvm::Type* type2) {
   if (type1 == type2)
     return true;
   
-  // Bool is its own type - no implicit conversions
-  if (type1->isIntegerTy(1) || type2->isIntegerTy(1))
-    return false;
+  if (type1->isIntegerTy() && type2->isIntegerTy()) {
+    const bool isBool1 = type1->isIntegerTy(1);
+    const bool isBool2 = type2->isIntegerTy(1);
+    if (isBool1 || isBool2)
+      return isBool1 && isBool2;
+    return true;
+  }
   
   // Allow implicit conversion between integer and float types
   if ((type1->isIntegerTy() && type2->isFloatingPointTy()) ||
@@ -798,12 +878,23 @@ bool areTypesCompatible(llvm::Type* type1, llvm::Type* type2) {
 }
 
 // Generate code for array literals
-llvm::Value *ArrayExprAST::codegen() {
-  // Get the element type
-  llvm::Type *ElemType = getTypeFromString(getElementType());
+llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElementType,
+                                                       const std::string &TargetElementTypeName) {
+  llvm::Type *ElemType = TargetElementType;
+  std::string elementTypeName = TargetElementTypeName;
+
+  if (!ElemType) {
+    ElemType = getTypeFromString(getElementType());
+    elementTypeName = getElementType();
+  }
+
   if (!ElemType)
     return LogErrorV("Unknown element type in array literal");
-  
+
+  std::string cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
+  if (cleanElementTypeName.empty())
+    cleanElementTypeName = elementTypeName;
+
   // Get the array size
   size_t ArraySize = getElements().size();
   bool useGlobalStorage = false;
@@ -833,41 +924,58 @@ llvm::Value *ArrayExprAST::codegen() {
     ArrayDataPtr = Builder->CreateAlloca(
         ElemType, llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize)), "arraytmp");
   }
-  
+
   // Store each element
   for (size_t i = 0; i < ArraySize; ++i) {
-    llvm::Value *ElemVal = getElements()[i]->codegen();
+    llvm::Value *ElemVal = nullptr;
+    if (auto *Num = dynamic_cast<NumberExprAST*>(getElements()[i].get())) {
+      ElemVal = Num->codegen_with_target(ElemType);
+    } else if (auto *Char = dynamic_cast<CharExprAST*>(getElements()[i].get())) {
+      ElemVal = Char->codegen_with_target(ElemType, cleanElementTypeName);
+    } else {
+      ElemVal = getElements()[i]->codegen();
+    }
+
     if (!ElemVal)
       return nullptr;
-    
+
     // Cast element to the correct type if needed
-    ElemVal = castToType(ElemVal, ElemType);
-    
+    ElemVal = castToType(ElemVal, ElemType, cleanElementTypeName);
+
     // Calculate the address of the i-th element
     llvm::Value *Idx = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, i));
     llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayDataPtr, Idx, "elemptr");
-    
+
     // Store the element
     Builder->CreateStore(ElemVal, ElemPtr);
   }
-  
+
   // Create the array struct {ptr, size}
   llvm::StructType *ArrayStructType = getArrayStructType(ElemType);
   llvm::AllocaInst *ArrayStruct = Builder->CreateAlloca(ArrayStructType, nullptr, "arrayStruct");
-  
+
   // Store the pointer (field 0)
   llvm::Value *PtrField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 0, "ptrField");
   llvm::Value *ArrayPtrForStruct =
       Builder->CreateBitCast(ArrayDataPtr, llvm::PointerType::get(*TheContext, 0), "array.ptrcast");
   Builder->CreateStore(ArrayPtrForStruct, PtrField);
-  
+
   // Store the size (field 1)
   llvm::Value *SizeField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 1, "sizeField");
   llvm::Value *SizeVal = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize));
   Builder->CreateStore(SizeVal, SizeField);
-  
+
+  std::string arrayTypeName = cleanElementTypeName;
+  if (!arrayTypeName.empty())
+    arrayTypeName += "[]";
+  setTypeName(arrayTypeName);
+
   // Return the struct
   return Builder->CreateLoad(ArrayStructType, ArrayStruct, "arrayStructVal");
+}
+
+llvm::Value *ArrayExprAST::codegen() {
+  return codegen_with_element_target(nullptr, getElementType());
 }
 
 // Generate code for array indexing
@@ -1791,14 +1899,16 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::s
 }
 
 // Helper function to promote types for binary operations
-std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* R) {
+std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* R,
+                                                   std::string_view lhsTypeName,
+                                                   std::string_view rhsTypeName) {
   llvm::Type* LType = L->getType();
   llvm::Type* RType = R->getType();
   
   // If both are the same type, no promotion needed
   if (LType == RType)
     return {L, R};
-  
+
   // Check if types are compatible
   if (!areTypesCompatible(LType, RType)) {
     // Generate a more helpful error message
@@ -1826,18 +1936,62 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
     LogErrorV(("Type mismatch: cannot implicitly convert between '" + LTypeStr + "' and '" + RTypeStr + "'").c_str());
     return {L, R}; // Return original values, error already logged
   }
-  
+
+  std::string lhsClean = sanitizeBaseTypeName(lhsTypeName);
+  std::string rhsClean = sanitizeBaseTypeName(rhsTypeName);
+
+  // Handle integer promotions explicitly
+  if (LType->isIntegerTy() && RType->isIntegerTy()) {
+    if (LType->isIntegerTy(1) || RType->isIntegerTy(1))
+      return {L, R};
+
+    unsigned lBits = LType->getIntegerBitWidth();
+    unsigned rBits = RType->getIntegerBitWidth();
+
+    auto chooseUnsignedHint = [&](const std::string &primary,
+                                  const std::string &secondary) -> std::optional<bool> {
+      if (auto hint = unsignedHintFromTypeName(primary); hint.has_value())
+        return hint;
+      return unsignedHintFromTypeName(secondary);
+    };
+
+    auto extendValue = [&](llvm::Value *Value, llvm::Type *TargetType,
+                           std::optional<bool> unsignedHint) -> llvm::Value * {
+      if (unsignedHint.value_or(false))
+        return Builder->CreateZExt(Value, TargetType, "promext");
+      return Builder->CreateSExt(Value, TargetType, "promext");
+    };
+
+    if (lBits < rBits) {
+      auto hint = chooseUnsignedHint(lhsClean, rhsClean);
+      L = extendValue(L, RType, hint);
+    } else if (rBits < lBits) {
+      auto hint = chooseUnsignedHint(rhsClean, lhsClean);
+      R = extendValue(R, LType, hint);
+    }
+
+    return {L, R};
+  }
+
   // If one is float and other is int, promote int to float
   if (LType->isFloatingPointTy() && RType->isIntegerTy()) {
-    R = Builder->CreateSIToFP(R, LType, "promtmp");
+    std::optional<bool> hint = unsignedHintFromTypeName(rhsClean);
+    if (hint.value_or(false))
+      R = Builder->CreateUIToFP(R, LType, "promtmp");
+    else
+      R = Builder->CreateSIToFP(R, LType, "promtmp");
     return {L, R};
   }
-  
+
   if (LType->isIntegerTy() && RType->isFloatingPointTy()) {
-    L = Builder->CreateSIToFP(L, RType, "promtmp");
+    std::optional<bool> hint = unsignedHintFromTypeName(lhsClean);
+    if (hint.value_or(false))
+      L = Builder->CreateUIToFP(L, RType, "promtmp");
+    else
+      L = Builder->CreateSIToFP(L, RType, "promtmp");
     return {L, R};
   }
-  
+
   // If both are floats but different precision, promote to higher precision
   if (LType->isFloatingPointTy() && RType->isFloatingPointTy()) {
     if (LType->isFloatTy() && RType->isDoubleTy()) {
@@ -1846,7 +2000,7 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
       R = Builder->CreateFPExt(R, LType, "promtmp");
     }
   }
-  
+
   return {L, R};
 }
 
@@ -2041,8 +2195,8 @@ llvm::Value *BinaryExprAST::codegen() {
   if (Op == "\?\?=")
     return codegenNullCoalescingAssign(L);
 
-  // For comparisons, arithmetic, and equality operators, try to generate right operand with left's type as target
-  // This allows number literals to automatically match the target type
+  // For comparisons, arithmetic, and equality operators, try to regenerate literals so they
+  // match the other operand's type (numbers and chars).
   llvm::Value *R = nullptr;
   bool isComparisonOrArithmetic = (Op == "==" || Op == "!=" || Op == "<" || Op == ">" || Op == "<=" || Op == ">=" ||
                                    Op == "+" || Op == "-" || Op == "*" || Op == "/" || Op == "%");
@@ -2059,6 +2213,18 @@ llvm::Value *BinaryExprAST::codegen() {
         R = RTemp;
       }
     }
+
+    if (!R) {
+      if (CharExprAST *CharRHS = dynamic_cast<CharExprAST*>(getRHS())) {
+        R = CharRHS->codegen_with_target(L->getType(), getLHS()->getTypeName());
+      } else if (CharExprAST *CharLHS = dynamic_cast<CharExprAST*>(getLHS())) {
+        llvm::Value *RTemp = getRHS()->codegen();
+        if (RTemp) {
+          L = CharLHS->codegen_with_target(RTemp->getType(), getRHS()->getTypeName());
+          R = RTemp;
+        }
+      }
+    }
   }
 
   // If R wasn't generated yet (not a comparison or not a number literal), generate normally
@@ -2069,28 +2235,77 @@ llvm::Value *BinaryExprAST::codegen() {
   if (!R)
     return nullptr;
 
-  // Get type names from operands
-  std::string leftTypeName = getLHS()->getTypeName();
-  std::string rightTypeName = getRHS()->getTypeName();
+  // Get type names from operands after potential regeneration
+  std::string rawLeftTypeName = getLHS()->getTypeName();
+  std::string rawRightTypeName = getRHS()->getTypeName();
+  std::string leftTypeName = sanitizeBaseTypeName(rawLeftTypeName);
+  std::string rightTypeName = sanitizeBaseTypeName(rawRightTypeName);
 
   // Promote types to compatible types
-  auto promoted = promoteTypes(L, R);
+  auto promoted = promoteTypes(L, R, leftTypeName, rightTypeName);
   L = promoted.first;
   R = promoted.second;
 
   // Check if working with floating point or integer types
-  bool isFloat = L->getType()->isFloatingPointTy();
+  llvm::Type *resultType = L->getType();
+  bool isFloat = resultType->isFloatingPointTy();
   
   // Set result type name based on the promoted type
   if (isFloat) {
-    setTypeName(L->getType()->isFloatTy() ? "float" : "double");
+    setTypeName(resultType->isFloatTy() ? "float" : "double");
   } else {
-    // For integers, use the larger type's name or left type if same size
-    if (!leftTypeName.empty()) {
-      setTypeName(leftTypeName);
-    } else {
-      setTypeName("int"); // Default
+    const unsigned bitWidth = resultType->getIntegerBitWidth();
+    auto pickMatchingName = [&](const std::string &candidate) -> std::string {
+      if (candidate.empty())
+        return {};
+      std::string clean = sanitizeBaseTypeName(candidate);
+      switch (bitWidth) {
+      case 8:
+        if (clean == "byte" || clean == "sbyte" || clean == "schar")
+          return clean;
+        break;
+      case 16:
+        if (clean == "short" || clean == "ushort" || clean == "char")
+          return clean;
+        break;
+      case 32:
+        if (clean == "int" || clean == "uint" || clean == "lchar")
+          return clean;
+        break;
+      case 64:
+        if (clean == "long" || clean == "ulong")
+          return clean;
+        break;
+      default:
+        break;
+      }
+      return {};
+    };
+
+    std::string chosen = pickMatchingName(rawLeftTypeName);
+    if (chosen.empty())
+      chosen = pickMatchingName(rawRightTypeName);
+    if (chosen.empty()) {
+      switch (bitWidth) {
+      case 8:
+        chosen = "sbyte";
+        break;
+      case 16:
+        chosen = "char";
+        break;
+      case 32:
+        chosen = "int";
+        break;
+      case 64:
+        chosen = "long";
+        break;
+      default:
+        chosen = "int";
+        break;
+      }
     }
+
+    setTypeName(chosen);
   }
 
   // Handle single-character operators
@@ -2406,7 +2621,11 @@ llvm::Value *BinaryExprAST::codegen() {
       char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
       
       // Promote types for the operation
-      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      std::string lhsPromoteType;
+      if (const TypeInfo *info = lookupTypeInfo(LHSE->getName()))
+        lhsPromoteType = typeNameFromInfo(*info);
+      std::string rhsPromoteType = getRHS()->getTypeName();
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
       
       switch (baseOp) {
@@ -2462,6 +2681,7 @@ llvm::Value *BinaryExprAST::codegen() {
       llvm::Type *ArrayType = ArrayVal->getType();
       llvm::Value *ArrayPtr = nullptr;
       llvm::Type *ElemType = nullptr;
+      std::string elementTypeNameForPromotion;
       
       if (ArrayType->isStructTy()) {
         // New array representation: extract pointer from struct
@@ -2477,6 +2697,7 @@ llvm::Value *BinaryExprAST::codegen() {
             if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
               std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
               ElemType = getTypeFromString(elemTypeStr);
+              elementTypeNameForPromotion = elemTypeStr;
             }
           }
         }
@@ -2501,7 +2722,8 @@ llvm::Value *BinaryExprAST::codegen() {
       char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
       
       // Promote types for the operation
-      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      std::string rhsPromoteType = getRHS()->getTypeName();
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
       
       switch (baseOp) {
@@ -2631,7 +2853,11 @@ llvm::Value *BinaryExprAST::codegen() {
         return LogErrorV("Bitwise compound assignment requires integer operands");
       
       // Promote types for the operation
-      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      std::string lhsPromoteType;
+      if (const TypeInfo *info = lookupTypeInfo(LHSE->getName()))
+        lhsPromoteType = typeNameFromInfo(*info);
+      std::string rhsPromoteType = getRHS()->getTypeName();
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
       
       // Perform the operation based on the compound operator
       llvm::Value *Result;
@@ -2667,6 +2893,7 @@ llvm::Value *BinaryExprAST::codegen() {
       llvm::Type *ArrayType = ArrayVal->getType();
       llvm::Value *ArrayPtr = nullptr;
       llvm::Type *ElemType = nullptr;
+      std::string elementTypeNameForPromotion;
       
       if (ArrayType->isStructTy()) {
         // New array representation: extract pointer from struct
@@ -2682,6 +2909,7 @@ llvm::Value *BinaryExprAST::codegen() {
             if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
               std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
               ElemType = getTypeFromString(elemTypeStr);
+              elementTypeNameForPromotion = elemTypeStr;
             }
           }
         }
@@ -2706,7 +2934,8 @@ llvm::Value *BinaryExprAST::codegen() {
         return LogErrorV("Bitwise compound assignment requires integer operands");
       
       // Promote types for the operation
-      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R);
+      std::string rhsPromoteType = getRHS()->getTypeName();
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
       
       // Perform the operation
       llvm::Value *Result;
@@ -3113,6 +3342,34 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   const bool shouldCheckNullability = NullableCheckExpr && !RefInitializer;
   std::string targetDescription = "variable '" + getName() + "'";
 
+  std::string declaredElementTypeName;
+  llvm::Type *declaredElementType = nullptr;
+  if (declaredInfo.isArray) {
+    if (declaredInfo.typeName.size() > 2 &&
+        declaredInfo.typeName.substr(declaredInfo.typeName.size() - 2) == "[]") {
+      declaredElementTypeName = declaredInfo.typeName.substr(0, declaredInfo.typeName.size() - 2);
+    } else {
+      ParsedTypeDescriptor declaredDesc = parseTypeString(declaredInfo.typeName);
+      if (declaredDesc.sanitized.size() > 2 &&
+          declaredDesc.sanitized.substr(declaredDesc.sanitized.size() - 2) == "[]") {
+        declaredElementTypeName = declaredDesc.sanitized.substr(0, declaredDesc.sanitized.size() - 2);
+      }
+    }
+
+    if (!declaredElementTypeName.empty())
+      declaredElementType = getTypeFromString(declaredElementTypeName);
+  }
+
+  auto generateInitializerValue = [&](ExprAST *expr) -> llvm::Value * {
+    if (!expr)
+      return nullptr;
+    if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(expr)) {
+      if (declaredInfo.isArray)
+        return ArrayInit->codegen_with_element_target(declaredElementType, declaredElementTypeName);
+    }
+    return expr->codegen();
+  };
+
   // Check if at global scope
   llvm::Function *TheFunction = nullptr;
   bool isGlobal = false;
@@ -3204,7 +3461,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         GV->setInitializer(ZeroInit);
 
         // Generate the initializer value
-        llvm::Value *InitVal = getInitializer()->codegen();
+        llvm::Value *InitVal = generateInitializerValue(getInitializer());
         if (!InitVal)
           return nullptr;
 
@@ -3238,7 +3495,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         GV->setInitializer(llvm::ConstantPointerNull::get(AliasPtrType));
 
         // Generate the initializer (should return a pointer)
-        llvm::Value *InitVal = getInitializer()->codegen();
+        llvm::Value *InitVal = generateInitializerValue(getInitializer());
         if (!InitVal)
           return nullptr;
 
@@ -3266,7 +3523,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
           GV->setInitializer(ZeroInit);
 
           // Generate code to store the actual initial value
-          llvm::Value *InitVal = getInitializer()->codegen();
+          llvm::Value *InitVal = generateInitializerValue(getInitializer());
           if (!InitVal)
             return nullptr;
 
@@ -3412,7 +3669,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         // Generate and validate the initial value first
         llvm::Value *InitVal = nullptr;
         if (getInitializer()) {
-          InitVal = getInitializer()->codegen();
+          InitVal = generateInitializerValue(getInitializer());
           if (!InitVal)
             return nullptr;
 

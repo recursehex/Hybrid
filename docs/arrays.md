@@ -93,6 +93,15 @@ int index = 2
 scores[index] = 92
 ```
 
+### Bounds Checking
+
+Hybrid performs both compile-time and runtime bounds validation when you index array values:
+
+- Constant indices that fall outside `0 <= index < size` are rejected during compilation.
+- Dynamic indices generate runtime checks that `abort()` the program if the access is out of range or negative.
+
+These checks apply while you operate on Hybrid array values (the `{ ptr, size }` representation produced by the compiler). If you explicitly convert an array to a raw pointer (`int@`, `float@`, etc.) you step outside these guarantees, so raw pointer arithmetic and dereferencing remain unsafe and unchecked.
+
 ## Nullable Arrays
 
 Use nullable annotations to express optional arrays or optional elements:
@@ -269,7 +278,7 @@ Array indexing uses `getelementptr` instruction:
 
 1. **Fixed Size**: Arrays must be initialized with literals; dynamic sizing not supported
 2. **No Length Property**: Array length must be tracked separately
-3. **No Bounds Checking**: Accessing out-of-bounds indices is undefined behavior
+3. **Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
 4. **No Return Type**: Functions cannot return arrays directly
 5. **No Multi-dimensional**: Only single-dimensional arrays are supported
 
@@ -278,7 +287,7 @@ Array indexing uses `getelementptr` instruction:
 Planned features include:
 - Dynamic array allocation with `new[]`
 - Array length property `size`
-- Compile- and runtime bounds checking
+- Bounds checking support for additional unsafe scenarios
 - Multi-dimensional arrays
 - Array slicing operations
 

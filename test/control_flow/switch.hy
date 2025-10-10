@@ -1,26 +1,28 @@
 // Test for switch statements with block-style cases
 int num = 2
+int blockResult = -1
 
 switch num
 {
     case 1
     {
         // Code to execute when num equals 1
-        int result = 10
+        blockResult = 10
     }
 
     case 2
     {
         // Code to execute when num equals 2  
-        int result = 20
+        blockResult = 20
     }
 
     default
     {
         // Code to execute when num doesn't match any case
-        int result = 0
+        blockResult = 0
     }
 }
+assert blockResult == 20
 
 // Test for switch expressions with arrow syntax
 char letter = 'a'
@@ -42,3 +44,5 @@ int output = switch value
     4, 5, 6 => 100
     default => -1
 }
+assert message == "Alpha"
+assert output == 30

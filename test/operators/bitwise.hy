@@ -86,10 +86,10 @@ int testBitwiseArrays()
 }
 
 // Run all tests
-testAnd()           // Should return 8
-testOr()            // Should return 14
-testXor()           // Should return 6
-testLeftShift()     // Should return 20
-testRightShift()    // Should return 5
-testCompoundAssignments()  // Should return 6
-testBitwiseArrays() // Should return 575
+assert testAnd() == 8
+assert testOr() == 14
+assert testXor() == 6
+assert testLeftShift() == 20
+assert testRightShift() == 5
+assert testCompoundAssignments() == 6
+assert testBitwiseArrays() == 575

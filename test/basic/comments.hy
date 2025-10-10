@@ -18,6 +18,7 @@ int testExpressions()
     
     // Test expression with comment
     int result = x + 10 // inline comment
+    assert result == 15
     return result
 }
 
@@ -25,5 +26,8 @@ int main()
 {
     int sum = add(5, 3)
     int expr_result = testExpressions()
+    assert sum == 8
+    assert expr_result == 15
+    assert sum + expr_result == 23
     return sum + expr_result
 }

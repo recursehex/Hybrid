@@ -12,6 +12,7 @@ int test_skip_while() {
     }
     
     // Should return 50 (55 - 5)
+    assert sum == 50
     return sum
 }
 
@@ -28,6 +29,7 @@ int test_skip_foreach() {
     }
     
     // Should return 50 (55 - 5)
+    assert sum == 50
     return sum
 }
 
@@ -50,6 +52,7 @@ int test_nested_skip() {
     
     // Inner loop: 1 + 3 = 4 per iteration
     // 3 iterations: 4 * 3 = 12
+    assert sum == 12
     return sum
 }
 
@@ -67,6 +70,7 @@ int test_skip_multiple() {
     }
     
     // Should return 40 (55 - 3 - 5 - 7)
+    assert sum == 40
     return sum
 }
 
@@ -82,6 +86,10 @@ int main() {
     print(result2)  // Should print 50
     print(result3)  // Should print 12
     print(result4)  // Should print 40
+    assert result1 == 50
+    assert result2 == 50
+    assert result3 == 12
+    assert result4 == 40
     
     return 0
 }

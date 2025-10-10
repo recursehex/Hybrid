@@ -24,10 +24,13 @@ int test_nested_loops()
         }
     }
 
+    assert sum == 13
     return sum
 }
 
 int main()
 {
-    return test_nested_loops()
+    int result = test_nested_loops()
+    assert result == 13
+    return result
 }

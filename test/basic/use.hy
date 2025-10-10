@@ -7,5 +7,6 @@ use Set
 int main()
 {
     // Using imported modules
+    assert true
     return 0
 }

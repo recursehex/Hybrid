@@ -5,7 +5,7 @@ int fallbackCalls = 0
 
 string defaultName()
 {
-    fallbackCalls += 1
+    fallbackCalls++
     return "Unknown"
 }
 

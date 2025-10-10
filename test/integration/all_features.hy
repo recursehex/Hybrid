@@ -60,38 +60,56 @@ int main()
     float[] temps = [98.6, 100.0, 99.2]
     
     processArray(numbers)
+    assert numbers[0] == 3
+    assert numbers[1] == 5
+    assert numbers[2] == 7
+    assert numbers[3] == 9
+    assert numbers[4] == 11
     
     Point origin = Point(0, 0)
     Point target = Point(10, 20)
     Shape box = Shape(origin, 50, true)
     
     int distance = target.x - origin.x + target.y - origin.y
+    assert distance == 30
     
+    int fibSum = 0
     for int n = 0 to 8
     {
         int fib = fibonacci(n)
+        fibSum += fib
         print(fib)
     }
+    assert fibonacci(8) == 21
+    assert fibSum == 54
     
+    int highTemps = 0
     for float temp in temps
     {
         if temp > 99.0
         {
             print(int: temp)
+            highTemps++
         }
     }
+    assert highTemps == 2
     
     int sum = 0
+    int processedCount = 0
     for int num in numbers
     {
         sum += num
+        processedCount++
         if sum > 10
         {
             break
         }
     }
+    assert sum == 15
+    assert processedCount == 3
     
     int counter = 0
+    int oddCount = 0
     while counter < 10
     {
         counter++
@@ -99,8 +117,11 @@ int main()
         {
             skip
         }
+        oddCount++
         print(counter)
     }
+    assert oddCount == 5
+    assert counter == 10
     
     // TODO: Add binary literals
     // int bitwise = 0b1010
@@ -118,6 +139,8 @@ int main()
     }
     else
     {
+        assert result == 12
+        assert complex_condition == false
         return 0
     }
 }

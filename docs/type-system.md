@@ -18,7 +18,7 @@ Hybrid uses a static type system with explicit type declarations. All variables 
 | `char` | 16-bit Unicode character | `i16` | `char ch = 'A'` |
 | `bool` | 8-bit boolean value | `i8` | `bool flag = true` |
 | `void` | No value (functions only) | `void` | `void func() { }` |
-| `string` | String type | `ptr` | `string s = "hello"` |
+| `string` | UTF-16 string reference | `ptr` | `string s = "hello"` |
 
 #### Sized Integer Types
 
@@ -56,7 +56,11 @@ short[] shorts = [1000, 2000, 3000]
 long[] longs = [1000000, 2000000]
 ```
 
-Arrays are implemented as structs containing a pointer to elements and a size in LLVM IR.
+Arrays are implemented as structs containing a pointer to elements and a size in LLVM IR. Array literals regenerate their elements to match the declared element type, so `float[] temps = [98.6, 100.0]` stores true 32-bit floats even though the literal syntax defaults to `double`. The same width-aware regeneration applies to character arrays—`schar[] ascii = ['A', 'B']` produces 8-bit code units while `lchar[]` stores full 32-bit values.
+
+### Strings and Unicode
+
+`string` values are stored as UTF-16 sequences. Every string literal is emitted as a 16-bit array that shares a single global instance: identical literals point at the same address, so pointer equality works while still representing Unicode text correctly. Character literals adopt the consumer’s width, so `'😊'` becomes a 32-bit `lchar` in wide contexts, but narrows to `char`/`schar` if it fits the target range. Use the sized character aliases (`schar`, `char`, `lchar`) when you need to control storage explicitly.
 
 ## Variable Declarations
 
@@ -121,6 +125,10 @@ While types must be explicitly declared, the compiler performs automatic type in
 ### Context-Aware Literal Type Inference
 
 Number literals automatically adapt to the target type in binary operations, eliminating the need for explicit casts in most common cases. This feature, similar to C#, Rust, and Swift, improves code readability while maintaining type safety.
+
+Character literals behave the same way: a literal will regenerate at the consumer’s width. For example, `'A'` becomes an 8-bit `schar` when assigned to an ASCII array, stays 16-bit for `char`, and upgrades to 32-bit `lchar` when the surrounding expression requires it. If the literal cannot fit, the compiler falls back to the wider type and surfaces a type error.
+
+Array literals reuse the same logic; every element is re-emitted using the array’s element type before storage.
 
 #### How It Works
 
@@ -252,6 +260,12 @@ double result = x + y  // Result is 7.5
 float f = 3.14
 double d = f + 2.0     // float promoted to double - OK
 ```
+
+Mixed-width integer operations also widen automatically toward the larger operand while preserving signedness. Combining
+a `byte` with an `int`, or a `short` with a `long`, emits zero/sign extensions as appropriate before the arithmetic or
+comparison is evaluated. The promotion never runs for assignments, so you still need an explicit cast when storing a
+wide value into a narrower slot. `bool` remains isolated: you cannot promote it, and it never participates in integer
+arithmetic without first converting to an explicit numeric type.
 
 ### Explicit Type Casting
 
@@ -459,12 +473,12 @@ i += int: f                       // i = 13 (10 + 3)
 
 ### Type Compatibility Rules
 
-1. **Same type operations**: Operations between values of the same type are always allowed
-2. **Automatic integer to float promotion**: Integer types can be promoted to floating-point types in mixed arithmetic
-3. **Explicit casting required**: Different sized integers require explicit casting (e.g., `short + int` requires casting)
-4. **Bool isolation**: `bool` cannot be converted to or from any other type, even with explicit casting
-5. **Literal constants**: Integer literals are automatically sized to fit the target type with range checking
-6. **Sign handling**: Casting between signed and unsigned types uses proper sign/zero extension
+1. **Same type operations**: Operations between values of the same type are always allowed.
+2. **Automatic integer to float promotion**: Integer types promote to floating-point types in mixed arithmetic.
+3. **Automatic integer widening**: Different sized integers widen toward the larger operand (with correct sign/zero extension) inside comparisons and arithmetic. Narrowing assignments still require explicit casts.
+4. **Signed/unsigned comparisons**: Signed and unsigned integers compare like ordinary numbers; Hybrid inserts the necessary zero or sign extension before evaluating the predicate.
+5. **Bool isolation**: `bool` cannot be converted to or from any other type, even with explicit casting.
+6. **Literal constants**: Integer literals are automatically sized to fit the target type with range checking.
 
 ### Examples
 
@@ -542,7 +556,7 @@ Hybrid types map directly to LLVM types:
 | `lchar` | `i32` | 32-bit Unicode character |
 | `bool` | `i8` | 8-bit integer |
 | `void` | `void` | No value |
-| `string` | `ptr` | Pointer to i8 |
+| `string` | `ptr` | Pointer to UTF-16 data (opaque pointer in IR) |
 | `T[]` | `struct {ptr, i32}` | Array struct with pointer and size |
 
 ## Global vs Local Variables

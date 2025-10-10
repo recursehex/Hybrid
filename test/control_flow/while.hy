@@ -84,6 +84,12 @@ int main() {
     int result4 = test_complex_condition()
     int result5 = test_early_return()
     int result6 = test_while_false()
+    assert result1 == 15
+    assert result2 == 3
+    assert result3 == 63
+    assert result4 == 45
+    assert result5 == 5
+    assert result6 == 0
     
     // Return sum of all results to verify everything worked
     return result1 + result2 + result3 + result4 + result5 + result6

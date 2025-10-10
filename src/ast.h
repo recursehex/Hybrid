@@ -431,6 +431,8 @@ public:
   CharExprAST(uint32_t Val) : Val(Val) {}
   
   llvm::Value *codegen() override;
+  llvm::Value *codegen_with_target(llvm::Type *TargetType,
+                                   const std::string &TargetTypeName = "");
   uint32_t getValue() const { return Val; }
 };
 
@@ -445,6 +447,8 @@ public:
       : ElementType(ElementType), Elements(std::move(Elements)) {}
   
   llvm::Value *codegen() override;
+  llvm::Value *codegen_with_element_target(llvm::Type *TargetElementType = nullptr,
+                                           const std::string &TargetElementTypeName = "");
   [[nodiscard]] const std::string &getElementType() const { return ElementType; }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getElements() const { return Elements; }
   [[nodiscard]] std::span<const std::unique_ptr<ExprAST>> getElementsSpan() const { return Elements; }

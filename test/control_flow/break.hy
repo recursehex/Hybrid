@@ -129,5 +129,12 @@ int main()
     int result6 = test_break_after_statements() // 20
     
     // Return sum to verify: 5 + 21 + 40 + 15 + 1 + 20 = 102
+    assert result1 == 5
+    assert result2 == 21
+    assert result3 == 40
+    assert result4 == 15
+    assert result5 == 1
+    assert result6 == 20
+    assert result1 + result2 + result3 + result4 + result5 + result6 == 102
     return result1 + result2 + result3 + result4 + result5 + result6
 }

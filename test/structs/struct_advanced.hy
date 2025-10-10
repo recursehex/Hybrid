@@ -82,3 +82,16 @@ int diagonal = coloredRect.bounds.bottomRight.x + coloredRect.bounds.bottomRight
 // Test 8: Struct used as function parameter (when functions are fully supported)
 // This demonstrates the struct can be passed around
 Point origin = Point(0, 0)
+
+// Assertions to verify struct behavior
+assert x1 == 0
+assert y1 == 0
+assert x2 == 100
+assert y2 == 50
+assert width == 100
+assert height == 50
+assert area == 5000
+assert rectX == 0
+assert rectColor == 255
+assert diagonal == 150
+assert coloredRect.bounds.bottomRight.y == 50

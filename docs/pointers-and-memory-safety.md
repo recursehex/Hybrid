@@ -298,7 +298,7 @@ When you use `unsafe`:
 ### Future Enhancements
 
 Potential future additions:
-- Runtime bounds checking in debug mode
+- Optional diagnostics for raw-pointer bounds errors
 - Smart pointer types (like C++'s `std::unique_ptr` and `std::shared_ptr`)
 - Lifetime annotations for compile-time borrow checking
 

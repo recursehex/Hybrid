@@ -1,5 +1,9 @@
 // Test for complex switch statements with multiple statements in cases
 int testValue = 1
+int caseSum = 0
+bool multiCaseEntered = false
+string defaultMsgResult = ""
+char defaultCharResult = '\0'
 
 switch testValue
 {
@@ -8,6 +12,7 @@ switch testValue
         int x = 10
         int y = 20
         int sum = x + y
+        caseSum = sum
     }
 
     case 2, 3
@@ -16,6 +21,7 @@ switch testValue
         if flag
         {
             int temp = 100
+            multiCaseEntered = true
         }
     }
 
@@ -23,8 +29,14 @@ switch testValue
     {
         string msg = "default case"
         char c = 'z'
+        defaultMsgResult = msg
+        defaultCharResult = c
     }
 }
+assert caseSum == 30
+assert multiCaseEntered == false
+assert defaultMsgResult == ""
+assert defaultCharResult == '\0'
 
 // Test nested switch expressions
 int nested = switch 1
@@ -36,3 +48,4 @@ int nested = switch 1
     }
     default => -1
 }
+assert nested == 42

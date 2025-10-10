@@ -6,7 +6,7 @@ int test_int_foreach()
     int sum = 0
     for int x in [5, 10, 15, 20, 25]
     {
-        sum = sum + x
+        sum += x
     }
     return sum  // Should return 75
 }
@@ -17,7 +17,7 @@ float test_float_foreach()
     float sum = 0.0
     for float f in [1.1, 2.2, 3.3, 4.4]
     {
-        sum = sum + f
+        sum += f
     }
     return sum  // Should return 11.0
 }
@@ -30,7 +30,7 @@ int test_nested_mixed()
     {
         for int j in [10, 20]
         {
-            result = result + (i * j)
+            result += (i * j)
         }
     }
     return result  // Should return 120
@@ -46,12 +46,12 @@ int test_foreach_break()
         {
             break
         }
-        count = count + 1
+        count++
     }
     return count  // Should return 5
 }
 
-test_int_foreach()
-test_float_foreach()
-test_nested_mixed()
-test_foreach_break()
+assert test_int_foreach() == 75
+assert test_float_foreach() == 11.0
+assert test_nested_mixed() == 120
+assert test_foreach_break() == 5

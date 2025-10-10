@@ -68,6 +68,8 @@ When using character literals without explicit type declaration, the compiler au
 '😀'      // Requires 32-bit, uses lchar
 ```
 
+Character literals also adapt to the surrounding context. When an expression expects an 8-bit `schar`/`byte`, 16-bit `char`/`short`, or 32-bit `lchar`/`int`, the literal is regenerated at that width so comparisons like `'A' == byteValue` and assignments such as `schar small = 'A'` work without manual casts. If the literal cannot fit the target width, the compiler falls back to the wider default and reports a type error.
+
 ### Type-Specific Assignment
 
 You can explicitly specify the character type:

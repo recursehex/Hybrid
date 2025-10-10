@@ -13,3 +13,7 @@ long max_long = 9223372036854775807
 
 // Test that normal arithmetic still works
 int sum = max_int + 0
+assert max_int == 2147483647
+assert min_int == -2147483648
+assert max_long == 9223372036854775807
+assert sum == max_int

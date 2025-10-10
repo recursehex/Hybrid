@@ -1,7 +1,8 @@
 // Test arrays of pointers
 
 // Test 1: Array of pointers to integers
-unsafe void test_int_pointer_array() {
+unsafe void test_int_pointer_array()
+{
     int x = 10
     int y = 20
     int z = 30
@@ -16,31 +17,41 @@ unsafe void test_int_pointer_array() {
     // Modify through pointer array
     @ptrs[0] = 100
     @ptrs[1] = 200
+    assert first == 10
+    assert second == 20
+    assert x == 100
+    assert y == 200
 }
 
 // Test 2: Function taking array of pointers
-unsafe void sum_pointed_values(int@[] ptrs) {
+unsafe int sum_pointed_values(int@[] ptrs, int size)
+{
     int sum = 0
 
-    for int i in ptrs
+    for int i = 0 to i < size
     {
         sum += @ptrs[i]
     }
+    assert sum >= 0
+    return sum
 }
 
 // Test 3: Returning pointer from array
-unsafe int@ get_max_ptr(int@[] ptrs, int size) {
+unsafe int@ get_max_ptr(int@[] ptrs, int size)
+{
     // Use a loop to find the pointer to the maximum value
-    if size <= 0 {
+    if size <= 0
+    {
         return ptrs[0]  // Return first element for empty/invalid size
     }
 
     int@ maxPtr = ptrs[0]
     int maxVal = @ptrs[0]
 
-    for int i = 1 to i < size {
+    for int i = 1 to i < size{
         int currentVal = @ptrs[i]
-        if currentVal > maxVal {
+        if currentVal > maxVal
+        {
             maxVal = currentVal
             maxPtr = ptrs[i]
         }
@@ -50,7 +61,8 @@ unsafe int@ get_max_ptr(int@[] ptrs, int size) {
 }
 
 // Test 4: Nested - array of pointers to arrays
-unsafe void test_nested_pointer_arrays() {
+unsafe void test_nested_pointer_arrays()
+{
     int[] arr1 = [1, 2, 3]
     int[] arr2 = [4, 5, 6]
     int[] arr3 = [7, 8, 9]
@@ -84,20 +96,28 @@ unsafe void test_nested_pointer_arrays() {
     // Verify modifications
     int check1 = arr1[0]  // Should be 100
     int check2 = arr2[1]  // Should be 200
+    assert val00 == 1
+    assert val12 == 6
+    assert val21 == 8
+    assert check1 == 100
+    assert check2 == 200
 }
 
 // Test 5: Struct with pointer array field
-unsafe struct PtrHolder {
+unsafe struct PtrHolder
+{
     int@[] pointers
     int count
 
-    PtrHolder(int@[] ptrs, int c) {
+    PtrHolder(int@[] ptrs, int c)
+    {
         this.pointers = ptrs
         this.count = c
     }
 }
 
-unsafe void test_struct_with_ptr_array() {
+unsafe void test_struct_with_ptr_array()
+{
     int a = 1
     int b = 2
     int@[] myPtrs = [#a, #b]
@@ -106,4 +126,26 @@ unsafe void test_struct_with_ptr_array() {
 
     // Access through struct
     int val = @holder.pointers[0]
+    assert holder.count == 2
+    assert val == 1
+}
+
+int main()
+{
+    unsafe
+    {
+        test_int_pointer_array()
+
+        int v1 = 5
+        int v2 = 15
+        int v3 = 25
+        int@[] pointers = [#v1, #v2, #v3]
+        assert sum_pointed_values(pointers, 3) == v1 + v2 + v3
+        int@ maxPtr = get_max_ptr(pointers, 3)
+        assert @maxPtr == 25
+
+        test_nested_pointer_arrays()
+        test_struct_with_ptr_array()
+    }
+    return 0
 }

@@ -1,18 +1,21 @@
 // Test unsafe structs with pointer array fields
 
 // Test 1: Basic unsafe struct with pointer array field
-unsafe struct PtrContainer {
+unsafe struct PtrContainer
+{
     int@[] pointers
     int count
 
-    PtrContainer(int@[] ptrs, int c) {
+    PtrContainer(int@[] ptrs, int c)
+    {
         this.pointers = ptrs
         this.count = c
     }
 }
 
 // Test 2: Using the unsafe struct
-unsafe void test_ptr_container() {
+unsafe void test_ptr_container()
+{
     int x = 10
     int y = 20
     int z = 30
@@ -26,15 +29,21 @@ unsafe void test_ptr_container() {
     // For now, just verify the struct was created
     // Complex array access through struct fields needs more work
     int c = container.count
+    assert c == 3
+    assert @container.pointers[0] == 10
+    assert @container.pointers[1] == 20
+    assert @container.pointers[2] == 30
 }
 
 // Test 3: Unsafe struct with mixed pointer types
-unsafe struct MixedPtrStruct {
+unsafe struct MixedPtrStruct
+{
     int@ singlePtr
     int@[] arrayOfPtrs
     float@ floatPtr
 
-    MixedPtrStruct(int@ sp, int@[] ap, float@ fp) {
+    MixedPtrStruct(int@ sp, int@[] ap, float@ fp)
+    {
         this.singlePtr = sp
         this.arrayOfPtrs = ap
         this.floatPtr = fp
@@ -42,17 +51,20 @@ unsafe struct MixedPtrStruct {
 }
 
 // Test 4: Nested unsafe structs
-unsafe struct OuterStruct {
+unsafe struct OuterStruct
+{
     PtrContainer container
     int@ directPtr
 
-    OuterStruct(PtrContainer c, int@ p) {
+    OuterStruct(PtrContainer c, int@ p)
+    {
         this.container = c
         this.directPtr = p
     }
 }
 
-unsafe void test_nested_structs() {
+unsafe void test_nested_structs()
+{
     int val = 42
     int@[] ptrs = [#val]
 
@@ -61,26 +73,27 @@ unsafe void test_nested_structs() {
 
     // Access through direct pointer
     int result = @outer.directPtr
+    assert result == 42
+    assert inner.count == 1
 }
 
 // Test 5: Simple test without methods
-unsafe struct SimplePtr {
+unsafe struct SimplePtr
+{
     int@ ptr
 
-    SimplePtr(int@ p) {
+    SimplePtr(int@ p)
+    {
         this.ptr = p
     }
 }
 
-unsafe void test_simple_ptr() {
+unsafe void test_simple_ptr()
+{
     int x = 100
     SimplePtr sp = SimplePtr(#x)
     int val = @sp.ptr  // Direct pointer access
     @sp.ptr = 200      // Modify through pointer
+    assert val == 100
+    assert @sp.ptr == 200
 }
-
-// This should fail - struct with pointers needs unsafe
-// Commented out to avoid test failure
-// struct BadStruct {
-//     int@ ptr
-// }

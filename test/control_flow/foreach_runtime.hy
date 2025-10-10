@@ -63,6 +63,8 @@ int test_array_indexing()
 }
 
 // Execute tests
-test_array_var()
-test_multiple_arrays()
-test_array_indexing()
+assert test_array_var() == 150
+int[] sample = [4, 5, 6]
+assert sum_array(sample) == 15
+assert test_multiple_arrays() == 216
+assert test_array_indexing() == 600
