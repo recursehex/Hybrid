@@ -1,11 +1,13 @@
 // Comprehensive test for basic struct functionality
 
 // Test 1: Basic struct definition with constructor
-struct Point {
+struct Point
+{
     int x
     int y
     
-    Point(int x, int y) {
+    Point(int x, int y)
+    {
         this.x = x
         this.y = y
     }
@@ -36,10 +38,12 @@ assert diff == -100
 assert product == -75
 
 // Test 7: Struct with single field
-struct Counter {
+struct Counter
+{
     int count
     
-    Counter(int initial) {
+    Counter(int initial)
+    {
         this.count = initial
     }
 }

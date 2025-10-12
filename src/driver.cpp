@@ -163,6 +163,7 @@ int main(int argc, char **argv) {
     }
 
     if (!hadFailure) {
+      FinalizeTopLevelExecution();
       llvm::Module *module = getModule();
 
       std::string targetOutput;
@@ -238,8 +239,11 @@ int main(int argc, char **argv) {
     getNextToken();
     MainLoop();
 
-    fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
-    getModule()->print(llvm::errs(), nullptr);
+    if (!currentParser().hadError) {
+      FinalizeTopLevelExecution();
+      fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
+      getModule()->print(llvm::errs(), nullptr);
+    }
   }
 
   popCompilerSession();

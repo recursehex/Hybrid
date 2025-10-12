@@ -11,6 +11,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -43,6 +44,126 @@
 #define LoopContinueBlocks (CG.loopContinueBlocks)
 
 llvm::Value *LogErrorV(const char *Str);
+
+static llvm::Function *TopLevelExecFunction = nullptr;
+static llvm::Function *ScriptMainFunction = nullptr;
+static bool ScriptMainIsSynthetic = false;
+static llvm::BasicBlock *TopLevelInsertBlock = nullptr;
+
+static llvm::Function *ensureTopLevelExecFunction() {
+  if (!TopLevelExecFunction) {
+    auto *FnType = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+    TopLevelExecFunction = llvm::Function::Create(
+        FnType, llvm::GlobalValue::InternalLinkage,
+        "__hybrid_top_level", TheModule.get());
+    llvm::BasicBlock *Entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", TopLevelExecFunction);
+    TopLevelInsertBlock = Entry;
+  }
+  return TopLevelExecFunction;
+}
+
+static void ensureSyntheticMainCalls(llvm::Function *TopFunc) {
+  if (!TopFunc)
+    return;
+
+  auto *Int32Ty = llvm::Type::getInt32Ty(*TheContext);
+
+  if (!ScriptMainFunction) {
+    auto *MainType = llvm::FunctionType::get(Int32Ty, false);
+    ScriptMainFunction = llvm::Function::Create(
+        MainType, llvm::GlobalValue::ExternalLinkage, "main", TheModule.get());
+    ScriptMainIsSynthetic = true;
+    llvm::BasicBlock *Entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", ScriptMainFunction);
+    llvm::IRBuilder<> TmpBuilder(*TheContext);
+    TmpBuilder.SetInsertPoint(Entry);
+    TmpBuilder.CreateRet(llvm::ConstantInt::get(Int32Ty, 0));
+  }
+
+  llvm::BasicBlock &EntryBB = ScriptMainFunction->getEntryBlock();
+
+  if (EntryBB.empty() || !EntryBB.getTerminator()) {
+    llvm::IRBuilder<> TmpBuilder(*TheContext);
+    TmpBuilder.SetInsertPoint(&EntryBB);
+    TmpBuilder.CreateRet(llvm::ConstantInt::get(Int32Ty, 0));
+  }
+
+  llvm::Instruction *Term = EntryBB.getTerminator();
+  if (!Term) {
+    llvm::IRBuilder<> TmpBuilder(*TheContext);
+    TmpBuilder.SetInsertPoint(&EntryBB);
+    Term = TmpBuilder.CreateRet(llvm::ConstantInt::get(Int32Ty, 0));
+  }
+
+  llvm::Function *InitFunc = TheModule->getFunction("__anon_var_decl");
+  llvm::CallInst *TopCallInst = nullptr;
+  llvm::CallInst *InitCallInst = nullptr;
+
+  for (auto &Inst : EntryBB) {
+    if (auto *Call = llvm::dyn_cast<llvm::CallInst>(&Inst)) {
+      if (Call->getCalledFunction() == TopFunc) {
+        TopCallInst = Call;
+      } else if (InitFunc && Call->getCalledFunction() == InitFunc) {
+        InitCallInst = Call;
+      }
+    }
+  }
+
+  if (!InitCallInst && InitFunc && !InitFunc->empty()) {
+    llvm::IRBuilder<> TmpBuilder(*TheContext);
+    if (TopCallInst)
+      TmpBuilder.SetInsertPoint(TopCallInst);
+    else
+      TmpBuilder.SetInsertPoint(Term);
+    TmpBuilder.CreateCall(InitFunc);
+  }
+
+  if (!TopCallInst) {
+    llvm::IRBuilder<> TmpBuilder(*TheContext);
+    TmpBuilder.SetInsertPoint(EntryBB.getTerminator());
+    TmpBuilder.CreateCall(TopFunc);
+  }
+}
+
+static void prepareTopLevelStatementContext() {
+  llvm::Function *TopFunc = ensureTopLevelExecFunction();
+  ensureSyntheticMainCalls(TopFunc);
+  if (Builder && Builder->GetInsertBlock() &&
+      Builder->GetInsertBlock()->getParent() == TopFunc) {
+    TopLevelInsertBlock = Builder->GetInsertBlock();
+  }
+  if (!TopLevelInsertBlock || TopLevelInsertBlock->getParent() != TopFunc) {
+    TopLevelInsertBlock = &TopFunc->getEntryBlock();
+  }
+  Builder->SetInsertPoint(TopLevelInsertBlock);
+
+  NamedValues.clear();
+  LocalTypes.clear();
+}
+
+void FinalizeTopLevelExecution() {
+  if (!TopLevelExecFunction || !TheContext)
+    return;
+
+  llvm::BasicBlock *InsertBlock = nullptr;
+  if (Builder && Builder->GetInsertBlock() &&
+      Builder->GetInsertBlock()->getParent() == TopLevelExecFunction) {
+    InsertBlock = Builder->GetInsertBlock();
+  } else if (TopLevelInsertBlock &&
+             TopLevelInsertBlock->getParent() == TopLevelExecFunction) {
+    InsertBlock = TopLevelInsertBlock;
+  } else if (!TopLevelExecFunction->empty()) {
+    InsertBlock = &TopLevelExecFunction->back();
+  }
+
+  if (!InsertBlock || InsertBlock->getTerminator())
+    return;
+
+  llvm::IRBuilder<> TmpBuilder(*TheContext);
+  TmpBuilder.SetInsertPoint(InsertBlock);
+  TmpBuilder.CreateRetVoid();
+}
 
 static unsigned computePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -309,11 +430,13 @@ llvm::Module *getModule() {
 // Error handling utilities
 llvm::Value *LogErrorV(const char *Str) {
   fprintf(stderr, "Error: %s\n", Str);
+  currentParser().hadError = true;
   return nullptr;
 }
 
 llvm::Function *LogErrorF(const char *Str) {
   fprintf(stderr, "Error: %s\n", Str);
+  currentParser().hadError = true;
   return nullptr;
 }
 
@@ -3370,35 +3493,45 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     return expr->codegen();
   };
 
+  std::optional<llvm::IRBuilderBase::InsertPointGuard> GlobalIPGuard;
+  auto enterGlobalInitializer = [&]() -> llvm::Function * {
+    GlobalIPGuard.emplace(*Builder);
+    llvm::Function *InitFunc = TheModule->getFunction("__anon_var_decl");
+    if (!InitFunc) {
+      llvm::FunctionType *FT = llvm::FunctionType::get(
+          llvm::Type::getVoidTy(*TheContext), false);
+      InitFunc = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
+                                        "__anon_var_decl", TheModule.get());
+    }
+
+    if (InitFunc->empty()) {
+      llvm::BasicBlock *BB =
+          llvm::BasicBlock::Create(*TheContext, "entry", InitFunc);
+      Builder->SetInsertPoint(BB);
+    } else {
+      llvm::BasicBlock &EntryBB = InitFunc->getEntryBlock();
+      Builder->SetInsertPoint(&EntryBB, EntryBB.end());
+    }
+    return InitFunc;
+  };
+
   // Check if at global scope
   llvm::Function *TheFunction = nullptr;
   bool isGlobal = false;
 
   if (Builder->GetInsertBlock()) {
     TheFunction = Builder->GetInsertBlock()->getParent();
-    isGlobal = (TheFunction->getName() == "__anon_var_decl");
+    if (TheFunction->getName() == "__anon_var_decl" ||
+        TheFunction->getName() == "__hybrid_top_level") {
+      isGlobal = true;
+      TheFunction = enterGlobalInitializer();
+    } else {
+      isGlobal = false;
+    }
   } else {
     // No insertion point means at top level
     isGlobal = true;
-
-    // Create or get the __anon_var_decl function for global variable initialization
-    TheFunction = TheModule->getFunction("__anon_var_decl");
-    if (!TheFunction) {
-      // Create the function
-      llvm::FunctionType *FT = llvm::FunctionType::get(
-          llvm::Type::getVoidTy(*TheContext), false);
-      TheFunction = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
-                                          "__anon_var_decl", TheModule.get());
-    }
-
-    // Create a basic block if needed
-    if (TheFunction->empty()) {
-      llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
-      Builder->SetInsertPoint(BB);
-    } else {
-      // Set insert point to the end of the existing block
-      Builder->SetInsertPoint(&TheFunction->getEntryBlock());
-    }
+    TheFunction = enterGlobalInitializer();
   }
   
   
@@ -3709,6 +3842,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
 // Generate code for expression statements
 llvm::Value *ExpressionStmtAST::codegen() {
+  if (!Builder->GetInsertBlock() ||
+      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+    prepareTopLevelStatementContext();
+
   // Generate code for the expression
   llvm::Value *V = getExpression()->codegen();
   if (!V)
@@ -3724,15 +3861,37 @@ llvm::Value *ExpressionStmtAST::codegen() {
 
 // Generate code for for each statements
 llvm::Value *ForEachStmtAST::codegen() {
-  // Get the collection (array) to iterate over
-  llvm::Value *CollectionVal = Collection->codegen();
-  if (!CollectionVal)
-    return nullptr;
-  
   // Get the element type from the foreach declaration
   llvm::Type *ElemType = getTypeFromString(Type);
   if (!ElemType)
     return LogErrorV("Unknown element type in foreach loop");
+
+  llvm::Type *SourceElemType = ElemType;
+
+  // Get the collection (array) to iterate over
+  llvm::Value *CollectionVal = nullptr;
+  if (auto *ArrayLiteral = dynamic_cast<ArrayExprAST*>(Collection.get())) {
+    CollectionVal = ArrayLiteral->codegen_with_element_target(ElemType, Type);
+  } else {
+    CollectionVal = Collection->codegen();
+    if (!CollectionVal)
+      return nullptr;
+
+    std::string collectionTypeName = Collection->getTypeName();
+    if (!collectionTypeName.empty()) {
+      ParsedTypeDescriptor desc = parseTypeString(collectionTypeName);
+      if (desc.isArray) {
+        std::string sanitized = desc.sanitized;
+        if (sanitized.size() > 2 && sanitized.substr(sanitized.size() - 2) == "[]") {
+          std::string baseTypeName = sanitized.substr(0, sanitized.size() - 2);
+          if (llvm::Type *InferredElemType = getTypeFromString(baseTypeName))
+            SourceElemType = InferredElemType;
+        }
+      }
+    }
+  }
+  if (!CollectionVal)
+    return nullptr;
   
   // Extract array pointer and size from the collection value
   llvm::Value *ArrayPtr = nullptr;
@@ -3799,9 +3958,17 @@ llvm::Value *ForEachStmtAST::codegen() {
   Builder->SetInsertPoint(LoopBB);
   
   // Load the current array element and store it in the loop variable
-  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, CounterVal, "elemptr");
-  llvm::Value *ElemVal = Builder->CreateLoad(ElemType, ElemPtr, "elemval");
-  Builder->CreateStore(ElemVal, VarAlloca);
+  llvm::Value *ElemPtr = Builder->CreateGEP(SourceElemType, ArrayPtr, CounterVal, "elemptr");
+  llvm::Value *ElemVal = Builder->CreateLoad(SourceElemType, ElemPtr, "elemval");
+
+  llvm::Value *StoreVal = ElemVal;
+  if (ElemVal->getType() != ElemType) {
+    StoreVal = castToType(ElemVal, ElemType, Type);
+    if (!StoreVal)
+      return nullptr;
+  }
+
+  Builder->CreateStore(StoreVal, VarAlloca);
   
   // Add the loop variable to the symbol table
   llvm::Value *OldVal = NamedValues[VarName];
@@ -4321,6 +4488,10 @@ llvm::Value *SkipStmtAST::codegen() {
 }
 
 llvm::Value *AssertStmtAST::codegen() {
+  if (!Builder->GetInsertBlock() ||
+      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+    prepareTopLevelStatementContext();
+
   // Generate code for the condition expression
   llvm::Value *CondValue = Condition->codegen();
   if (!CondValue)
@@ -4434,6 +4605,12 @@ llvm::Function *FunctionAST::codegen() {
   
   if (!TheFunction)
     return nullptr;
+
+  if (getProto()->getName() == "main" && ScriptMainIsSynthetic &&
+      ScriptMainFunction && ScriptMainFunction == TheFunction) {
+    TheFunction->deleteBody();
+    ScriptMainIsSynthetic = false;
+  }
   
   // Create a new basic block to start insertion into
   llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
@@ -4493,6 +4670,13 @@ llvm::Function *FunctionAST::codegen() {
     }
   }
 
+  static bool TopLevelExecEmitted = false;
+  if (!TopLevelExecEmitted && TheFunction->getName() == "main" &&
+      TopLevelExecFunction) {
+    Builder->CreateCall(TopLevelExecFunction);
+    TopLevelExecEmitted = true;
+  }
+
   // Generate code for the function body
   if (getBody()->codegen()) {
     // Finish off the function if no explicit return
@@ -4507,7 +4691,11 @@ llvm::Function *FunctionAST::codegen() {
     
     // Validate the generated code, checking for consistency
     llvm::verifyFunction(*TheFunction);
-    
+
+    Builder->ClearInsertionPoint();
+    NamedValues.clear();
+    LocalTypes.clear();
+
     return TheFunction;
   }
   
@@ -4975,6 +5163,10 @@ llvm::Value *ThisExprAST::codegen_ptr() {
 
 // Generate code for switch statements
 llvm::Value *SwitchStmtAST::codegen() {
+  if (!Builder->GetInsertBlock() ||
+      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+    prepareTopLevelStatementContext();
+
   // Evaluate the switch condition
   llvm::Value *CondV = getCondition()->codegen();
   if (!CondV)
@@ -5063,6 +5255,10 @@ llvm::Value *SwitchStmtAST::codegen() {
 
 // Generate code for switch expressions
 llvm::Value *SwitchExprAST::codegen() {
+  if (!Builder->GetInsertBlock() ||
+      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+    prepareTopLevelStatementContext();
+
   // Evaluate the switch condition
   llvm::Value *CondV = getCondition()->codegen();
   if (!CondV)

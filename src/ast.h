@@ -40,6 +40,8 @@ namespace llvm {
 
 #include "llvm/IR/Value.h"
 
+void FinalizeTopLevelExecution();
+
 /// ExprAST - Base class for all expression nodes.
 class ExprAST {
 protected:

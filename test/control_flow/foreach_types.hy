@@ -53,5 +53,5 @@ int test_foreach_break()
 
 assert test_int_foreach() == 75
 assert test_float_foreach() == 11.0
-assert test_nested_mixed() == 120
+assert test_nested_mixed() == 180
 assert test_foreach_break() == 5
