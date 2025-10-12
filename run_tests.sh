@@ -21,6 +21,7 @@ FAILED_TESTS=0
 VERBOSE_MODE=0
 FAILURES_ONLY=0
 TEST_PATTERN=""
+RUN_MULTI_UNIT_TESTS=1
 
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
 echo "==============================="
@@ -395,11 +396,13 @@ done
 
 # Filter tests if pattern provided
 if [ -n "$TEST_PATTERN" ]; then
+    RUN_MULTI_UNIT_TESTS=0
     # Check if it's a category name
     if [ -d "test/$TEST_PATTERN" ]; then
         if [ "$TEST_PATTERN" = "multi_unit" ]; then
             TEST_FILES=""
             echo "Running multi-unit manifest tests"
+            RUN_MULTI_UNIT_TESTS=1
         else
             # Run all tests in that category
             TEST_FILES=$(find "test/$TEST_PATTERN" -name "*.hy" -type f | sort)
@@ -433,7 +436,11 @@ SINGLE_TEST_COUNT=0
 if [ -n "$TEST_FILES" ]; then
     SINGLE_TEST_COUNT=$(printf "%s\n" "$TEST_FILES" | sed '/^$/d' | wc -l | tr -d '[:space:]')
 fi
-TOTAL_DISCOVERED_TESTS=$((SINGLE_TEST_COUNT + MULTI_UNIT_TEST_COUNT))
+EFFECTIVE_MULTI_UNIT_TEST_COUNT=$MULTI_UNIT_TEST_COUNT
+if [ $RUN_MULTI_UNIT_TESTS -eq 0 ]; then
+    EFFECTIVE_MULTI_UNIT_TEST_COUNT=0
+fi
+TOTAL_DISCOVERED_TESTS=$((SINGLE_TEST_COUNT + EFFECTIVE_MULTI_UNIT_TEST_COUNT))
 echo "Found $TOTAL_DISCOVERED_TESTS total tests to run"
 echo
 
@@ -447,7 +454,9 @@ for test_file in $TEST_FILES; do
     run_test "$test_file"
 done
 
-run_multi_unit_tests
+if [ $RUN_MULTI_UNIT_TESTS -eq 1 ]; then
+    run_multi_unit_tests
+fi
 
 # Print summary
 echo "==============================="

@@ -24,6 +24,7 @@ set SINGLE_TESTS_ENABLED=1
 set FILTER_MODE=all
 set FILTER_PATH=
 set FILTER_MATCH=
+set RUN_MULTI_UNIT_TESTS=1
 
 echo %BLUE%Hybrid Compiler Test Suite%NC%
 echo ===============================
@@ -154,10 +155,12 @@ exit /b 0
 
 :: Filter tests if pattern provided
 if not "%TEST_PATTERN%"=="" (
+    set RUN_MULTI_UNIT_TESTS=0
     if exist "test\%TEST_PATTERN%\." (
         if /i "%TEST_PATTERN%"=="multi_unit" (
             set SINGLE_TESTS_ENABLED=0
             set FILTER_MODE=none
+            set RUN_MULTI_UNIT_TESTS=1
             echo Running multi-unit manifest tests
         ) else (
             set FILTER_MODE=category
@@ -263,7 +266,9 @@ if %SINGLE_TESTS_ENABLED%==1 if /i "%FILTER_MODE%"=="pattern" if %SINGLE_TEST_CO
     exit /b 1
 )
 
-set /a TOTAL_DISCOVERED_TESTS=SINGLE_TEST_COUNT+MULTI_UNIT_TEST_COUNT
+set /a EFFECTIVE_MULTI_UNIT_COUNT=MULTI_UNIT_TEST_COUNT
+if not "%RUN_MULTI_UNIT_TESTS%"=="1" set /a EFFECTIVE_MULTI_UNIT_COUNT=0
+set /a TOTAL_DISCOVERED_TESTS=SINGLE_TEST_COUNT+EFFECTIVE_MULTI_UNIT_COUNT
 echo Found %TOTAL_DISCOVERED_TESTS% total tests to run
 echo.
 
@@ -281,7 +286,7 @@ if %SINGLE_TEST_COUNT% gtr 0 (
 )
 
 :: Run multi-unit manifest tests
-call :run_multi_unit_tests
+if "%RUN_MULTI_UNIT_TESTS%"=="1" call :run_multi_unit_tests
 
 :: Cleanup collected test list
 if exist "%TEST_LIST_FILE%" del "%TEST_LIST_FILE%" >nul 2>&1
