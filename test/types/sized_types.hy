@@ -231,3 +231,31 @@ assert runtime_byte == 200
 int runtime_short_val = 30000
 short runtime_short = runtime_short_val  // Runtime check: 30000 is in range [-32768, 32767], should pass
 assert runtime_short == 30000
+
+void test_unsigned_comparisons()
+{
+    uint big = 4000000000
+    assert big > 2
+    assert !(big < 2)
+
+    ulong huge = 18446744073709551610
+    assert huge > 100
+    assert !(huge < 100)
+}
+
+void test_unsigned_division_and_mod()
+{
+    uint big = 4000000000
+    uint half = big / 2
+    assert half == 2000000000
+
+    uint remainder = big % 3
+    assert remainder == 1
+
+    ulong huge = 18446744073709551614
+    ulong halfHuge = huge / 2
+    assert halfHuge == 9223372036854775807
+}
+
+test_unsigned_comparisons()
+test_unsigned_division_and_mod()

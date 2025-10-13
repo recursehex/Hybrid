@@ -2364,6 +2364,10 @@ llvm::Value *BinaryExprAST::codegen() {
   std::string leftTypeName = sanitizeBaseTypeName(rawLeftTypeName);
   std::string rightTypeName = sanitizeBaseTypeName(rawRightTypeName);
 
+  auto leftUnsignedHint = unsignedHintFromTypeName(leftTypeName);
+  auto rightUnsignedHint = unsignedHintFromTypeName(rightTypeName);
+  bool preferUnsigned = leftUnsignedHint.value_or(false) || rightUnsignedHint.value_or(false);
+
   // Promote types to compatible types
   auto promoted = promoteTypes(L, R, leftTypeName, rightTypeName);
   L = promoted.first;
@@ -2429,6 +2433,11 @@ llvm::Value *BinaryExprAST::codegen() {
     }
 
     setTypeName(chosen);
+
+    if (!preferUnsigned) {
+      std::string chosenBase = sanitizeBaseTypeName(chosen);
+      preferUnsigned = unsignedHintFromTypeName(chosenBase).value_or(false);
+    }
   }
 
   // Handle single-character operators
@@ -2452,11 +2461,15 @@ llvm::Value *BinaryExprAST::codegen() {
     case '/':
       if (isFloat)
         return Builder->CreateFDiv(L, R, "divtmp");
+      else if (preferUnsigned)
+        return Builder->CreateUDiv(L, R, "divtmp");
       else
         return Builder->CreateSDiv(L, R, "divtmp");
     case '%':
       if (isFloat)
         return Builder->CreateFRem(L, R, "modtmp");
+      else if (preferUnsigned)
+        return Builder->CreateURem(L, R, "modtmp");
       else
         return Builder->CreateSRem(L, R, "modtmp");
     case '<':
@@ -2464,7 +2477,10 @@ llvm::Value *BinaryExprAST::codegen() {
       if (isFloat) {
         L = Builder->CreateFCmpULT(L, R, "cmptmp");
       } else {
-        L = Builder->CreateICmpSLT(L, R, "cmptmp");
+        if (preferUnsigned)
+          L = Builder->CreateICmpULT(L, R, "cmptmp");
+        else
+          L = Builder->CreateICmpSLT(L, R, "cmptmp");
       }
       // Zero-extend i1 to i8 for bool type
       return Builder->CreateZExt(L, llvm::Type::getInt8Ty(*TheContext), "booltmp");
@@ -2473,7 +2489,10 @@ llvm::Value *BinaryExprAST::codegen() {
       if (isFloat) {
         L = Builder->CreateFCmpUGT(L, R, "cmptmp");
       } else {
-        L = Builder->CreateICmpSGT(L, R, "cmptmp");
+        if (preferUnsigned)
+          L = Builder->CreateICmpUGT(L, R, "cmptmp");
+        else
+          L = Builder->CreateICmpSGT(L, R, "cmptmp");
       }
       // Zero-extend i1 to i8 for bool type
       return Builder->CreateZExt(L, llvm::Type::getInt8Ty(*TheContext), "booltmp");
@@ -2705,6 +2724,8 @@ llvm::Value *BinaryExprAST::codegen() {
     llvm::Value *Cmp;
     if (isFloat)
       Cmp = Builder->CreateFCmpOLE(L, R, "letmp");
+    else if (preferUnsigned)
+      Cmp = Builder->CreateICmpULE(L, R, "letmp");
     else
       Cmp = Builder->CreateICmpSLE(L, R, "letmp");
     return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
@@ -2713,6 +2734,8 @@ llvm::Value *BinaryExprAST::codegen() {
     llvm::Value *Cmp;
     if (isFloat)
       Cmp = Builder->CreateFCmpOGE(L, R, "getmp");
+    else if (preferUnsigned)
+      Cmp = Builder->CreateICmpUGE(L, R, "getmp");
     else
       Cmp = Builder->CreateICmpSGE(L, R, "getmp");
     return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
@@ -2750,6 +2773,12 @@ llvm::Value *BinaryExprAST::codegen() {
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+      auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
+      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+      bool compoundUnsigned = lhsUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+      if (!compoundUnsigned) {
+        compoundUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(getLHS()->getTypeName())).value_or(false);
+      }
       
       switch (baseOp) {
         case '+':
@@ -2773,12 +2802,16 @@ llvm::Value *BinaryExprAST::codegen() {
         case '/':
           if (isFloat)
             Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateUDiv(PromotedCurrent, PromotedR, "divtmp");
           else
             Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
           break;
         case '%':
           if (isFloat)
             Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateURem(PromotedCurrent, PromotedR, "modtmp");
           else
             Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
           break;
@@ -2848,6 +2881,12 @@ llvm::Value *BinaryExprAST::codegen() {
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+      auto elementUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(elementTypeNameForPromotion));
+      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+      bool compoundUnsigned = elementUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+      if (!compoundUnsigned) {
+        compoundUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(LHSE->getArray()->getTypeName())).value_or(false);
+      }
       
       switch (baseOp) {
         case '+':
@@ -2871,12 +2910,16 @@ llvm::Value *BinaryExprAST::codegen() {
         case '/':
           if (isFloat)
             Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateUDiv(PromotedCurrent, PromotedR, "divtmp");
           else
             Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
           break;
         case '%':
           if (isFloat)
             Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateURem(PromotedCurrent, PromotedR, "modtmp");
           else
             Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
           break;
@@ -2947,6 +2990,8 @@ llvm::Value *BinaryExprAST::codegen() {
     // Right shift (arithmetic) - only works on integers
     if (isFloat)
       return LogErrorV("Right shift requires integer operands");
+    if (preferUnsigned)
+      return Builder->CreateLShr(L, R, "lshrtmp");
     return Builder->CreateAShr(L, R, "ashrtmp");
   } else if (Op == "&=" || Op == "|=" || Op == "^=" || Op == "<<=" || Op == ">>=") {
     // Bitwise compound assignment operators
@@ -2981,6 +3026,12 @@ llvm::Value *BinaryExprAST::codegen() {
         lhsPromoteType = typeNameFromInfo(*info);
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+      auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
+      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+      bool compoundUnsigned = lhsUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+      if (!compoundUnsigned) {
+        compoundUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(getLHS()->getTypeName())).value_or(false);
+      }
       
       // Perform the operation based on the compound operator
       llvm::Value *Result;
@@ -2993,7 +3044,10 @@ llvm::Value *BinaryExprAST::codegen() {
       } else if (Op == "<<=") {
         Result = Builder->CreateShl(PromotedCurrent, PromotedR, "shltmp");
       } else if (Op == ">>=") {
-        Result = Builder->CreateAShr(PromotedCurrent, PromotedR, "ashrtmp");
+        if (compoundUnsigned)
+          Result = Builder->CreateLShr(PromotedCurrent, PromotedR, "lshrtmp");
+        else
+          Result = Builder->CreateAShr(PromotedCurrent, PromotedR, "ashrtmp");
       } else {
         return LogErrorV("Unknown bitwise compound assignment operator");
       }
@@ -3059,6 +3113,12 @@ llvm::Value *BinaryExprAST::codegen() {
       // Promote types for the operation
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
+      auto elementUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(elementTypeNameForPromotion));
+      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+      bool compoundUnsigned = elementUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+      if (!compoundUnsigned) {
+        compoundUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(LHSE->getArray()->getTypeName())).value_or(false);
+      }
       
       // Perform the operation
       llvm::Value *Result;
@@ -3071,7 +3131,10 @@ llvm::Value *BinaryExprAST::codegen() {
       } else if (Op == "<<=") {
         Result = Builder->CreateShl(PromotedCurrent, PromotedR, "shltmp");
       } else if (Op == ">>=") {
-        Result = Builder->CreateAShr(PromotedCurrent, PromotedR, "ashrtmp");
+        if (compoundUnsigned)
+          Result = Builder->CreateLShr(PromotedCurrent, PromotedR, "lshrtmp");
+        else
+          Result = Builder->CreateAShr(PromotedCurrent, PromotedR, "ashrtmp");
       } else {
         return LogErrorV("Unknown bitwise compound assignment operator");
       }
