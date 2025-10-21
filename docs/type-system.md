@@ -49,11 +49,6 @@ float[] temperatures = [98.6, 99.1, 97.5]
 char[] vowels = ['a', 'e', 'i', 'o', 'u']
 bool[] flags = [true, false, true]
 string[] names = ["Alice", "Bob", "Charlie"]
-
-// Arrays of sized types
-byte[] bytes = [10, 20, 30]
-short[] shorts = [1000, 2000, 3000]
-long[] longs = [1000000, 2000000]
 ```
 
 Arrays are implemented as structs containing a pointer to elements and a size in LLVM IR. Array literals regenerate their elements to match the declared element type, so `float[] temps = [98.6, 100.0]` stores true 32-bit floats even though the literal syntax defaults to `double`. The same width-aware regeneration applies to character arrays—`schar[] ascii = ['A', 'B']` produces 8-bit code units while `lchar[]` stores full 32-bit values.
@@ -74,12 +69,6 @@ bool isActive = true
 string message = "Hello"
 string? empty = null  // Nullable string
 
-// Sized type declarations
-byte b = 100
-short s = 1000
-long l = 1000000
-uint ui = 4000000000
-
 // Invalid - no initialization
 int x              // Error: variable must be initialized
 float y            // Error: variable must be initialized
@@ -97,11 +86,10 @@ Address? address = user?.primaryAddress
 
 - Nullable annotations apply anywhere a type appears: variables, struct fields, function parameters, and return types.
 - `int?[]` describes an array whose elements can be `null` while the array reference itself remains non-nullable. `int[]?` flips that relationship, so the array itself can be `null` but its elements cannot.
-- Pointer types (`int@`, `float@2`, ...) implicitly allow `null` regardless of annotation because they are raw references.
+- Pointer types (`int@`, `float@2`, etc.) implicitly allow `null` regardless of annotation because they are raw references.
 - Assigning a nullable expression to a non-nullable target is a compile-time error. Use helper functions or explicit conversions that validate nullability.
 - Accessing members on a nullable struct requires the null-safe access operator `?.`. See [Structs](structs.md) and [Expressions](expressions.md) for examples.
-
-The compiler currently requires explicit conversions when you prove a nullable value is non-null (flow-sensitive narrowing is not yet implemented). A manual `if maybeAlias != null` check does not change the static type of `maybeAlias`.
+- The compiler performs flow-sensitive narrowing. After guards like `if maybeAlias != null` (and the symmetric `if maybeAlias == null` in the `else`) the guarded variable is treated as its non-nullable type for the remainder of the reachable branch. The same analysis applies to `while maybeAlias != null` loops and survives across early returns that prove a variable is null.
 
 ## Type Inference
 
@@ -171,7 +159,8 @@ byte mod = x % 3     // Modulo: 3 becomes i8
 
 **Function Arguments:**
 ```c
-void processByte(byte value) {
+void processByte(byte value)
+{
     // ...
 }
 
@@ -235,13 +224,6 @@ assert result == 60   // All literals become i8
 short complex = (100 + 200) / 3
 assert complex == 100
 ```
-
-#### Benefits
-
-1. **Cleaner code**: No need for `byte: 100` in comparisons and arithmetic
-2. **Maintains safety**: Overflow checking and type checking still apply
-3. **Modern design**: Follows patterns from C#, Rust, and Swift
-4. **Zero ambiguity**: Only applies when target type is clear from context
 
 ## Type Casting and Promotion
 
@@ -380,7 +362,7 @@ long overflow2 = 9223372036854775808  // Error: exceeds 64-bit integer range
 - **Early detection**: Overflow is caught during lexical analysis, before parsing
 - **Precise error messages**: Clear indication of which value overflowed and the valid range
 - **64-bit limit**: Maximum supported literal is `9,223,372,036,854,775,807` (2^63 - 1)
-- **Negative numbers**: Handled correctly via unary negation (e.g., `-2147483648` for minimum i32)
+- **Negative numbers**: Handled correctly via unary negation (e.g. `-2147483648` for minimum i32)
 - **Type-specific checking**: Range validation respects target type when assigning
 
 ### Implementation Details
@@ -400,7 +382,7 @@ try {
 
 ### Test Coverage
 
-See `test/types/test_overflow.hy` for valid edge cases and `test/errors/test_overflow_fail.hy` for overflow detection tests.
+See `test/types/overflow.hy` for valid edge cases and `test/errors/overflow_fail.hy` for overflow detection tests.
 
 #### Character Type Casting
 
@@ -528,7 +510,7 @@ long calculateLong(long x, long y) { return x * y }
 The type system enforces several safety rules:
 
 1. **No implicit narrowing conversions**: Cannot assign `double` to `int` without explicit cast
-2. **Strict integer size checking**: Cannot mix different sized integers (e.g., `short` and `int`)
+2. **Strict integer size checking**: Cannot mix different sized integers (e.g. `short` and `int`)
 3. **Array bounds**: Array indices must be integers
 4. **Function calls**: Arguments must match parameter types exactly (except for int-to-float promotion)
 5. **Bool isolation**: Boolean values cannot be converted to or from other types

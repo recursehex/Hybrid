@@ -535,31 +535,5 @@ int enemyHP = enemy.health     // 50
 
 Test files demonstrating struct features:
 
-- `test/structs/test_struct_basic.hy` - Basic struct declaration and instantiation
-- `test/structs/test_struct_advanced.hy` - Nested structs and complex scenarios
-
-Example test:
-
-```c
-// test_struct_basic.hy
-struct Point {
-    int x
-    int y
-    
-    Point(int x, int y) {
-        this.x = x
-        this.y = y
-    }
-}
-
-// Test instantiation
-Point p = Point(10, 20)
-
-// Test field access
-int xVal = p.x  // Should be 10
-int yVal = p.y  // Should be 20
-
-// Test field modification
-p.x = 30
-p.y = 40
-```
+- `test/structs/struct_basic.hy` - Basic struct declaration and instantiation
+- `test/structs/struct_advanced.hy` - Nested structs and complex scenarios

@@ -27,6 +27,7 @@
 #include <optional>
 #include <algorithm>
 #include <cctype>
+#include <set>
 
 #define CG currentCodegen()
 #define TheContext (CG.llvmContext)
@@ -42,6 +43,9 @@
 #define StructFieldTypes (CG.structFieldTypes)
 #define LoopExitBlocks (CG.loopExitBlocks)
 #define LoopContinueBlocks (CG.loopContinueBlocks)
+#define NonNullFacts (CG.nonNullFactsStack)
+
+static void ensureBaseNonNullScope();
 
 llvm::Value *LogErrorV(const char *Str);
 
@@ -140,6 +144,8 @@ static void prepareTopLevelStatementContext() {
 
   NamedValues.clear();
   LocalTypes.clear();
+  NonNullFacts.clear();
+  ensureBaseNonNullScope();
 }
 
 void FinalizeTopLevelExecution() {
@@ -406,6 +412,164 @@ static bool isDeclaredRefLocal(const std::string &name) {
   return false;
 }
 
+static void ensureBaseNonNullScope() {
+  if (NonNullFacts.empty())
+    NonNullFacts.emplace_back();
+}
+
+static std::set<std::string> currentNonNullFactsCopy() {
+  if (NonNullFacts.empty())
+    return {};
+  return NonNullFacts.back();
+}
+
+static void replaceCurrentNonNullFacts(const std::set<std::string> &facts) {
+  ensureBaseNonNullScope();
+  NonNullFacts.back() = facts;
+}
+
+static void pushNonNullFactsFrom(const std::set<std::string> &seed) {
+  NonNullFacts.push_back(seed);
+}
+
+static void popNonNullFactsScope() {
+  if (!NonNullFacts.empty())
+    NonNullFacts.pop_back();
+}
+
+static bool isKnownNonNull(const std::string &name) {
+  for (auto It = NonNullFacts.rbegin(); It != NonNullFacts.rend(); ++It) {
+    if (It->find(name) != It->end())
+      return true;
+  }
+  return false;
+}
+
+static void markKnownNonNull(const std::string &name) {
+  ensureBaseNonNullScope();
+  NonNullFacts.back().insert(name);
+}
+
+static void markKnownNullable(const std::string &name) {
+  if (!NonNullFacts.empty())
+    NonNullFacts.back().erase(name);
+}
+
+enum class NullComparisonRelation {
+  EqualsNull,
+  NotEqualsNull
+};
+
+struct NullComparison {
+  std::string variableName;
+  NullComparisonRelation relation = NullComparisonRelation::EqualsNull;
+};
+
+static NullComparisonRelation invertRelation(NullComparisonRelation relation) {
+  return relation == NullComparisonRelation::EqualsNull
+             ? NullComparisonRelation::NotEqualsNull
+             : NullComparisonRelation::EqualsNull;
+}
+
+static std::optional<NullComparison>
+extractNullComparison(const ExprAST *expr, bool inverted = false) {
+  if (!expr)
+    return std::nullopt;
+
+  if (const auto *Unary = dynamic_cast<const UnaryExprAST *>(expr)) {
+    if (Unary->getOp() == "!") {
+      return extractNullComparison(Unary->getOperand(), !inverted);
+    }
+  }
+
+  if (const auto *Binary = dynamic_cast<const BinaryExprAST *>(expr)) {
+    const std::string &Op = Binary->getOp();
+    if (Op == "==" || Op == "!=") {
+      const ExprAST *lhs = unwrapRefExpr(Binary->getLHS());
+      const ExprAST *rhs = unwrapRefExpr(Binary->getRHS());
+      bool lhsNull = exprIsNullLiteral(lhs);
+      bool rhsNull = exprIsNullLiteral(rhs);
+      if (lhsNull == rhsNull)
+        return std::nullopt;
+      const ExprAST *candidate = lhsNull ? rhs : lhs;
+      if (const auto *Var = dynamic_cast<const VariableExprAST *>(candidate)) {
+        NullComparisonRelation relation =
+            (Op == "!=") ? NullComparisonRelation::NotEqualsNull
+                         : NullComparisonRelation::EqualsNull;
+        if (inverted)
+          relation = invertRelation(relation);
+        return NullComparison{Var->getName(), relation};
+      }
+    }
+  }
+
+  return std::nullopt;
+}
+
+static bool variableSupportsNullComparison(const NullComparison &comparison) {
+  if (const TypeInfo *info = lookupTypeInfo(comparison.variableName))
+    return typeAllowsNull(*info);
+  return false;
+}
+
+enum class BranchKind {
+  Then,
+  Else
+};
+
+static void applyNullComparisonToCurrentScope(const NullComparison &comparison,
+                                              BranchKind branch) {
+  if (!variableSupportsNullComparison(comparison))
+    return;
+
+  bool branchImpliesNonNull = false;
+  bool branchImpliesNull = false;
+  if (branch == BranchKind::Then) {
+    branchImpliesNonNull =
+        comparison.relation == NullComparisonRelation::NotEqualsNull;
+    branchImpliesNull =
+        comparison.relation == NullComparisonRelation::EqualsNull;
+  } else {
+    branchImpliesNonNull =
+        comparison.relation == NullComparisonRelation::EqualsNull;
+    branchImpliesNull =
+        comparison.relation == NullComparisonRelation::NotEqualsNull;
+  }
+
+  if (branchImpliesNonNull)
+    markKnownNonNull(comparison.variableName);
+  if (branchImpliesNull)
+    markKnownNullable(comparison.variableName);
+}
+
+static std::set<std::string>
+intersectNonNullFacts(const std::set<std::string> &a,
+                      const std::set<std::string> &b) {
+  if (a.empty() || b.empty())
+    return {};
+  const std::set<std::string> *smaller = &a;
+  const std::set<std::string> *larger = &b;
+  if (a.size() > b.size())
+    std::swap(smaller, larger);
+  std::set<std::string> result;
+  for (const auto &item : *smaller) {
+    if (larger->find(item) != larger->end())
+      result.insert(item);
+  }
+  return result;
+}
+
+static void updateKnownNonNullOnAssignment(const std::string &name,
+                                           bool rhsIsNullable) {
+  if (NonNullFacts.empty())
+    return;
+  if (const TypeInfo *info = lookupTypeInfo(name); info && typeAllowsNull(*info)) {
+    markKnownNullable(name);
+    if (!rhsIsNullable)
+      markKnownNonNull(name);
+  }
+}
+
 // Initialize LLVM
 void InitializeModule() {
   CG.reset();
@@ -529,7 +693,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     }
     return nullptr;
   }
-  // Check for pointer types (e.g., "int@", "float@2")
+  // Check for pointer types (e.g. "int@", "float@2")
   else if (CleanType.find('@') != std::string::npos) {
     size_t atPos = CleanType.find('@');
     std::string BaseType = CleanType.substr(0, atPos);
@@ -1206,7 +1370,7 @@ llvm::Value *ArrayIndexExprAST::codegen() {
           }
         }
       }
-      // Check if it's from a member access (e.g., holder.pointers)
+      // Check if it's from a member access (e.g. holder.pointers)
       else if (dynamic_cast<MemberAccessExprAST*>(getArray())) {
         // Get the type from the member access expression
         std::string memberType = getArray()->getTypeName();
@@ -1775,7 +1939,10 @@ llvm::Value *VariableExprAST::codegen() {
     llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
     // Set type name from local types
     if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
-      setTypeName(typeNameFromInfo(*info));
+      TypeInfo effective = *info;
+      if (typeAllowsNull(*info) && isKnownNonNull(getName()))
+        effective.isNullable = false;
+      setTypeName(typeNameFromInfo(effective));
 
       if (info->isAlias()) {
         llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
@@ -1797,7 +1964,10 @@ llvm::Value *VariableExprAST::codegen() {
     // Global variable - load from global
     // Set type name from global types
     if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
-      setTypeName(typeNameFromInfo(*info));
+      TypeInfo effective = *info;
+      if (typeAllowsNull(*info) && isKnownNonNull(getName()))
+        effective.isNullable = false;
+      setTypeName(typeNameFromInfo(effective));
 
       if (info->isAlias()) {
         llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
@@ -2515,6 +2685,7 @@ llvm::Value *BinaryExprAST::codegen() {
               return LogErrorV("Invalid type for ref variable");
             R = castToType(R, ActualLLVMType);
             Builder->CreateStore(R, Ptr);
+            updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
             setTypeName("void");
             return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
           }
@@ -2534,6 +2705,7 @@ llvm::Value *BinaryExprAST::codegen() {
       R = castToType(R, VarType);
     }
           Builder->CreateStore(R, Variable);
+          updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
           return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -2549,6 +2721,7 @@ llvm::Value *BinaryExprAST::codegen() {
               return LogErrorV("Invalid type for ref variable");
             R = castToType(R, ActualLLVMType);
             Builder->CreateStore(R, Ptr);
+            updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
             setTypeName("void");
             return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
           }
@@ -2568,6 +2741,7 @@ llvm::Value *BinaryExprAST::codegen() {
             R = castToType(R, VarType);
           }
           Builder->CreateStore(R, GV);
+          updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
           return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -2650,7 +2824,7 @@ llvm::Value *BinaryExprAST::codegen() {
         setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
-        // Member access assignment (e.g., this.x = value)
+        // Member access assignment (e.g. this.x = value)
         llvm::Value *FieldPtr = LHSMA->codegen_ptr();
         if (!FieldPtr)
           return nullptr;
@@ -3677,7 +3851,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       }
     } else {
       // Regular global variable
-      // Check if initializer has explicit ref (e.g., int x = ref y)
+      // Check if initializer has explicit ref (e.g. int x = ref y)
       bool initializerHasRef = dynamic_cast<RefExprAST*>(getInitializer()) != nullptr;
 
       if (initializerHasRef) {
@@ -3837,7 +4011,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       }
     } else {
       // Regular variable
-      // Check if initializer has explicit ref (e.g., int x = ref y)
+      // Check if initializer has explicit ref (e.g. int x = ref y)
       bool initializerHasRef = dynamic_cast<RefExprAST*>(getInitializer()) != nullptr;
 
       if (initializerHasRef) {
@@ -4388,35 +4562,52 @@ llvm::Value *IfStmtAST::codegen() {
   llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "ifcont");
   
   Builder->CreateCondBr(CondV, ThenBB, ElseBB);
-  
+
+  ensureBaseNonNullScope();
+  std::set<std::string> baseFacts = currentNonNullFactsCopy();
+  std::optional<NullComparison> comparison = extractNullComparison(getCondition());
+
   // Emit then value.
   Builder->SetInsertPoint(ThenBB);
-  
+  pushNonNullFactsFrom(baseFacts);
+  if (comparison)
+    applyNullComparisonToCurrentScope(*comparison, BranchKind::Then);
   llvm::Value *ThenV = getThenBranch()->codegen();
-  if (!ThenV)
+  if (!ThenV) {
+    popNonNullFactsScope();
     return nullptr;
-  
-  // Check if the block already has a terminator (e.g., return statement)
-  if (!Builder->GetInsertBlock()->getTerminator())
+  }
+  llvm::BasicBlock *ThenEndBlock = Builder->GetInsertBlock();
+  bool thenFallsThrough = !ThenEndBlock->getTerminator();
+  std::set<std::string> thenFacts = NonNullFacts.back();
+  if (thenFallsThrough)
     Builder->CreateBr(MergeBB);
-  
+  popNonNullFactsScope();
   // Codegen of 'Then' can change the current block, update ThenBB for the PHI.
   ThenBB = Builder->GetInsertBlock();
   
   // Emit else block.
   ElseBB->insertInto(TheFunction);
   Builder->SetInsertPoint(ElseBB);
+  pushNonNullFactsFrom(baseFacts);
+  if (comparison)
+    applyNullComparisonToCurrentScope(*comparison, BranchKind::Else);
   
   llvm::Value *ElseV = nullptr;
   if (getElseBranch()) {
     ElseV = getElseBranch()->codegen();
-    if (!ElseV)
+    if (!ElseV) {
+      popNonNullFactsScope();
       return nullptr;
+    }
   }
   
-  // Check if the block already has a terminator
-  if (!Builder->GetInsertBlock()->getTerminator())
+  llvm::BasicBlock *ElseEndBlock = Builder->GetInsertBlock();
+  bool elseFallsThrough = !ElseEndBlock->getTerminator();
+  std::set<std::string> elseFacts = NonNullFacts.back();
+  if (elseFallsThrough)
     Builder->CreateBr(MergeBB);
+  popNonNullFactsScope();
   
   // Codegen of 'Else' can change the current block, update ElseBB for the PHI.
   ElseBB = Builder->GetInsertBlock();
@@ -4424,6 +4615,21 @@ llvm::Value *IfStmtAST::codegen() {
   // Emit merge block.
   MergeBB->insertInto(TheFunction);
   Builder->SetInsertPoint(MergeBB);
+
+  std::optional<std::set<std::string>> continuingFacts;
+  if (thenFallsThrough)
+    continuingFacts = thenFacts;
+  if (elseFallsThrough) {
+    if (continuingFacts)
+      continuingFacts = intersectNonNullFacts(*continuingFacts, elseFacts);
+    else
+      continuingFacts = elseFacts;
+  }
+
+  if (continuingFacts)
+    replaceCurrentNonNullFacts(*continuingFacts);
+  else
+    replaceCurrentNonNullFacts(baseFacts);
   
   // Return the last value (this is somewhat arbitrary for statements)
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
@@ -4463,10 +4669,14 @@ llvm::Value *WhileStmtAST::codegen() {
       // For integers, compare with 0
       CondV = Builder->CreateICmpNE(CondV, 
         llvm::ConstantInt::get(CondV->getType(), 0), "whilecond");
-    } else {
+  } else {
       return LogErrorV("Condition must be a numeric type");
     }
   }
+  
+  std::optional<NullComparison> comparison = extractNullComparison(getCondition());
+  ensureBaseNonNullScope();
+  std::set<std::string> baseFacts = currentNonNullFactsCopy();
   
   // Create the conditional branch
   Builder->CreateCondBr(CondV, LoopBB, AfterBB);
@@ -4474,6 +4684,9 @@ llvm::Value *WhileStmtAST::codegen() {
   // Emit the loop body
   LoopBB->insertInto(TheFunction);
   Builder->SetInsertPoint(LoopBB);
+  pushNonNullFactsFrom(baseFacts);
+  if (comparison)
+    applyNullComparisonToCurrentScope(*comparison, BranchKind::Then);
   
   // Push the exit and continue blocks for break/skip statements
   LoopExitBlocks.push_back(AfterBB);
@@ -4485,6 +4698,8 @@ llvm::Value *WhileStmtAST::codegen() {
   // Pop the exit and continue blocks
   LoopExitBlocks.pop_back();
   LoopContinueBlocks.pop_back();
+  
+  popNonNullFactsScope();
   
   if (!BodyV)
     return nullptr;
@@ -4682,6 +4897,8 @@ llvm::Function *FunctionAST::codegen() {
   // Record the function arguments in the NamedValues map
   NamedValues.clear();
   LocalTypes.clear();  // Clear local types for new function
+  NonNullFacts.clear();
+  ensureBaseNonNullScope();
   // Clear local array sizes, but keep global ones
   for (auto it = ArraySizes.begin(); it != ArraySizes.end(); ) {
     if (NamedValues.count(it->first) || LocalTypes.count(it->first)) {
@@ -4758,6 +4975,7 @@ llvm::Function *FunctionAST::codegen() {
     Builder->ClearInsertionPoint();
     NamedValues.clear();
     LocalTypes.clear();
+    NonNullFacts.clear();
 
     return TheFunction;
   }
@@ -4765,6 +4983,7 @@ llvm::Function *FunctionAST::codegen() {
   // Error reading body, remove function
   TheFunction->eraseFromParent();
   Builder->ClearInsertionPoint();
+  NonNullFacts.clear();
   return nullptr;
 }
 
@@ -4851,6 +5070,8 @@ llvm::Type *StructAST::codegen() {
       // 'this' refers to the stack allocation we just created
       NamedValues.clear();
       LocalTypes.clear();
+      NonNullFacts.clear();
+      ensureBaseNonNullScope();
       NamedValues["this"] = StructPtr;
       rememberLocalType("this", makeTypeInfo(Name));
 
@@ -4889,6 +5110,7 @@ llvm::Type *StructAST::codegen() {
         ConstructorFunc->eraseFromParent();
         NamedValues.clear();
         LocalTypes.clear();
+        NonNullFacts.clear();
         Builder->ClearInsertionPoint();
         return nullptr;
       }
@@ -4896,6 +5118,7 @@ llvm::Type *StructAST::codegen() {
       // Clear local values now that the constructor is done
       NamedValues.clear();
       LocalTypes.clear();
+      NonNullFacts.clear();
     } else {
       // Regular method - generate as-is but with implicit 'this' parameter
       Method->codegen();

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,6 +38,7 @@ struct CodegenContext {
 
   std::vector<llvm::BasicBlock *> loopExitBlocks;
   std::vector<llvm::BasicBlock *> loopContinueBlocks;
+  std::vector<std::set<std::string>> nonNullFactsStack;
 
   void reset();
 };
@@ -55,6 +57,7 @@ inline void CodegenContext::reset() {
   structFieldTypes.clear();
   loopExitBlocks.clear();
   loopContinueBlocks.clear();
+  nonNullFactsStack.clear();
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

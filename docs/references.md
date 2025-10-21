@@ -161,7 +161,7 @@ int y = ref x  // LLVM: @y = global ptr null
 ### Type Tracking
 
 The compiler now tracks reference metadata with a structured `TypeInfo` record instead of string prefixes:
-- `typeName` preserves the language-visible type (e.g., `int`, `MyStruct[]`).
+- `typeName` preserves the language-visible type (e.g. `int`, `MyStruct[]`).
 - `refStorage` captures whether a binding owns storage (`RefValue`) or aliases another binding (`RefAlias`).
 - `declaredRef` records whether the variable was declared with the `ref` keyword so the linker can validate future aliases.
 

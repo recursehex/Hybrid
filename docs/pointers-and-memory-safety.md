@@ -292,7 +292,7 @@ When you use `unsafe`:
 
 1. **No pointer arithmetic** - Unlike C/C++, you cannot yet do `ptr + 1` or `ptr++`
 2. **Manual null checks** - The compiler does not insert runtime null guards for pointers; check before dereferencing
-3. **Limited type tracking** - Type information may be lost in complex scenarios (e.g., pointer arrays in struct fields)
+3. **Limited type tracking** - Type information may be lost in complex scenarios (e.g. pointer arrays in struct fields)
 4. **No dynamic memory allocation** - No `malloc`/`free` or `new`/`delete` equivalents
 
 ### Future Enhancements

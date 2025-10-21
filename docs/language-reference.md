@@ -28,7 +28,7 @@ Identifiers can contain letters, numbers, and underscores. They must start with 
 
 ```c
 int myVariable = 10
-int _privateVar = 20
+int _myOtherVar = 20
 int count_123 = 30
 ```
 
@@ -76,14 +76,6 @@ The following keywords are reserved:
 - Exception handling: `assert`
 - Memory safety: `unsafe`
 
-### Null Safety
-
-- Types are non-nullable unless annotated with `?` (for example `int?`, `User?`, `float?[]`, `string[]?`)
-- Use `?.` for null-safe member access on nullable struct references
-- Use `?[` for null-safe element access on nullable array references
-- Use `??` to supply a fallback when a nullable value is `null`
-- Use `??=` to assign a fallback when a nullable variable is `null`
-
 ## Literals
 
 ### Numeric Literals
@@ -130,7 +122,7 @@ string precise = $"Pi: `pi:2`"                    // format specifier for floats
 ```
 
 - Expressions inside backticks can be any valid expression.
-- Format specifiers are optional and currently supported for floating-point values using `:digits` to control precision (e.g., `pi:3`).
+- Format specifiers are optional and currently supported for floating-point values using `:digits` to control precision (e.g. `pi:3`).
 - To emit a literal backtick inside an interpolated string, escape it with `\``.
 
 ### Character Literals
@@ -193,7 +185,15 @@ All types are checked at compile time, preventing type-related runtime errors.
 - Types are non-nullable unless explicitly annotated with `?` (for example, `int?`, `User?`, `string[]?`).
 - The null-safe member access operator `?.` must be used when dereferencing nullable struct values: `user?.address?.city`.
 - Assigning `null` or any nullable expression to a non-nullable variable, field, or array element results in a compile-time error.
-- Flow analysis does not currently narrow nullable types. Use helper functions or explicit conversions after performing manual null checks.
+- Flow analysis narrows nullable types inside guarded regions. Within `if maybeUser != null { ... }` the compiler treats `maybeUser` as non-null, and the `else` side gains the complementary knowledge for `if maybeUser == null`. The same reasoning applies to loop conditions such as `while node != null`.
+
+### Null Safety
+
+- Types are non-nullable unless annotated with `?` (for example `int?`, `User?`, `float?[]`, `string[]?`)
+- Use `?.` for null-safe member access on nullable struct references
+- Use `?[` for null-safe element access on nullable array references
+- Use `??` to supply a fallback when a nullable value is `null`
+- Use `??=` to assign a fallback when a nullable variable is `null`
 
 See the [Type System](type-system.md#nullable-types), [Structs](structs.md#nullable-fields), and [Expressions](expressions.md#null-safe-member-access) guides for details.
 

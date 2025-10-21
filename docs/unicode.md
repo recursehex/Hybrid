@@ -236,13 +236,5 @@ The lexer recognizes:
 ## Testing
 
 Test files for Unicode support:
-- `test/types/test_unicode.hy` - Comprehensive Unicode tests
-- `test/types/test_char.hy` - Character type tests
-
-Example test:
-```c
-// test_unicode.hy
-char omega = '\u03a9'
-lchar emoji = '😀'
-string mixed = "Hello αβγ 世界 🌍"
-```
+- `test/types/unicode.hy` - Comprehensive Unicode tests
+- `test/types/char.hy` - Character type tests

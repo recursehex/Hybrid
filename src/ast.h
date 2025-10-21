@@ -45,7 +45,7 @@ void FinalizeTopLevelExecution();
 /// ExprAST - Base class for all expression nodes.
 class ExprAST {
 protected:
-  mutable std::string TypeName; // The type name of this expression (e.g., "int", "byte", "float")
+  mutable std::string TypeName; // The type name of this expression (e.g. "int", "byte", "float")
   
 public:
   virtual ~ExprAST() = default;
@@ -551,7 +551,7 @@ public:
   ExprAST *getOperand() const { return Operand.get(); }
 };
 
-/// RefExprAST - Expression class for ref argument expressions (e.g., ref x in function calls).
+/// RefExprAST - Expression class for ref argument expressions (e.g. ref x in function calls).
 class RefExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Operand;
 
@@ -639,7 +639,7 @@ public:
   [[nodiscard]] const std::string &getName() const { return Name; }
 };
 
-/// MemberAccessExprAST - Expression class for struct member access (e.g., point.x).
+/// MemberAccessExprAST - Expression class for struct member access (e.g. point.x).
 class MemberAccessExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Object;
   std::string MemberName;
@@ -654,7 +654,7 @@ public:
   const std::string &getMemberName() const { return MemberName; }
 };
 
-/// NullSafeAccessExprAST - Expression class for null-safe member access (e.g., obj?.field).
+/// NullSafeAccessExprAST - Expression class for null-safe member access (e.g. obj?.field).
 class NullSafeAccessExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Object;
   std::string MemberName;

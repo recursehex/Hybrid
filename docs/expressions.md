@@ -28,19 +28,19 @@ See [Type System – Literal Type Inference](type-system.md#context-aware-litera
 
 Operators are evaluated according to precedence rules (higher numbers bind tighter):
 
-| Precedence | Operators | Associativity |
-|------------|-----------|---------------|
-| 40 | `*`, `/`, `%` | Left-to-right |
-| 20 | `+`, `-` | Left-to-right |
-| 15 | `<<`, `>>` | Left-to-right |
-| 10 | `<`, `>`, `<=`, `>=`, `==`, `!=` | Left-to-right |
-| 9 | `&` | Left-to-right |
-| 8 | `^` | Left-to-right |
-| 7 | `|` | Left-to-right |
-| 6 | `&&` | Left-to-right |
-| 5 | `||` | Left-to-right |
-| 4 | `if...else` (ternary) | Right-to-left |
-| 2 | `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` | Right-to-left |
+| Precedence | Operators | Type | Associativity |
+|------------|-----------|------|---------------|
+| 40 | `*`, `/`, `%` | Multiplication | Left-to-right |
+| 20 | `+`, `-` | Addition | Left-to-right |
+| 15 | `<<`, `>>` | Bitwise shift | Left-to-right |
+| 10 | `<`, `>`, `<=`, `>=`, `==`, `!=` | Comparison | Left-to-right |
+| 9 | `&` | Bitwise AND | Left-to-right |
+| 8 | `^` | Bitwise XOR | Left-to-right |
+| 7 | `\|` | Bitwise OR  | Left-to-right |
+| 6 | `&&` | Logical AND | Left-to-right |
+| 5 | `\|\|` | Logical OR | Left-to-right |
+| 4 | `if...else...` | Ternary | Right-to-left |
+| 2 | `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>=` | Assignment | Right-to-left |
 
 ## Arithmetic Operators
 
@@ -240,12 +240,14 @@ Boolean operators use short-circuit evaluation:
 
 ```c
 // If x <= 0, the second part is not evaluated
-if x > 0 && expensive_check(x) {
+if x > 0 && expensive_check(x)
+{
     // ...
 }
 
 // If x == 0, the second part is not evaluated
-if x == 0 || risky_operation(x) {
+if x == 0 || risky_operation(x)
+{
     // ...
 }
 ```
@@ -262,9 +264,12 @@ int max = a if a > b else b
 
 // Equivalent to:
 int max
-if a > b {
+if a > b
+{
     max = a
-} else {
+}
+else
+{
     max = b
 }
 ```
@@ -284,7 +289,8 @@ bool isReady = true
 int status = 1 if isReady else 0  // status = 1
 
 // Absolute value implementation
-int absolute(int n) {
+int absolute(int n)
+{
     return n if n >= 0 else -n
 }
 ```
@@ -369,11 +375,13 @@ bool flag = true if x > 0 else false
 #### Function Returns
 
 ```c
-int sign(int n) {
+int sign(int n)
+{
     return 1 if n > 0 else -1 if n < 0 else 0
 }
 
-double safeDivide(double a, double b) {
+double safeDivide(double a, double b)
+{
     return a / b if b != 0.0 else 0.0
 }
 ```
@@ -467,9 +475,12 @@ int result = (x * 2 + calculateOffset()) if (mode == ADVANCED && isEnabled) else
 
 // Better: use if-else for complex cases
 int result
-if mode == ADVANCED && isEnabled {
+if mode == ADVANCED && isEnabled
+{
     result = x * 2 + calculateOffset()
-} else {
+}
+else
+{
     result = y / 2 - getDefault()
 }
 ```

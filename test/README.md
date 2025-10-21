@@ -77,11 +77,11 @@ Use the `run_tests.sh` script in the project root:
 ./run_tests.sh operators
 
 # Run tests matching a pattern
-./run_tests.sh test_bool
+./run_tests.sh bool
 ./run_tests.sh cast
 
 # Run a specific test file
-./run_tests.sh test/types/test_bool.hy
+./run_tests.sh test/types/bool.hy
 
 # Run with verbose output (shows test content and output)
 ./run_tests.sh -v
@@ -91,7 +91,7 @@ Use the `run_tests.sh` script in the project root:
 ## Writing New Tests
 
 1. Create a `.hy` file in the appropriate category directory
-2. Name it descriptively (e.g., `test_feature_name.hy`)
+2. Name it descriptively (e.g. `feature_name.hy`)
 3. Tests that should fail should include "fail" or "error" in the filename
 4. Add comments explaining what the test is verifying
 

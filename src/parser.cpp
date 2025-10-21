@@ -149,7 +149,7 @@ bool IsValidType()
 }
 
 /// Helper function to parse a complete type including array and pointer modifiers
-/// Returns the full type string (e.g., "int@", "int@2", "int[]", "float@[]")
+/// Returns the full type string (e.g. "int@", "int@2", "int[]", "float@[]")
 std::string ParseCompleteType()
 {
   if (!IsValidType())

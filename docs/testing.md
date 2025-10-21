@@ -20,9 +20,9 @@ The primary way to run tests is using the platform-specific test runner:
 ./run_tests.sh -v
 
 # Run specific test or pattern
-./run_tests.sh test_expr            # Runs test_expr.hy
-./run_tests.sh array               # Runs all tests containing "array"
-./run_tests.sh multi_unit          # Runs only multi-file directory tests
+./run_tests.sh expr             # Runs expr.hy
+./run_tests.sh array            # Runs all tests containing "array"
+./run_tests.sh multi_unit       # Runs only multi-file directory tests
 
 # Show help
 ./run_tests.sh -h
@@ -38,7 +38,7 @@ run_tests.bat
 run_tests.bat -v
 
 # Run specific test or pattern
-run_tests.bat test_expr      # Runs test_expr.hy
+run_tests.bat expr          # Runs expr.hy
 run_tests.bat array         # Runs all tests containing "array"
 
 # Show help
@@ -52,25 +52,25 @@ Tests can also be run directly with the compiler:
 #### Unix/macOS
 ```bash
 # Run a specific test file
-./build/hybrid < test/test_codegen.hy
+./build/hybrid < test/codegen.hy
 
 # Run with output redirection
-./build/hybrid < test/test_expr.hy > output.txt
+./build/hybrid < test/expr.hy > output.txt
 
 # Run with error output
-./build/hybrid < test/test_fail.hy 2>&1
+./build/hybrid < test/fail.hy 2>&1
 ```
 
 #### Windows
 ```cmd
 # Run a specific test file
-build\hybrid.exe < test\test_codegen.hy
+build\hybrid.exe < test\codegen.hy
 
 # Run with output redirection
-build\hybrid.exe < test\test_expr.hy > output.txt
+build\hybrid.exe < test\expr.hy > output.txt
 
 # Run with error output
-build\hybrid.exe < test\test_fail.hy 2>&1
+build\hybrid.exe < test\fail.hy 2>&1
 ```
 
 ## Test Suite Features
@@ -95,7 +95,7 @@ The test runner automatically finds all `.hy` files in the `test/` directory:
 The test suite compiles and executes generated LLVM IR:
 
 - **Automatic compilation**: If `clang` is available, tests are compiled to native binaries
-- **Runtime library**: A temporary runtime library is created with support functions (e.g., `print()`)
+- **Runtime library**: A temporary runtime library is created with support functions (e.g. `print()`)
 - **Execution verification**: Tests are run and exit codes are checked
 - **Assert detection**: Runtime aborts (exit code 134/SIGABRT) are detected as test failures
 - **Cleanup**: All temporary files are automatically removed
@@ -119,7 +119,7 @@ Additionally, runtime errors are detected:
 
 | Exit Code | Description |
 |-----------|-------------|
-| `134` (SIGABRT) | Runtime abort (e.g., from `assert` statements) |
+| `134` (SIGABRT) | Runtime abort (e.g. from `assert` statements) |
 | Non-zero | Other runtime errors |
 
 ### Test Classification
@@ -137,15 +137,15 @@ Tests are classified by their expected behavior:
 Hybrid Compiler Test Suite
 ===============================
 Found test files:
-  - test/test_bool.hy
-  - test/test_expr.hy
+  - test/bool.hy
+  - test/expr.hy
   ...
 
-Running test: test_bool
-✓ PASSED: test_bool
+Running test: bool
+✓ PASSED: bool
 
-Running test: test_expr
-✓ PASSED: test_expr
+Running test: expr
+✓ PASSED: expr
 
 ===============================
 Test Summary
@@ -170,14 +170,14 @@ Tests are organized by feature area:
 
 | Test File | Description |
 |-----------|-------------|
-| `test_expr.hy` | Arithmetic expressions and operations |
-| `test_bool.hy` | Boolean literals and expressions |
-| `test_codegen.hy` | Complete function code generation |
-| `test_if_else.hy` | If-else statements and comparisons |
-| `test_boolean_ops.hy` | Boolean operators (&&, \|\|, !) |
-| `test_while.hy` | While loops and nested loops |
-| `test_arrays.hy` | Comprehensive array operations |
-| `test_null.hy` | String and null initialization |
+| `expr.hy` | Arithmetic expressions and operations |
+| `testbool.hy` | Boolean literals and expressions |
+| `codegen.hy` | Complete function code generation |
+| `if_else.hy` | If-else statements and comparisons |
+| `boolean_ops.hy` | Boolean operators (&&, \|\|, !) |
+| `while.hy` | While loops and nested loops |
+| `arrays.hy` | Comprehensive array operations |
+| `null.hy` | String and null initialization |
 | `test.hy` | General integration tests |
 
 ### Test File Structure
@@ -185,7 +185,7 @@ Tests are organized by feature area:
 A typical test file contains:
 
 ```c
-// test/test_feature.hy
+// test/feature.hy
 // Test description comment
 
 // Test case 1: Basic functionality
@@ -212,7 +212,7 @@ edgeCase(10)
 ### Guidelines
 
 1. **One feature per file**: Focus each test file on a specific language feature
-2. **Clear naming**: Use descriptive test file names (e.g., `test_array_indexing.hy`)
+2. **Clear naming**: Use descriptive test file names (e.g. `array_indexing.hy`)
 3. **Comments**: Add comments explaining what each test case validates
 4. **Coverage**: Include both typical usage and edge cases
 5. **Expected failures**: Name files with "fail" for tests that should error
@@ -220,7 +220,7 @@ edgeCase(10)
 ### Example Test
 
 ```c
-// test/test_arithmetic.hy
+// test/arithmetic.hy
 // Tests arithmetic operations and precedence
 
 // Test basic operations
@@ -258,7 +258,7 @@ testMixed()       // Expected: 7.5
 For tests that should fail, include "fail" in the filename:
 
 ```c
-// test/test_undefined_var_fail.hy
+// test/undefined_var_fail.hy
 // This test should fail with "Unknown variable" error
 
 int useUndefined()
@@ -313,9 +313,9 @@ Planned CI improvements:
 
 ### Debug Steps
 
-1. Run the failing test with verbose mode: `./run_tests.sh -v test_name`
+1. Run the failing test with verbose mode: `./run_tests.sh -v name`
 2. Check the exact error message in the output
-3. Run the test file directly: `./hybrid < test/test_name.hy`
+3. Run the test file directly: `./hybrid < test/name.hy`
 4. Add print statements or simplify the test to isolate the issue
 5. Check recent changes that might have affected the feature
 
