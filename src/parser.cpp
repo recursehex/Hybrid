@@ -6,6 +6,7 @@
 #include <cctype>
 #include <limits>
 #include <set>
+#include <vector>
 #include <optional>
 #include <utility>
 #include "llvm/Support/raw_ostream.h"
@@ -54,6 +55,7 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
   bool pendingNullable = false;
   bool arraySeen = false;
   bool explicitNullable = false;
+  std::vector<unsigned> arrayRanks;
 
   for (size_t i = 0; i < typeName.size(); ++i) {
     char c = typeName[i];
@@ -78,14 +80,25 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
       continue;
     }
 
-    if (c == '[' && i + 1 < typeName.size() && typeName[i + 1] == ']') {
-      sanitized.append("[]");
+    if (c == '[') {
+      size_t close = typeName.find(']', i);
+      if (close == std::string::npos)
+        break;
+
+      unsigned rank = 1;
+      for (size_t j = i + 1; j < close; ++j) {
+        if (typeName[j] == ',')
+          ++rank;
+      }
+
+      sanitized.append(typeName, i, close - i + 1);
+      arrayRanks.push_back(rank);
       arraySeen = true;
       if (pendingNullable) {
         info.elementNullable = true;
         pendingNullable = false;
       }
-      ++i; // Skip ']'
+      i = close;
       continue;
     }
 
@@ -97,7 +110,16 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
 
   info.typeName = sanitized;
   info.pointerDepth = parsePointerDepth(info.typeName);
-  info.isArray = arraySeen || (info.typeName.size() > 2 && info.typeName.substr(info.typeName.size() - 2) == "[]");
+  info.isArray = arraySeen || (info.typeName.find('[') != std::string::npos);
+  info.arrayDepth = arrayRanks.size();
+  info.arrayRanks = std::move(arrayRanks);
+  info.isMultidimensional = false;
+  for (unsigned rank : info.arrayRanks) {
+    if (rank > 1) {
+      info.isMultidimensional = true;
+      break;
+    }
+  }
 
   info.isNullable = explicitNullable;
 
@@ -159,7 +181,6 @@ std::string ParseCompleteType()
   getNextToken(); // eat base type
 
   bool pointerSeen = false;
-  bool arraySeen = false;
 
   while (true) {
     if (CurTok == tok_nullable) {
@@ -198,15 +219,23 @@ std::string ParseCompleteType()
       continue;
     }
 
-    if (CurTok == '[' && !arraySeen) {
+    if (CurTok == '[') {
+      std::string segment = "[";
       getNextToken(); // eat '['
+
+      while (CurTok == ',') {
+        segment += ",";
+        getNextToken(); // eat ','
+      }
+
       if (CurTok != ']') {
         fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
         return "";
       }
+
       getNextToken(); // eat ']'
-      Type += "[]";
-      arraySeen = true;
+      segment += "]";
+      Type += segment;
       continue;
     }
 
@@ -629,23 +658,34 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
 
 /// arrayindex ::= expr '[' expression ']'
 std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
-  getNextToken(); // eat [
-  
-  auto Index = ParseExpression();
-  if (!Index)
-    return nullptr;
-  
+  getNextToken(); // eat '['
+
+  std::vector<std::unique_ptr<ExprAST>> Indices;
+
+  while (true) {
+    auto Index = ParseExpression();
+    if (!Index)
+      return nullptr;
+
+    Indices.push_back(std::move(Index));
+
+    if (CurTok == ',') {
+      getNextToken(); // eat ','
+      continue;
+    }
+    break;
+  }
+
   if (CurTok != ']')
     return LogError("Expected ']' after array index");
-  getNextToken(); // eat ]
-  
-  // Check if there's another index (for multi-dimensional arrays)
-  auto Result = std::make_unique<ArrayIndexExprAST>(std::move(Array), std::move(Index));
-  
+  getNextToken(); // eat ']'
+
+  auto Result = std::make_unique<ArrayIndexExprAST>(std::move(Array), std::move(Indices));
+
   if (CurTok == '[') {
     return ParseArrayIndex(std::move(Result));
   }
-  
+
   return Result;
 }
 

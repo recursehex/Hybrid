@@ -55,6 +55,57 @@ Array element types are inferred from the literals:
 | Booleans | `[true, false]` | `bool[]` |
 | Strings (double quotes) | `["hello", "world"]` | `string[]` |
 
+## Multidimensional Arrays
+
+Hybrid supports true rectangular (a.k.a. multidimensional) arrays where every row has the same length and the elements are stored as a single contiguous block. Declare a rectangular array by placing commas inside the bracket pair:
+
+```c
+int[,] matrix = [[1, 2], [3, 4]]
+float[,,] cube = [
+    [[0.0, 1.0], [2.0, 3.0]],
+    [[4.0, 5.0], [6.0, 7.0]]
+]
+```
+
+Key points:
+
+- Each dimension is declared by adding one more comma inside the `[]`. For example `int[,]` has two dimensions, `int[,,]` has three, etc.
+- Rectangular array literals must be perfectly rectangular. If any inner array has a different length the compiler reports `Multidimensional array initializer must be rectangular`.
+- The compiler records the length of every dimension. These lengths fuel both compile-time checks for constant indices and runtime bounds checks for dynamic indices.
+- Elements are laid out in row-major order. The compiler automatically linearises multi-axis indices based on the stored dimension lengths, so you index with a comma-separated list: `matrix[row, column]`.
+
+### Indexing Multidimensional Arrays
+
+```c
+int[,] board = [[1, 2], [3, 4]]
+int topLeft = board[0, 0]       // 1
+int bottomRight = board[1, 1]   // 4
+
+board[1, 0] = 7
+```
+
+Negative indices or indices that fall outside the stored dimensions trigger the same compile-time / runtime bounds protections that one-dimensional arrays receive.
+
+## Jagged Arrays
+
+Jagged arrays are arrays of arrays where each inner array can have a different length. Use successive `[]` segments to represent each level:
+
+```c
+int[][] triangle = [
+    [1],
+    [2, 3],
+    [4, 5, 6]
+]
+
+triangle[2][0] = 42
+```
+
+- Jagged arrays are ideal for ragged data because each row can be resized independently.
+- Indexing uses one set of brackets per dimension (`triangle[row][column]`), mirroring their “array of arrays” structure.
+- Bounds checking occurs per access: first when you index into the outer array, then again when you index the chosen inner array.
+
+Hybrid lets you mix shapes when you nest arrays more deeply. For example, `int[][,,]` describes an array whose elements are rectangular 3D arrays, while `int[,][]` would be a rectangular 2D shell whose elements are jagged arrays.
+
 ## Array Indexing
 
 ### Element Access

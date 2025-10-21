@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cctype>
 #include <set>
+#include <functional>
 
 #define CG currentCodegen()
 #define TheContext (CG.llvmContext)
@@ -193,8 +194,34 @@ static unsigned computePointerDepth(const std::string &typeName) {
 }
 
 static bool isArrayTypeName(const std::string &typeName) {
-  return typeName.size() > 2 && typeName.substr(typeName.size() - 2) == "[]";
+  auto openPos = typeName.find('[');
+  auto closePos = typeName.find(']', openPos == std::string::npos ? 0 : openPos);
+  return openPos != std::string::npos && closePos != std::string::npos && closePos > openPos;
 }
+
+static std::string removeLastArrayGroup(const std::string &typeName) {
+  size_t openPos = typeName.rfind('[');
+  if (openPos == std::string::npos)
+    return typeName;
+  return typeName.substr(0, openPos);
+}
+
+static unsigned getLastArrayGroupRank(const std::string &typeName) {
+  size_t openPos = typeName.rfind('[');
+  if (openPos == std::string::npos)
+    return 0;
+  size_t closePos = typeName.find(']', openPos);
+  if (closePos == std::string::npos)
+    return 0;
+  unsigned rank = 1;
+  for (size_t i = openPos + 1; i < closePos; ++i) {
+    if (typeName[i] == ',')
+      ++rank;
+  }
+  return rank;
+}
+
+static llvm::StructType *getArrayStructType(llvm::Type *ElementType, unsigned rank);
 
 static std::string stripNullableAnnotations(const std::string &typeName) {
   std::string cleaned;
@@ -217,13 +244,18 @@ static std::string typeNameFromInfo(const TypeInfo &info) {
     return info.typeName;
 
   if (info.isArray) {
-    std::string elementBase = info.typeName;
-    if (elementBase.size() > 2 && elementBase.substr(elementBase.size() - 2) == "[]")
-      elementBase = elementBase.substr(0, elementBase.size() - 2);
-    if (info.elementNullable && (elementBase.empty() || elementBase.back() != '?'))
-      elementBase += "?";
+    std::string base = info.typeName;
+    std::string suffix;
+    size_t bracketPos = base.find('[');
+    if (bracketPos != std::string::npos) {
+      suffix = base.substr(bracketPos);
+      base = base.substr(0, bracketPos);
+    }
 
-    std::string result = elementBase + "[]";
+    if (info.elementNullable && (base.empty() || base.back() != '?'))
+      base += "?";
+
+    std::string result = base + suffix;
     if (info.isNullable)
       result = ensureOuterNullable(result);
     return result;
@@ -241,6 +273,9 @@ struct ParsedTypeDescriptor {
   bool isNullable = false;
   bool elementNullable = false;
   unsigned pointerDepth = 0;
+  unsigned arrayDepth = 0;
+  std::vector<unsigned> arrayRanks;
+  bool isMultidimensional = false;
 };
 
 static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
@@ -275,14 +310,25 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
       continue;
     }
 
-    if (c == '[' && i + 1 < typeName.size() && typeName[i + 1] == ']') {
-      sanitized.append("[]");
+    if (c == '[') {
+      size_t close = typeName.find(']', i);
+      if (close == std::string::npos)
+        break;
+
+      unsigned rank = 1;
+      for (size_t j = i + 1; j < close; ++j) {
+        if (typeName[j] == ',')
+          ++rank;
+      }
+
+      sanitized.append(typeName, i, close - i + 1);
+      desc.arrayRanks.push_back(rank);
       arraySeen = true;
       if (pendingNullable) {
         desc.elementNullable = true;
         pendingNullable = false;
       }
-      ++i;
+      i = close;
       continue;
     }
 
@@ -295,6 +341,8 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
   desc.sanitized = sanitized;
   desc.isArray = arraySeen || isArrayTypeName(desc.sanitized);
   desc.pointerDepth = computePointerDepth(desc.sanitized);
+  desc.arrayDepth = desc.arrayRanks.size();
+  desc.isMultidimensional = std::ranges::any_of(desc.arrayRanks, [](unsigned rank) { return rank > 1; });
   if (desc.pointerDepth > 0 && !desc.isArray)
     desc.isNullable = true;
 
@@ -353,12 +401,16 @@ static TypeInfo makeTypeInfo(std::string typeName,
                              RefStorageClass storage = RefStorageClass::None,
                              bool isMutable = true,
                              bool declaredRef = false) {
+  ParsedTypeDescriptor desc = parseTypeString(typeName);
   TypeInfo info;
-  info.typeName = std::move(typeName);
-  info.pointerDepth = computePointerDepth(info.typeName);
-  info.isArray = isArrayTypeName(info.typeName);
-  info.isNullable = info.pointerDepth > 0 && !info.isArray;
-  info.elementNullable = false;
+  info.typeName = std::move(desc.sanitized);
+  info.pointerDepth = desc.pointerDepth;
+  info.isArray = desc.isArray;
+  info.arrayDepth = desc.arrayDepth;
+  info.arrayRanks = desc.arrayRanks;
+  info.isMultidimensional = desc.isMultidimensional;
+  info.isNullable = desc.isNullable;
+  info.elementNullable = desc.elementNullable;
   info.refStorage = storage;
   info.isMutable = isMutable;
   info.declaredRef = declaredRef;
@@ -681,16 +733,12 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     return llvm::Type::getInt8Ty(*TheContext);   // 8-bit character
   else if (CleanType == "lchar")
     return llvm::Type::getInt32Ty(*TheContext);  // 32-bit character (Unicode)
-  else if (CleanType.size() > 2 && CleanType.substr(CleanType.size() - 2) == "[]") {
-    // Array type: return the array struct type {ptr, size}
-    std::string ElementType = CleanType.substr(0, CleanType.size() - 2);
+  else if (isArrayTypeName(CleanType)) {
+    unsigned rank = std::max(1u, getLastArrayGroupRank(CleanType));
+    std::string ElementType = removeLastArrayGroup(CleanType);
     llvm::Type *ElemType = getTypeFromString(ElementType);
-    if (ElemType) {
-      // Create struct type for array: { element_ptr, size }
-      llvm::Type *PtrType = llvm::PointerType::get(*TheContext, 0);
-      llvm::Type *SizeType = llvm::Type::getInt32Ty(*TheContext);
-      return llvm::StructType::get(*TheContext, {PtrType, SizeType});
-    }
+    if (ElemType)
+      return getArrayStructType(ElemType, rank);
     return nullptr;
   }
   // Check for pointer types (e.g. "int@", "float@2")
@@ -731,10 +779,11 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
 }
 
 // Helper to get array struct type for a given element type
-llvm::StructType *getArrayStructType(llvm::Type *ElementType) {
+llvm::StructType *getArrayStructType(llvm::Type *ElementType, unsigned rank) {
   llvm::Type *PtrType = llvm::PointerType::get(*TheContext, 0);
   llvm::Type *SizeType = llvm::Type::getInt32Ty(*TheContext);
-  return llvm::StructType::get(*TheContext, {PtrType, SizeType});
+  llvm::ArrayType *DimsType = llvm::ArrayType::get(SizeType, std::max(1u, rank));
+  return llvm::StructType::get(*TheContext, {PtrType, SizeType, DimsType});
 }
 
 // AST implementations (currently all inline in the header)
@@ -1166,14 +1215,16 @@ bool areTypesCompatible(llvm::Type* type1, llvm::Type* type2) {
 
 // Generate code for array literals
 llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElementType,
-                                                       const std::string &TargetElementTypeName) {
+                                                       const std::string &TargetElementTypeName,
+                                                       const TypeInfo *DeclaredArrayInfo) {
   llvm::Type *ElemType = TargetElementType;
   std::string elementTypeName = TargetElementTypeName;
 
-  if (!ElemType) {
-    ElemType = getTypeFromString(getElementType());
+  if (elementTypeName.empty())
     elementTypeName = getElementType();
-  }
+
+  if (!ElemType)
+    ElemType = getTypeFromString(elementTypeName);
 
   if (!ElemType)
     return LogErrorV("Unknown element type in array literal");
@@ -1182,8 +1233,101 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   if (cleanElementTypeName.empty())
     cleanElementTypeName = elementTypeName;
 
-  // Get the array size
-  size_t ArraySize = getElements().size();
+  unsigned outerRank = 1;
+  bool treatAsMultidimensional = false;
+  if (DeclaredArrayInfo && !DeclaredArrayInfo->arrayRanks.empty()) {
+    outerRank = DeclaredArrayInfo->arrayRanks.back();
+    treatAsMultidimensional = DeclaredArrayInfo->isMultidimensional && outerRank > 1;
+    if (DeclaredArrayInfo->arrayDepth > 1)
+      treatAsMultidimensional = false; // Mixed jagged/multi not yet supported
+  }
+  if (outerRank == 0)
+    outerRank = 1;
+
+  std::vector<ExprAST*> flatElements;
+  std::vector<size_t> dimensionSizes;
+
+  auto ensureDimension = [&](unsigned depth, size_t size) -> bool {
+    if (dimensionSizes.size() <= depth)
+      dimensionSizes.push_back(size);
+    else if (dimensionSizes[depth] != size)
+      return false;
+    return true;
+  };
+
+  if (treatAsMultidimensional) {
+    std::string baseElementName;
+    if (DeclaredArrayInfo)
+      baseElementName = DeclaredArrayInfo->typeName;
+    if (baseElementName.empty())
+      baseElementName = elementTypeName;
+
+    bool hadNullableSuffix = false;
+    if (!baseElementName.empty() && baseElementName.back() == '?') {
+      hadNullableSuffix = true;
+      baseElementName.pop_back();
+    }
+
+    while (isArrayTypeName(baseElementName))
+      baseElementName = removeLastArrayGroup(baseElementName);
+
+    if (DeclaredArrayInfo && DeclaredArrayInfo->elementNullable &&
+        (baseElementName.empty() || baseElementName.back() != '?'))
+      baseElementName += "?";
+    else if (hadNullableSuffix)
+      baseElementName += "?";
+
+    llvm::Type *ScalarType = getTypeFromString(baseElementName);
+    if (!ScalarType)
+      return LogErrorV("Unknown element type in multidimensional array literal");
+
+    ElemType = ScalarType;
+    elementTypeName = baseElementName;
+    cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
+    if (cleanElementTypeName.empty())
+      cleanElementTypeName = elementTypeName;
+
+    std::function<bool(const ArrayExprAST*, unsigned)> collect =
+        [&](const ArrayExprAST *node, unsigned depth) -> bool {
+          size_t count = node->getElements().size();
+          if (!ensureDimension(depth, count))
+            return false;
+
+          if (depth + 1 == outerRank) {
+            for (const auto &Elem : node->getElements()) {
+              if (dynamic_cast<ArrayExprAST*>(Elem.get()))
+                return false;
+              flatElements.push_back(Elem.get());
+            }
+            return true;
+          }
+
+          for (const auto &Elem : node->getElements()) {
+            auto *SubArray = dynamic_cast<ArrayExprAST*>(Elem.get());
+            if (!SubArray)
+              return false;
+            if (!collect(SubArray, depth + 1))
+              return false;
+          }
+          return true;
+        };
+
+    if (!collect(this, 0))
+      return LogErrorV("Multidimensional array initializer must be rectangular");
+  } else {
+    flatElements.reserve(getElements().size());
+    for (const auto &Elem : getElements())
+      flatElements.push_back(Elem.get());
+    dimensionSizes.push_back(flatElements.size());
+  }
+
+  if (dimensionSizes.empty())
+    dimensionSizes.push_back(0);
+  if (treatAsMultidimensional && dimensionSizes.size() < outerRank)
+    dimensionSizes.resize(outerRank, 0);
+
+  size_t ArraySize = flatElements.size();
+
   bool useGlobalStorage = false;
   llvm::Function *CurrentFunction = nullptr;
   if (auto *CurrentBB = Builder->GetInsertBlock()) {
@@ -1198,7 +1342,9 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
 
   static unsigned GlobalArrayLiteralCounter = 0;
 
-  if (useGlobalStorage) {
+  if (ArraySize == 0) {
+    ArrayDataPtr = llvm::ConstantPointerNull::get(llvm::PointerType::get(*TheContext, 0));
+  } else if (useGlobalStorage) {
     std::string GlobalName = "__array_literal_" + std::to_string(GlobalArrayLiteralCounter++);
     llvm::GlobalVariable *GlobalArray = new llvm::GlobalVariable(
         *TheModule, ArrayMemType, false, llvm::GlobalValue::PrivateLinkage,
@@ -1213,51 +1359,67 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   }
 
   // Store each element
-  for (size_t i = 0; i < ArraySize; ++i) {
+  for (size_t i = 0; i < flatElements.size(); ++i) {
+    ExprAST *ElementExpr = flatElements[i];
     llvm::Value *ElemVal = nullptr;
-    if (auto *Num = dynamic_cast<NumberExprAST*>(getElements()[i].get())) {
+    if (auto *Num = dynamic_cast<NumberExprAST*>(ElementExpr)) {
       ElemVal = Num->codegen_with_target(ElemType);
-    } else if (auto *Char = dynamic_cast<CharExprAST*>(getElements()[i].get())) {
+    } else if (auto *Char = dynamic_cast<CharExprAST*>(ElementExpr)) {
       ElemVal = Char->codegen_with_target(ElemType, cleanElementTypeName);
     } else {
-      ElemVal = getElements()[i]->codegen();
+      ElemVal = ElementExpr->codegen();
     }
 
     if (!ElemVal)
       return nullptr;
 
-    // Cast element to the correct type if needed
     ElemVal = castToType(ElemVal, ElemType, cleanElementTypeName);
 
-    // Calculate the address of the i-th element
-    llvm::Value *Idx = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, i));
-    llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayDataPtr, Idx, "elemptr");
-
-    // Store the element
-    Builder->CreateStore(ElemVal, ElemPtr);
+    if (ArraySize > 0) {
+      llvm::Value *Idx = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, i));
+      llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayDataPtr, Idx, "elemptr");
+      Builder->CreateStore(ElemVal, ElemPtr);
+    }
   }
 
-  // Create the array struct {ptr, size}
-  llvm::StructType *ArrayStructType = getArrayStructType(ElemType);
+  llvm::StructType *ArrayStructType = getArrayStructType(ElemType, outerRank);
   llvm::AllocaInst *ArrayStruct = Builder->CreateAlloca(ArrayStructType, nullptr, "arrayStruct");
 
-  // Store the pointer (field 0)
+  // Store pointer (field 0)
   llvm::Value *PtrField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 0, "ptrField");
   llvm::Value *ArrayPtrForStruct =
       Builder->CreateBitCast(ArrayDataPtr, llvm::PointerType::get(*TheContext, 0), "array.ptrcast");
   Builder->CreateStore(ArrayPtrForStruct, PtrField);
 
-  // Store the size (field 1)
+  // Store total element count (field 1)
   llvm::Value *SizeField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 1, "sizeField");
   llvm::Value *SizeVal = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize));
   Builder->CreateStore(SizeVal, SizeField);
 
-  std::string arrayTypeName = cleanElementTypeName;
-  if (!arrayTypeName.empty())
-    arrayTypeName += "[]";
-  setTypeName(arrayTypeName);
+  // Store per-dimension lengths (field 2)
+  unsigned dimsCount = std::max(1u, outerRank);
+  if (dimensionSizes.size() < dimsCount)
+    dimensionSizes.resize(dimsCount, 0);
 
-  // Return the struct
+  llvm::Value *DimsField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 2, "dimsField");
+  auto *DimsArrayType = llvm::cast<llvm::ArrayType>(ArrayStructType->getElementType(2));
+  for (unsigned i = 0; i < dimsCount; ++i) {
+    llvm::Value *Idx0 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+    llvm::Value *Idx1 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), i);
+    llvm::Value *DimPtr = Builder->CreateInBoundsGEP(DimsArrayType, DimsField, {Idx0, Idx1}, "dimptr");
+    llvm::Value *DimVal = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, dimensionSizes[i]));
+    Builder->CreateStore(DimVal, DimPtr);
+  }
+
+  if (DeclaredArrayInfo) {
+    setTypeName(typeNameFromInfo(*DeclaredArrayInfo));
+  } else {
+    std::string arrayTypeName = cleanElementTypeName;
+    if (!arrayTypeName.empty())
+      arrayTypeName += "[]";
+    setTypeName(arrayTypeName);
+  }
+
   return Builder->CreateLoad(ArrayStructType, ArrayStruct, "arrayStructVal");
 }
 
@@ -1265,254 +1427,220 @@ llvm::Value *ArrayExprAST::codegen() {
   return codegen_with_element_target(nullptr, getElementType());
 }
 
-// Generate code for array indexing
-llvm::Value *ArrayIndexExprAST::codegen() {
-  // Generate code for the array expression
-  llvm::Value *ArrayVal = getArray()->codegen();
-  if (!ArrayVal)
-    return nullptr;
-  
-  // Generate code for the index
-  llvm::Value *IndexVal = getIndex()->codegen();
-  if (!IndexVal)
-    return nullptr;
+struct ArrayElementAccessInfo {
+  llvm::Value *elementPtr;
+  llvm::Type *elementLLVMType;
+  std::string elementTypeName;
+  bool elementNullable;
+};
 
-  bool elementIsNullable = false;
-  std::string arrayTypeName = getArray()->getTypeName();
-  if (!arrayTypeName.empty()) {
-    ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
-    if (arrayDesc.isNullable) {
-      return LogErrorV("Cannot index nullable array without null-safe operator");
-    }
-    elementIsNullable = arrayDesc.elementNullable;
+static std::optional<ArrayElementAccessInfo>
+computeArrayElementAccess(ArrayIndexExprAST *node) {
+  ArrayElementAccessInfo access;
+
+  llvm::Value *ArrayVal = node->getArray()->codegen();
+  if (!ArrayVal)
+    return std::nullopt;
+
+  const auto &indexExprs = node->getIndices();
+  if (indexExprs.empty()) {
+    LogErrorV("Array index requires at least one index expression");
+    return std::nullopt;
   }
-  
-  // Make sure index is an integer
-  if (!IndexVal->getType()->isIntegerTy(32)) {
-    // Cast to i32 if it's not already
-    if (IndexVal->getType()->isIntegerTy()) {
-      IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
-    } else if (IndexVal->getType()->isFloatingPointTy()) {
-      IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
-    } else {
-      return LogErrorV("Array index must be an integer");
+
+  std::vector<llvm::Value*> indexValues;
+  indexValues.reserve(indexExprs.size());
+  for (const auto &IdxExpr : indexExprs) {
+    llvm::Value *IdxVal = IdxExpr->codegen();
+    if (!IdxVal)
+      return std::nullopt;
+
+    if (!IdxVal->getType()->isIntegerTy(32)) {
+      if (IdxVal->getType()->isIntegerTy()) {
+        IdxVal = Builder->CreateSExtOrTrunc(IdxVal, llvm::Type::getInt32Ty(*TheContext), "array.idx.cast");
+      } else if (IdxVal->getType()->isFloatingPointTy()) {
+        IdxVal = Builder->CreateFPToSI(IdxVal, llvm::Type::getInt32Ty(*TheContext), "array.idx.cast");
+      } else {
+        LogErrorV("Array index must be an integer");
+        return std::nullopt;
+      }
     }
+
+    indexValues.push_back(IdxVal);
   }
-  
-  // Check if ArrayVal is a struct (new array representation)
+
+  std::string arrayTypeName = node->getArray()->getTypeName();
+  ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
+  if (arrayDesc.isNullable) {
+    LogErrorV("Cannot index nullable array without null-safe operator");
+    return std::nullopt;
+  }
+
+  bool elementIsNullable = arrayDesc.elementNullable;
+  unsigned outerRank = arrayDesc.arrayRanks.empty() ? 1 : arrayDesc.arrayRanks.back();
+  bool treatAsMultidimensional = outerRank > 1;
+
+  if (treatAsMultidimensional && indexValues.size() != outerRank) {
+    LogErrorV("Multidimensional array access requires one index per dimension");
+    return std::nullopt;
+  }
+
+  std::string elemTypeStr = arrayTypeName;
+  for (size_t i = 0; i < indexValues.size(); ++i)
+    elemTypeStr = removeLastArrayGroup(elemTypeStr);
+  if (elemTypeStr.empty())
+    elemTypeStr = "int";
+
+  llvm::Type *ElemType = getTypeFromString(elemTypeStr);
+  if (!ElemType)
+    ElemType = llvm::Type::getInt32Ty(*TheContext);
+
   llvm::Type *ArrayType = ArrayVal->getType();
   llvm::Value *ArrayPtr = nullptr;
-  llvm::Type *ElemType = nullptr;
-  llvm::Value *ArraySize = nullptr; // Track the array size for bounds checking
-  std::string elemTypeStr = "int"; // Track the element type string for setTypeName
+  llvm::Value *TotalSize = nullptr;
+  std::vector<llvm::Value*> dimValues;
 
   if (ArrayType->isStructTy()) {
-    // New array representation: extract pointer from struct
-    llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
-    if (StructType->getNumElements() == 2) {
-      // Extract the pointer (field 0)
-      ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
-
-      // Extract the size (field 1) for bounds checking
-      ArraySize = Builder->CreateExtractValue(ArrayVal, 1, "arraySize");
-      
-      // Determine element type from the context
-      // First, check if it's from a direct array literal
-      if (ArrayExprAST *ArrayExpr = dynamic_cast<ArrayExprAST*>(getArray())) {
-        elemTypeStr = ArrayExpr->getElementType();
-        ElemType = getTypeFromString(elemTypeStr);
-
-        // For direct array literals, do compile-time bounds checking
-        if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
-          int64_t IndexValue = ConstIndex->getSExtValue();
-          int64_t ArrayLiteralSize = ArrayExpr->getElements().size();
-
-          // Check for negative index at compile time
-          if (IndexValue < 0) {
-            return LogErrorV("Array index cannot be negative");
-          }
-
-          // Check for out of bounds at compile time
-          if (IndexValue >= ArrayLiteralSize) {
-            return LogErrorV("Array index out of bounds");
-          }
-        }
-      }
-      // Otherwise, check if it's from a variable
-      else if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
-        std::string varName = VarExpr->getName();
-
-        const TypeInfo *info = lookupTypeInfo(varName);
-        if (info && info->isArray) {
-          if (info->isNullable) {
-            return LogErrorV("Cannot index nullable array without null-safe operator");
-          }
-          elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
-          ElemType = getTypeFromString(elemTypeStr);
-          elementIsNullable = info->elementNullable;
-
-          // Check for compile-time bounds checking if array size is known
-          if (ArraySizes.count(varName)) {
-            if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
-              int64_t IndexValue = ConstIndex->getSExtValue();
-              int64_t KnownArraySize = ArraySizes[varName];
-
-              // Check for negative index at compile time
-              if (IndexValue < 0) {
-                return LogErrorV("Array index cannot be negative");
-              }
-
-              // Check for out of bounds at compile time
-              if (IndexValue >= KnownArraySize) {
-                return LogErrorV("Array index out of bounds");
-              }
-            }
-          }
-        }
-      }
-      // Check if it's from a member access (e.g. holder.pointers)
-      else if (dynamic_cast<MemberAccessExprAST*>(getArray())) {
-        // Get the type from the member access expression
-        std::string memberType = getArray()->getTypeName();
-
-        ParsedTypeDescriptor memberDesc = parseTypeString(memberType);
-        if (memberDesc.isNullable) {
-          return LogErrorV("Cannot index nullable array without null-safe operator");
-        }
-        if (memberDesc.isArray && memberDesc.sanitized.size() > 2 &&
-            memberDesc.sanitized.substr(memberDesc.sanitized.size() - 2) == "[]") {
-          elemTypeStr = memberDesc.sanitized.substr(0, memberDesc.sanitized.size() - 2);
-          ElemType = getTypeFromString(elemTypeStr);
-          elementIsNullable = memberDesc.elementNullable;
-        }
-      }
-
-      // Default to int if can't determine
-      if (!ElemType) {
-        ElemType = llvm::Type::getInt32Ty(*TheContext);
+    auto *StructType = llvm::cast<llvm::StructType>(ArrayType);
+    ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "array.ptr");
+    TotalSize = Builder->CreateExtractValue(ArrayVal, 1, "array.size");
+    if (StructType->getNumElements() > 2) {
+      if (auto *ArrTy = llvm::dyn_cast<llvm::ArrayType>(StructType->getElementType(2))) {
+        unsigned dimsCount = ArrTy->getNumElements();
+        dimValues.reserve(dimsCount);
+        for (unsigned i = 0; i < dimsCount; ++i)
+          dimValues.push_back(Builder->CreateExtractValue(ArrayVal, {2u, i}, "array.dim"));
       }
     }
   } else if (ArrayType->isPointerTy()) {
-    // Old array representation: direct pointer
     ArrayPtr = ArrayVal;
-    
-    // For arrays, infer the element type from context
-    ElemType = llvm::Type::getInt32Ty(*TheContext); // default
-    
-    // If the array is from a variable, check its type
-    if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
-      std::string varName = VarExpr->getName();
-
-      const TypeInfo *info = lookupTypeInfo(varName);
-      if (info && info->isArray) {
-        if (info->isNullable) {
-          return LogErrorV("Cannot index nullable array without null-safe operator");
-        }
-        // It's an array type, extract the element type
-        elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
-        if (elemTypeStr == "int") {
-          ElemType = llvm::Type::getInt32Ty(*TheContext);
-        } else if (elemTypeStr == "float" || elemTypeStr == "double") {
-          ElemType = llvm::Type::getDoubleTy(*TheContext);
-        } else if (elemTypeStr == "char") {
-          ElemType = llvm::Type::getInt16Ty(*TheContext);
-        } else if (elemTypeStr == "bool") {
-          ElemType = llvm::Type::getInt8Ty(*TheContext);
-        }
-        elementIsNullable = info->elementNullable;
-      }
-    }
   } else {
-    return LogErrorV("Array indexing requires an array type");
+    LogErrorV("Array indexing requires an array type");
+    return std::nullopt;
   }
-  
-  if (!ArrayPtr || !ElemType)
-    return LogErrorV("Invalid array type for indexing");
 
-  // Add compile-time bounds checking for constant indices
-  if (ArraySize) {
-    // Check if both index and size are constants
-    if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
-      if (llvm::ConstantInt *ConstSize = llvm::dyn_cast<llvm::ConstantInt>(ArraySize)) {
-        int64_t IndexValue = ConstIndex->getSExtValue();
-        int64_t SizeValue = ConstSize->getSExtValue();
+  if (!ArrayPtr)
+    return std::nullopt;
 
-        // Check for negative index at compile time
-        if (IndexValue < 0) {
-          return LogErrorV("Array index cannot be negative");
-        }
+  std::vector<int64_t> knownDims;
+  if (auto *VarExpr = dynamic_cast<VariableExprAST*>(node->getArray())) {
+    auto it = ArraySizes.find(VarExpr->getName());
+    if (it != ArraySizes.end())
+      knownDims = it->second;
+  }
 
-        // Check for out of bounds at compile time
-        if (IndexValue >= SizeValue) {
-          return LogErrorV("Array index out of bounds");
-        }
+  for (size_t axis = 0; axis < indexValues.size(); ++axis) {
+    if (auto *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(indexValues[axis])) {
+      int64_t value = ConstIndex->getSExtValue();
+      if (value < 0) {
+        LogErrorV("Array index cannot be negative");
+        return std::nullopt;
+      }
 
-        // Constant index is valid, no need for runtime check
-        // Calculate the address of the indexed element
-        llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
+      int64_t axisBound = -1;
+      if (axis < knownDims.size())
+        axisBound = knownDims[axis];
+      else if (axis < dimValues.size()) {
+        if (auto *DimConst = llvm::dyn_cast<llvm::ConstantInt>(dimValues[axis]))
+          axisBound = DimConst->getSExtValue();
+      } else if (axis == 0 && TotalSize) {
+        if (auto *SizeConst = llvm::dyn_cast<llvm::ConstantInt>(TotalSize))
+          axisBound = SizeConst->getSExtValue();
+      }
 
-        // Set the type name for proper type checking
-        std::string displayTypeName = elemTypeStr;
-        if (elementIsNullable)
-          displayTypeName = ensureOuterNullable(displayTypeName);
-        setTypeName(displayTypeName);
-
-        // Load and return the value
-        return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
+      if (axisBound >= 0 && value >= axisBound) {
+        LogErrorV("Array index out of bounds");
+        return std::nullopt;
       }
     }
+  }
 
-    // Runtime bounds checking for non-constant indices
-    // Create bounds check: 0 <= index < size
+  llvm::Value *Zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+  llvm::Value *BadIndex = nullptr;
+  auto appendAxisCheck = [&](llvm::Value *IdxVal, llvm::Value *UpperBound,
+                             const char *negName, const char *outName) {
+    llvm::Value *IsNegative = Builder->CreateICmpSLT(IdxVal, Zero, negName);
+    llvm::Value *IsOut = Builder->CreateICmpSGE(IdxVal, UpperBound, outName);
+    llvm::Value *AxisBad = Builder->CreateOr(IsNegative, IsOut, "array.idx.badaxis");
+    BadIndex = BadIndex ? Builder->CreateOr(BadIndex, AxisBad, "array.idx.bad") : AxisBad;
+  };
+
+  if (!dimValues.empty()) {
+    unsigned dimsUsed = std::min(dimValues.size(), indexValues.size());
+    for (unsigned axis = 0; axis < dimsUsed; ++axis)
+      appendAxisCheck(indexValues[axis], dimValues[axis], "array.idx.neg", "array.idx.oor");
+  } else if (TotalSize && !indexValues.empty()) {
+    appendAxisCheck(indexValues[0], TotalSize, "array.idx.neg", "array.idx.oor");
+  }
+
+  if (BadIndex) {
     llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
-
-    // Check for negative index
-    llvm::Value *IsNegative = Builder->CreateICmpSLT(IndexVal,
-      llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0), "is_negative");
-
-    // Check for index >= size
-    llvm::Value *IsOutOfBounds = Builder->CreateICmpSGE(IndexVal, ArraySize, "is_out_of_bounds");
-
-    // Combine the checks
-    llvm::Value *IsBadIndex = Builder->CreateOr(IsNegative, IsOutOfBounds, "bad_index");
-
-    // Create blocks for error handling
     llvm::BasicBlock *SafeBB = llvm::BasicBlock::Create(*TheContext, "safe_index", TheFunction);
     llvm::BasicBlock *ErrorBB = llvm::BasicBlock::Create(*TheContext, "bounds_error", TheFunction);
 
-    Builder->CreateCondBr(IsBadIndex, ErrorBB, SafeBB);
+    Builder->CreateCondBr(BadIndex, ErrorBB, SafeBB);
 
-    // Emit error block - call abort() to terminate the program
     Builder->SetInsertPoint(ErrorBB);
-
-    // Get or declare the abort function
     llvm::Function *AbortFunc = TheModule->getFunction("abort");
     if (!AbortFunc) {
       llvm::FunctionType *AbortType = llvm::FunctionType::get(
-        llvm::Type::getVoidTy(*TheContext), false);
+          llvm::Type::getVoidTy(*TheContext), false);
       AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage,
         "abort", TheModule.get());
     }
-
-    // Call abort to terminate the program
     Builder->CreateCall(AbortFunc);
     Builder->CreateUnreachable();
 
-    // Continue with safe execution
     Builder->SetInsertPoint(SafeBB);
   }
 
-  // Calculate the address of the indexed element
-  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
+  llvm::Value *linearIndex = indexValues[0];
+  if (indexValues.size() > 1) {
+    for (size_t axis = 1; axis < indexValues.size(); ++axis) {
+      llvm::Value *DimVal = nullptr;
+      if (axis < dimValues.size())
+        DimVal = dimValues[axis];
+      else if (!dimValues.empty())
+        DimVal = dimValues.back();
+      else if (TotalSize)
+        DimVal = TotalSize;
 
-  // Set the type name for proper type checking
-  std::string displayTypeName = elemTypeStr;
-  if (elementIsNullable)
+      if (DimVal)
+        linearIndex = Builder->CreateMul(linearIndex, DimVal, "array.idx.mul");
+
+      linearIndex = Builder->CreateAdd(linearIndex, indexValues[axis], "array.idx.add");
+    }
+  }
+
+  llvm::Value *TypedPtr = ArrayPtr;
+  if (!TypedPtr->getType()->isPointerTy()) {
+    TypedPtr = Builder->CreateBitCast(ArrayPtr,
+                                      llvm::PointerType::get(*TheContext, 0),
+                                      "array.ptrcast.elem");
+  }
+
+  llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, TypedPtr, linearIndex, "array.elemptr");
+
+  access.elementPtr = ElemPtr;
+  access.elementLLVMType = ElemType;
+  access.elementTypeName = elemTypeStr;
+  access.elementNullable = elementIsNullable;
+  return access;
+}
+
+// Generate code for array indexing
+llvm::Value *ArrayIndexExprAST::codegen() {
+  auto accessOpt = computeArrayElementAccess(this);
+  if (!accessOpt)
+    return nullptr;
+
+  auto &access = *accessOpt;
+  std::string displayTypeName = access.elementTypeName;
+  if (access.elementNullable)
     displayTypeName = ensureOuterNullable(displayTypeName);
   setTypeName(displayTypeName);
 
-  // Load and return the value
-  return Builder->CreateLoad(ElemType, ElemPtr, "elemval");
+  return Builder->CreateLoad(access.elementLLVMType, access.elementPtr, "array.elem");
 }
 
 llvm::Value *NullSafeElementAccessExprAST::codegen() {
@@ -1693,106 +1821,17 @@ llvm::Value *VariableExprAST::codegen_ptr() {
 
 // Array index pointer code generation for increment/decrement
 llvm::Value *ArrayIndexExprAST::codegen_ptr() {
-  llvm::Value *ArrayVal = getArray()->codegen();
-  if (!ArrayVal)
+  auto accessOpt = computeArrayElementAccess(this);
+  if (!accessOpt)
     return nullptr;
 
-  llvm::Value *IndexVal = getIndex()->codegen();
-  if (!IndexVal)
-    return nullptr;
+  auto &access = *accessOpt;
+  std::string displayTypeName = access.elementTypeName;
+  if (access.elementNullable)
+    displayTypeName = ensureOuterNullable(displayTypeName);
+  setTypeName(displayTypeName);
 
-  if (!IndexVal->getType()->isIntegerTy(32)) {
-    if (IndexVal->getType()->isIntegerTy()) {
-      IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
-    } else if (IndexVal->getType()->isFloatingPointTy()) {
-      IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
-    } else {
-      return LogErrorV("Array index must be an integer");
-    }
-  }
-
-  // Extract the pointer from the array struct
-  llvm::Value *ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayptr");
-
-  // Extract the size for bounds checking
-  llvm::Value *ArraySize = Builder->CreateExtractValue(ArrayVal, 1, "arraysize");
-
-  // For now, determine the element type based on the array expression type
-  // In a real implementation, track this information in the AST
-  llvm::Type *ElemTy = llvm::Type::getInt32Ty(*TheContext); // Default to i32
-
-  // Try to infer the actual element type from the array
-  if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
-    // Look up the variable's type information
-    // For now, use a simple heuristic
-    llvm::Value *V = NamedValues[VarExpr->getName()];
-    if (!V) V = GlobalValues[VarExpr->getName()];
-    if (V && V->getType()->isPointerTy()) {
-      // Assume it's a pointer to the element type
-      // In practice, need proper type tracking
-    }
-  }
-
-  // Add compile-time bounds checking for constant indices
-  if (llvm::ConstantInt *ConstIndex = llvm::dyn_cast<llvm::ConstantInt>(IndexVal)) {
-    if (llvm::ConstantInt *ConstSize = llvm::dyn_cast<llvm::ConstantInt>(ArraySize)) {
-      int64_t IndexValue = ConstIndex->getSExtValue();
-      int64_t SizeValue = ConstSize->getSExtValue();
-
-      // Check for negative index at compile time
-      if (IndexValue < 0) {
-        return LogErrorV("Array index cannot be negative");
-      }
-
-      // Check for out of bounds at compile time
-      if (IndexValue >= SizeValue) {
-        return LogErrorV("Array index out of bounds");
-      }
-
-      // Constant index is valid, no need for runtime check
-      return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
-    }
-  }
-
-  // Runtime bounds checking for non-constant indices
-  llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
-
-  // Check for negative index
-  llvm::Value *IsNegative = Builder->CreateICmpSLT(IndexVal,
-    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0), "is_negative");
-
-  // Check for index >= size
-  llvm::Value *IsOutOfBounds = Builder->CreateICmpSGE(IndexVal, ArraySize, "is_out_of_bounds");
-
-  // Combine the checks
-  llvm::Value *IsBadIndex = Builder->CreateOr(IsNegative, IsOutOfBounds, "bad_index");
-
-  // Create blocks for error handling
-  llvm::BasicBlock *SafeBB = llvm::BasicBlock::Create(*TheContext, "safe_index_ptr", TheFunction);
-  llvm::BasicBlock *ErrorBB = llvm::BasicBlock::Create(*TheContext, "bounds_error_ptr", TheFunction);
-
-  Builder->CreateCondBr(IsBadIndex, ErrorBB, SafeBB);
-
-  // Emit error block - call abort() to terminate the program
-  Builder->SetInsertPoint(ErrorBB);
-
-  // Get or declare the abort function
-  llvm::Function *AbortFunc = TheModule->getFunction("abort");
-  if (!AbortFunc) {
-    llvm::FunctionType *AbortType = llvm::FunctionType::get(
-      llvm::Type::getVoidTy(*TheContext), false);
-    AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage,
-      "abort", TheModule.get());
-  }
-
-  // Call abort to terminate the program
-  Builder->CreateCall(AbortFunc);
-  Builder->CreateUnreachable();
-
-  // Continue with safe execution
-  Builder->SetInsertPoint(SafeBB);
-
-  return Builder->CreateGEP(ElemTy, ArrayPtr, IndexVal, "elemptr");
+  return access.elementPtr;
 }
 
 llvm::Value *NullSafeElementAccessExprAST::codegen_ptr() {
@@ -2750,75 +2789,21 @@ llvm::Value *BinaryExprAST::codegen() {
         return LogErrorV(("Unknown variable name: " + LHSE->getName()).c_str());
       } else if (ArrayIndexExprAST *LHSAI = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
         // Array element assignment
-        llvm::Value *ArrayVal = LHSAI->getArray()->codegen();
-        if (!ArrayVal)
+        auto accessOpt = computeArrayElementAccess(LHSAI);
+        if (!accessOpt)
           return nullptr;
-        
-        llvm::Value *IndexVal = LHSAI->getIndex()->codegen();
-        if (!IndexVal)
-          return nullptr;
-        
-        // Make sure index is an integer
-        if (!IndexVal->getType()->isIntegerTy(32)) {
-          if (IndexVal->getType()->isIntegerTy()) {
-            IndexVal = Builder->CreateSExtOrTrunc(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
-          } else if (IndexVal->getType()->isFloatingPointTy()) {
-            IndexVal = Builder->CreateFPToSI(IndexVal, llvm::Type::getInt32Ty(*TheContext), "idxtmp");
-          } else {
-            return LogErrorV("Array index must be an integer");
-          }
-        }
-        
-        // Get element type
-        llvm::Type *ArrayType = ArrayVal->getType();
-        llvm::Value *ArrayPtr = nullptr;
-        llvm::Type *ElemType = nullptr;
-        
-        if (ArrayType->isStructTy()) {
-          // New array representation: extract pointer from struct
-          llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
-          if (StructType->getNumElements() == 2) {
-            // Extract the pointer (field 0)
-            ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
-            
-            // Determine element type from the context
-            if (VariableExprAST *VarExpr = dynamic_cast<VariableExprAST*>(LHSAI->getArray())) {
-              std::string varName = VarExpr->getName();
-              
-              if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
-                std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
-                ElemType = getTypeFromString(elemTypeStr);
-              }
-            }
-          }
-        } else if (ArrayType->isPointerTy()) {
-          // Old array representation
-          ArrayPtr = ArrayVal;
-          ElemType = R->getType(); // Use type of RHS
-        } else {
-          return LogErrorV("Array indexing requires an array type");
-        }
-        
-        if (!ArrayPtr || !ElemType)
-          return LogErrorV("Invalid array type for indexing");
+        auto &access = *accessOpt;
 
-        bool elementAllowsNull = false;
-        if (auto *VarExpr = dynamic_cast<VariableExprAST*>(LHSAI->getArray())) {
-          if (const TypeInfo *info = lookupTypeInfo(VarExpr->getName()))
-            elementAllowsNull = info->elementNullable;
-        } else {
-          std::string arrayTypeName = LHSAI->getArray()->getTypeName();
-          if (!arrayTypeName.empty()) {
-            ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
-            elementAllowsNull = arrayDesc.elementNullable;
-          }
-        }
-        if (rhsIsNullable && !elementAllowsNull) {
+        llvm::Value *ElemPtr = access.elementPtr;
+        llvm::Type *ElemType = access.elementLLVMType;
+
+        if (!ElemPtr || !ElemType || !ElemPtr->getType()->isPointerTy())
+          return LogErrorV("Invalid array element pointer");
+
+        if (rhsIsNullable && !access.elementNullable) {
           return LogErrorV("Cannot assign nullable value to non-nullable array element");
         }
 
-        // Calculate the address and store
-        llvm::Value *ElemPtr = Builder->CreateGEP(ElemType, ArrayPtr, IndexVal, "elemptr");
         Builder->CreateStore(R, ElemPtr);
         // Return a void value to indicate this is a statement, not an expression
         setTypeName("void");
@@ -3001,48 +2986,19 @@ llvm::Value *BinaryExprAST::codegen() {
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
       // Array element compound assignment: arr[i] += val
-      llvm::Value *ArrayVal = LHSE->getArray()->codegen();
-      if (!ArrayVal) return nullptr;
-      
-      llvm::Value *Index = LHSE->getIndex()->codegen();
-      if (!Index) return nullptr;
-      
-      // Handle struct arrays
-      llvm::Type *ArrayType = ArrayVal->getType();
-      llvm::Value *ArrayPtr = nullptr;
-      llvm::Type *ElemType = nullptr;
-      std::string elementTypeNameForPromotion;
-      
-      if (ArrayType->isStructTy()) {
-        // New array representation: extract pointer from struct
-        llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
-        if (StructType->getNumElements() == 2) {
-          // Extract the pointer (field 0)
-          ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
-          
-          // Determine element type from the context
-          if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
-            std::string varName = ArrayVar->getName();
-            
-            if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
-              std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
-              ElemType = getTypeFromString(elemTypeStr);
-              elementTypeNameForPromotion = elemTypeStr;
-            }
-          }
-        }
-      } else if (ArrayType->isPointerTy()) {
-        // Old array representation
-        ArrayPtr = ArrayVal;
-        // Default element type
-        ElemType = llvm::Type::getInt32Ty(*TheContext);
-      }
-      
-      if (!ArrayPtr || !ElemType)
-        return LogErrorV("Invalid array type for compound assignment");
-      
-      // Get the element pointer
-      llvm::Value *ElementPtr = Builder->CreateGEP(ElemType, ArrayPtr, Index, "arrayptr");
+      auto accessOpt = computeArrayElementAccess(LHSE);
+      if (!accessOpt)
+        return nullptr;
+      auto &access = *accessOpt;
+
+      llvm::Value *ElementPtr = access.elementPtr;
+      llvm::Type *ElemType = access.elementLLVMType;
+      if (!ElementPtr || !ElemType || !ElementPtr->getType()->isPointerTy())
+        return LogErrorV("Invalid array element pointer");
+
+      std::string elementTypeNameForPromotion = sanitizeBaseTypeName(access.elementTypeName);
+      if (elementTypeNameForPromotion.empty())
+        elementTypeNameForPromotion = sanitizeBaseTypeName(LHSE->getTypeName());
       
       // Load current value
       llvm::Value *CurrentVal = Builder->CreateLoad(ElemType, ElementPtr, "arrayload");
@@ -3234,48 +3190,19 @@ llvm::Value *BinaryExprAST::codegen() {
       
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
       // Array element compound assignment: arr[i] &= val
-      llvm::Value *ArrayVal = LHSE->getArray()->codegen();
-      if (!ArrayVal) return nullptr;
-      
-      llvm::Value *Index = LHSE->getIndex()->codegen();
-      if (!Index) return nullptr;
-      
-      // Handle struct arrays
-      llvm::Type *ArrayType = ArrayVal->getType();
-      llvm::Value *ArrayPtr = nullptr;
-      llvm::Type *ElemType = nullptr;
-      std::string elementTypeNameForPromotion;
-      
-      if (ArrayType->isStructTy()) {
-        // New array representation: extract pointer from struct
-        llvm::StructType *StructType = llvm::cast<llvm::StructType>(ArrayType);
-        if (StructType->getNumElements() == 2) {
-          // Extract the pointer (field 0)
-          ArrayPtr = Builder->CreateExtractValue(ArrayVal, 0, "arrayPtr");
-          
-          // Determine element type from the context
-          if (VariableExprAST *ArrayVar = dynamic_cast<VariableExprAST*>(LHSE->getArray())) {
-            std::string varName = ArrayVar->getName();
-            
-            if (const TypeInfo *info = lookupTypeInfo(varName); info && info->isArray) {
-              std::string elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
-              ElemType = getTypeFromString(elemTypeStr);
-              elementTypeNameForPromotion = elemTypeStr;
-            }
-          }
-        }
-      } else if (ArrayType->isPointerTy()) {
-        // Old array representation
-        ArrayPtr = ArrayVal;
-        // Default element type
-        ElemType = llvm::Type::getInt32Ty(*TheContext);
-      }
-      
-      if (!ArrayPtr || !ElemType)
-        return LogErrorV("Invalid array type for bitwise compound assignment");
-      
-      // Get the element pointer
-      llvm::Value *ElementPtr = Builder->CreateGEP(ElemType, ArrayPtr, Index, "arrayptr");
+      auto accessOpt = computeArrayElementAccess(LHSE);
+      if (!accessOpt)
+        return nullptr;
+      auto &access = *accessOpt;
+
+      llvm::Value *ElementPtr = access.elementPtr;
+      llvm::Type *ElemType = access.elementLLVMType;
+      if (!ElementPtr || !ElemType || !ElementPtr->getType()->isPointerTy())
+        return LogErrorV("Invalid array element pointer");
+
+      std::string elementTypeNameForPromotion = sanitizeBaseTypeName(access.elementTypeName);
+      if (elementTypeNameForPromotion.empty())
+        elementTypeNameForPromotion = sanitizeBaseTypeName(LHSE->getTypeName());
       
       // Load current value
       llvm::Value *CurrentVal = Builder->CreateLoad(ElemType, ElementPtr, "arrayload");
@@ -3725,9 +3652,68 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       return nullptr;
     if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(expr)) {
       if (declaredInfo.isArray)
-        return ArrayInit->codegen_with_element_target(declaredElementType, declaredElementTypeName);
+        return ArrayInit->codegen_with_element_target(declaredElementType, declaredElementTypeName, &declaredInfo);
     }
     return expr->codegen();
+  };
+
+  auto computeLiteralDimensions = [&](const ArrayExprAST *arrayLiteral) -> std::vector<int64_t> {
+    std::vector<int64_t> dims;
+    if (!arrayLiteral || !declaredInfo.isArray)
+      return dims;
+
+    if (declaredInfo.isMultidimensional && declaredInfo.arrayDepth == 1 && !declaredInfo.arrayRanks.empty()) {
+      unsigned rank = declaredInfo.arrayRanks.back();
+      if (rank == 0)
+        rank = 1;
+
+      std::vector<size_t> collected;
+      auto ensureDimension = [&](unsigned depth, size_t size) -> bool {
+        if (collected.size() <= depth)
+          collected.push_back(size);
+        else if (collected[depth] != size)
+          return false;
+        return true;
+      };
+
+      std::function<bool(const ArrayExprAST*, unsigned)> collect =
+          [&](const ArrayExprAST *node, unsigned depth) -> bool {
+            size_t count = node->getElements().size();
+            if (!ensureDimension(depth, count))
+              return false;
+
+            if (depth + 1 == rank) {
+              for (const auto &Elem : node->getElements()) {
+                if (dynamic_cast<ArrayExprAST*>(Elem.get()))
+                  return false;
+              }
+              return true;
+            }
+
+            for (const auto &Elem : node->getElements()) {
+              auto *SubArray = dynamic_cast<ArrayExprAST*>(Elem.get());
+              if (!SubArray)
+                return false;
+              if (!collect(SubArray, depth + 1))
+                return false;
+            }
+            return true;
+          };
+
+      if (!collect(arrayLiteral, 0))
+        return {};
+
+      if (collected.size() < rank)
+        collected.resize(rank, 0);
+
+      dims.reserve(collected.size());
+      for (size_t sz : collected)
+        dims.push_back(static_cast<int64_t>(sz));
+    } else {
+      dims.push_back(static_cast<int64_t>(arrayLiteral->getElements().size()));
+    }
+
+    return dims;
   };
 
   std::optional<llvm::IRBuilderBase::InsertPointGuard> GlobalIPGuard;
@@ -3918,12 +3904,11 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     }
 
     // Track array size for compile-time bounds checking
-    if (!isRefVar && getType().size() > 2 && getType().substr(getType().size() - 2) == "[]") {
-      // If initializer is an array literal, track its size
-      if (getInitializer()) {
-        if (ArrayExprAST *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
-          ArraySizes[getName()] = ArrayInit->getElements().size();
-        }
+    if (!isRefVar && declaredInfo.isArray) {
+      if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
+        auto dims = computeLiteralDimensions(ArrayInit);
+        if (!dims.empty())
+          ArraySizes[getName()] = std::move(dims);
       }
     }
 
@@ -4061,12 +4046,11 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         rememberLocalType(getName(), declaredInfo);
 
         // Track array size for compile-time bounds checking
-        if (getType().size() > 2 && getType().substr(getType().size() - 2) == "[]") {
-          // If initializer is an array literal, track its size
-          if (getInitializer()) {
-            if (ArrayExprAST *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
-              ArraySizes[getName()] = ArrayInit->getElements().size();
-            }
+        if (declaredInfo.isArray) {
+          if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
+            auto dims = computeLiteralDimensions(ArrayInit);
+            if (!dims.empty())
+              ArraySizes[getName()] = std::move(dims);
           }
         }
 
@@ -4137,7 +4121,7 @@ llvm::Value *ForEachStmtAST::codegen() {
   // Check if CollectionVal is a struct
   if (CollectionVal->getType()->isStructTy()) {
     llvm::StructType *StructType = llvm::cast<llvm::StructType>(CollectionVal->getType());
-    if (StructType->getNumElements() == 2) {
+    if (StructType->getNumElements() >= 2) {
       // Extract pointer (field 0) and size (field 1)
       ArrayPtr = Builder->CreateExtractValue(CollectionVal, 0, "arrayPtr");
       ArraySize = Builder->CreateExtractValue(CollectionVal, 1, "arraySize");

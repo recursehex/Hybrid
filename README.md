@@ -201,6 +201,7 @@ Hybrid/
 - LLVM code generation
 - Function definitions and calls
 - All primitive types and arrays
+- Mulitidimensional and jagged arrays
 - Rich numeric literal formats (`0b`, `0o`, `0x`, scientific notation)
 - If-else statements
 - While loops
@@ -258,7 +259,6 @@ Hybrid/
     - `??=`
 
 **Planned Features**
-- Mulitidimensional arrays
 - Multiline literals
 - Stuctures
     - `class`

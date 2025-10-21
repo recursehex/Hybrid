@@ -21,6 +21,9 @@ struct TypeInfo {
   std::string typeName;           // canonical language-visible type
   unsigned pointerDepth = 0;      // number of explicit pointer levels (@)
   bool isArray = false;           // whether type is an array ("[]")
+  unsigned arrayDepth = 0;        // number of array segments ([], [,,], etc.)
+  std::vector<unsigned> arrayRanks; // rank of each array segment (1 = jagged, >1 = multidimensional)
+  bool isMultidimensional = false; // true if any array segment has rank > 1
   bool isNullable = false;        // whether the type itself can be null
   bool elementNullable = false;   // whether array elements can be null
   RefStorageClass refStorage = RefStorageClass::None;
@@ -450,7 +453,8 @@ public:
   
   llvm::Value *codegen() override;
   llvm::Value *codegen_with_element_target(llvm::Type *TargetElementType = nullptr,
-                                           const std::string &TargetElementTypeName = "");
+                                           const std::string &TargetElementTypeName = "",
+                                           const TypeInfo *DeclaredArrayInfo = nullptr);
   [[nodiscard]] const std::string &getElementType() const { return ElementType; }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getElements() const { return Elements; }
   [[nodiscard]] std::span<const std::unique_ptr<ExprAST>> getElementsSpan() const { return Elements; }
@@ -459,17 +463,23 @@ public:
 /// ArrayIndexExprAST - Expression class for array indexing like arr[0].
 class ArrayIndexExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Array;
-  std::unique_ptr<ExprAST> Index;
+  std::vector<std::unique_ptr<ExprAST>> Indices;
 
 public:
   ArrayIndexExprAST(std::unique_ptr<ExprAST> Array,
-                    std::unique_ptr<ExprAST> Index)
-      : Array(std::move(Array)), Index(std::move(Index)) {}
+                    std::vector<std::unique_ptr<ExprAST>> Indices)
+      : Array(std::move(Array)), Indices(std::move(Indices)) {}
   
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
   ExprAST *getArray() const { return Array.get(); }
-  ExprAST *getIndex() const { return Index.get(); }
+  const std::vector<std::unique_ptr<ExprAST>> &getIndices() const { return Indices; }
+  size_t getIndexCount() const { return Indices.size(); }
+  ExprAST *getIndex(size_t idx = 0) const {
+    if (idx >= Indices.size())
+      return nullptr;
+    return Indices[idx].get();
+  }
 };
 
 /// NullSafeElementAccessExprAST - Expression class for null-safe element access like arr?[0].

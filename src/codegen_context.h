@@ -32,7 +32,7 @@ struct CodegenContext {
   std::map<std::string, TypeInfo> globalTypes;
   std::map<std::string, TypeInfo> localTypes;
   std::map<std::string, llvm::StructType *> structTypes;
-  std::map<std::string, int64_t> arraySizes;
+  std::map<std::string, std::vector<int64_t>> arraySizes;
   std::map<std::string, std::vector<std::pair<std::string, unsigned>>> structFieldIndices;
   std::map<std::string, std::map<std::string, std::string>> structFieldTypes;
 

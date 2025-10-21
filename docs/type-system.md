@@ -51,7 +51,7 @@ bool[] flags = [true, false, true]
 string[] names = ["Alice", "Bob", "Charlie"]
 ```
 
-Arrays are implemented as structs containing a pointer to elements and a size in LLVM IR. Array literals regenerate their elements to match the declared element type, so `float[] temps = [98.6, 100.0]` stores true 32-bit floats even though the literal syntax defaults to `double`. The same width-aware regeneration applies to character arrays—`schar[] ascii = ['A', 'B']` produces 8-bit code units while `lchar[]` stores full 32-bit values.
+Arrays are implemented as structs containing a pointer to elements and a size in LLVM IR. Array literals regenerate their elements to match the declared element type, so `float[] temps = [98.6, 100.0]` stores true 32-bit floats even though the literal syntax defaults to `double`. The same width-aware regeneration applies to character arrays, so `schar[] ascii = ['A', 'B']` produces 8-bit code units while `lchar[]` stores full 32-bit values.
 
 ### Strings and Unicode
 

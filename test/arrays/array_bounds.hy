@@ -54,15 +54,41 @@ void testArrayInFunction(int[] arr)
     }
 }
 
-// TODO: Add multidimensional arrays
-// void testNestedArrayAccess()
-// {
-//     int[][] matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
-//     
-//     print(matrix[0][0])
-//     print(matrix[1][2])
-//     print(matrix[2][1])
-// }
+void testMultidimensionalArray()
+{
+    int[,] matrix = [[1, 2], [3, 4]]
+
+    assert matrix[0, 0] == 1
+    assert matrix[0, 1] == 2
+    assert matrix[1, 0] == 3
+    assert matrix[1, 1] == 4
+
+    matrix[1, 0] = 7
+    matrix[0, 1] = 5
+
+    assert matrix[1, 0] == 7
+    assert matrix[0, 1] == 5
+
+    print(matrix[1, 0])
+    print(matrix[0, 1])
+}
+
+void testJaggedArray()
+{
+    int[][] jagged = [[1], [2, 3], [4, 5, 6]]
+
+    assert jagged[0][0] == 1
+    assert jagged[1][1] == 3
+    assert jagged[2][0] == 4
+
+    jagged[2][2] = 42
+
+    assert jagged[2][2] == 42
+
+    print(jagged[0][0])
+    print(jagged[1][1])
+    print(jagged[2][2])
+}
 
 void testArrayWithDifferentTypes()
 {
@@ -145,7 +171,8 @@ int main()
         print(testArray[i])
     }
     
-    // testNestedArrayAccess()
+    testMultidimensionalArray()
+    testJaggedArray()
     testArrayWithDifferentTypes()
     testArrayModification()
     testArrayInControlFlow()
