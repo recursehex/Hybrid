@@ -3859,22 +3859,31 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   };
 
   // Check if at global scope
-  llvm::Function *TheFunction = nullptr;
   bool isGlobal = false;
 
   if (Builder->GetInsertBlock()) {
-    TheFunction = Builder->GetInsertBlock()->getParent();
-    if (TheFunction->getName() == "__anon_var_decl" ||
-        TheFunction->getName() == "__hybrid_top_level") {
+    llvm::Function *ParentFunction = Builder->GetInsertBlock()->getParent();
+    if (ParentFunction->getName() == "__anon_var_decl" ||
+        ParentFunction->getName() == "__hybrid_top_level") {
       isGlobal = true;
-      TheFunction = enterGlobalInitializer();
-    } else {
-      isGlobal = false;
     }
   } else {
     // No insertion point means at top level
     isGlobal = true;
-    TheFunction = enterGlobalInitializer();
+  }
+
+  if (isGlobal) {
+    if (GlobalValues.count(getName()) || lookupGlobalTypeInfo(getName())) {
+      return LogErrorV(("Variable '" + getName() + "' is already declared").c_str());
+    }
+  } else {
+    if (NamedValues.count(getName()) || lookupLocalTypeInfo(getName())) {
+      return LogErrorV(("Variable '" + getName() + "' is already declared in this scope").c_str());
+    }
+  }
+
+  if (isGlobal) {
+    enterGlobalInitializer();
   }
   
   

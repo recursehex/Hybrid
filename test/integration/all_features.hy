@@ -127,7 +127,7 @@ int main()
     bitwise &= 0b1100
     bitwise |= 0b0011
     bitwise ^= 0b1111
-    int bitwise = 15
+    bitwise = 15
     
     int result = (i + int: s) * int: f / (int: b + 1)
     bool complex_condition = flag && (result > 100) || (!flag && sum < 5)
