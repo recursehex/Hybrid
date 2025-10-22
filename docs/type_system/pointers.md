@@ -41,7 +41,8 @@ float@[] fptrArr    // Array of float pointers
 Takes the address of a variable (like `&` in C++):
 
 ```cs
-unsafe {
+unsafe
+{
     int x = 42
     int@ ptr = #x       // ptr now holds the address of x
 }
@@ -52,7 +53,8 @@ unsafe {
 Accesses the value at a pointer address (like `*` in C++):
 
 ```cs
-unsafe {
+unsafe
+{
     int x = 42
     int@ ptr = #x
     int value = @ptr    // value = 42
@@ -87,12 +89,14 @@ unsafe
 Pointer operations must be within `unsafe` blocks:
 
 ```cs
-void safeFunction() {
+void safeFunction()
+{
     int x = 10
 
     int@ ptr = #x           // ERROR: Cannot use # outside unsafe
 
-    unsafe {
+    unsafe
+    {
         int@ ptr = #x       // OK: Inside unsafe block
         @ptr = 20           // OK: Can dereference here
     }

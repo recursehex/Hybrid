@@ -185,6 +185,8 @@ Hybrid/
 │   └── CMakeLists.txt  # Source build configuration
 ├── test/               # Test suite (.hy files)
 ├── docs/               # Documentation
+│   ├── control_flow/   # Control flow (if-else, foreach, switch, etc.)
+│   ├── type_system/    # Type system (variables, functions, casting, etc.)
 ├── CMakeLists.txt      # Main build configuration
 ├── CMakePresets.json   # Build presets for IDEs
 ├── build.sh            # Unix/macOS build script

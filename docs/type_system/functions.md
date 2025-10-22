@@ -315,26 +315,3 @@ int incrementCounter()
     return globalCounter
 }
 ```
-
-## LLVM Code Generation
-
-Functions are compiled to LLVM IR with proper calling conventions:
-
-```llvm
-define i32 @add(i32 %a, i32 %b) {
-entry:
-  %a1 = alloca i32, align 4
-  store i32 %a, ptr %a1, align 4
-  %b2 = alloca i32, align 4
-  store i32 %b, ptr %b2, align 4
-  %a3 = load i32, ptr %a1, align 4
-  %b4 = load i32, ptr %b2, align 4
-  %addtmp = add i32 %a3, %b4
-  ret i32 %addtmp
-}
-```
-
-- Parameters are passed by value
-- Local variables use `alloca` for stack allocation
-- All memory accesses use explicit `load` and `store` operations
-- Functions follow standard LLVM calling conventions

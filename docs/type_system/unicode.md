@@ -68,7 +68,7 @@ When using character literals without explicit type declaration, the compiler au
 '😀'      // Requires 32-bit, uses lchar
 ```
 
-Character literals also adapt to the surrounding context. When an expression expects an 8-bit `schar`/`byte`, 16-bit `char`/`short`, or 32-bit `lchar`/`int`, the literal is regenerated at that width so comparisons like `'A' == byteValue` and assignments such as `schar small = 'A'` work without manual casts. If the literal cannot fit the target width, the compiler falls back to the wider default and reports a type error.
+Character literals also adapt to the surrounding context. When an expression expects an 8-bit `schar`/`byte`, 16-bit `char`/`short`, or 32-bit `lchar`/`int`, the literal is regenerated at that width so comparisons like `'A' == byteValue` and declarations such as `schar small = 'A'` work without manual casts. Once the value is stored, however, converting it to a different width (or to an integer type) does require an explicit cast, e.g. `schar narrow = schar: wideChar`, `char ascii = char: codePoint`, or `int code = int: letter`. If the literal cannot fit the target width, the compiler falls back to the wider default and reports a type error.
 
 ### Type-Specific Assignment
 
@@ -232,9 +232,3 @@ The lexer recognizes:
 - `\uXXXX`: 4 hexadecimal digits for 16-bit Unicode
 - `\UXXXXXXXX`: 8 hexadecimal digits for 32-bit Unicode
 - Standard escapes: `\n`, `\t`, `\r`, `\\`, `\'`, `\"`
-
-## Testing
-
-Test files for Unicode support:
-- `test/types/unicode.hy` - Comprehensive Unicode tests
-- `test/types/char.hy` - Character type tests

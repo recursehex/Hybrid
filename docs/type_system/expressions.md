@@ -139,7 +139,8 @@ float g = f++   // g gets 3.5, f becomes 4.5
 ```c
 // In loops - postfix is common for loop counters
 int i = 0
-while i < 10 {
+while i < 10
+{
     process(i)
     i++         // Increment after using the value
 }
@@ -152,7 +153,8 @@ int val2 = arr[index++]  // val2 gets arr[1] (20), index becomes 2
 
 // Prefix when you need the new value immediately
 int count = 0
-if ++count == 1 {       // Increment first, then compare
+if ++count == 1     // Increment first, then compare
+{
     // This executes because count is now 1
 }
 
@@ -878,11 +880,13 @@ assert sizeof(int) > 0   // OK - evaluates to true
 assert 1 == 2            // Error: Assert condition evaluates to false at compile time
 
 // Constant conditions in if statements
-if true {
+if true
+{
     // This block is always executed
 }
 
-if false {
+if false
+{
     // This block is never executed (dead code)
 }
 ```
@@ -929,11 +933,3 @@ int z = array[index]           // Array access with variable index
 
 // These must be evaluated at runtime
 ```
-
-### Implementation Details
-
-- Constant evaluation happens in the parser during AST construction
-- The `EvaluateConstantExpression` function recursively evaluates AST nodes
-- Results are stored in a `ConstantValue` structure with type information
-- Type promotion and conversions are handled during evaluation
-- Failed assertions with constant expressions produce compile-time errors

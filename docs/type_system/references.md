@@ -357,9 +357,3 @@ func(ref f)  // ERROR: Type mismatch
        return ref local  // Dangerous - local goes out of scope
    }
    ```
-
-## See Also
-
-- [Pointers and Memory Safety](pointers-and-memory-safety.md) - For explicit pointer operations
-- [Functions](functions.md) - Function parameter types
-- [Type System](type-system.md) - Type checking and conversions
