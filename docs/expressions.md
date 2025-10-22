@@ -388,6 +388,8 @@ double safeDivide(double a, double b)
 
 #### Function Arguments
 
+Hybrid tracks unmatched parentheses, so you can split argument lists over many lines for clarity. Indent each argument underneath the call site and close the expression with the right parenthesis on its own line.
+
 ```c
 // Pass conditional values to functions
 print(x if x > 0 else 0)

@@ -142,8 +142,16 @@ void testArrayInControlFlow()
 
 void testLargeArray()
 {
-    // TODO: Add multiline literals
-    int[] large = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    // Multiline literal
+    int[] large = [1, 2, 3, 4, 5,
+                   6, 7, 8, 9, 10,
+                   11, 12, 13, 14, 15,
+                   16, 17, 18, 19, 20]
+
+    assert large[0] == 1
+    assert large[5] == 6
+    assert large[10] == 11
+    assert large[19] == 20
     
     print(large[0])
     print(large[10])
@@ -155,6 +163,7 @@ void testLargeArray()
         sum += large[i]
     }
     print(sum)
+    assert sum == 210
 }
 
 int main()

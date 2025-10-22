@@ -25,6 +25,7 @@
 
 static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr();
 static void RecoverAfterExpressionError();
+static void SkipNewlines();
 
 static unsigned parsePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -138,6 +139,11 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
 /// token the parser is looking at.  getNextToken reads another token from the
 /// lexer and updates CurTok with its results.
 int getNextToken() { return CurTok = gettok(); }
+
+static void SkipNewlines() {
+  while (CurTok == tok_newline)
+    getNextToken();
+}
 
 bool isInUnsafeContext() {
   return UnsafeContextLevel > 0;
@@ -545,14 +551,17 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 
   // Call.
   getNextToken(); // eat (
+  SkipNewlines();
   std::vector<std::unique_ptr<ExprAST>> Args;
   if (CurTok != ')') {
     while (true) {
+      SkipNewlines();
       // Check for ref argument
       bool argIsRef = false;
       if (CurTok == tok_ref) {
         argIsRef = true;
         getNextToken(); // eat 'ref'
+        SkipNewlines();
       }
 
       if (auto Arg = ParseExpression()) {
@@ -566,12 +575,15 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
       else
         return nullptr;
 
+      SkipNewlines();
+
       if (CurTok == ')')
         break;
 
       if (CurTok != ',')
         return LogError("Expected ')' or ',' in argument list");
       getNextToken();
+      SkipNewlines();
     }
   }
 
@@ -587,13 +599,18 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
   getNextToken(); // eat [
 
   std::vector<std::unique_ptr<ExprAST>> Elements;
+  SkipNewlines();
 
   if (CurTok != ']') {
     while (true) {
+      SkipNewlines();
+
       if (auto Elem = ParseExpression())
         Elements.push_back(std::move(Elem));
       else
         return nullptr;
+
+      SkipNewlines();
 
       if (CurTok == ']')
         break;
@@ -601,6 +618,7 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
       if (CurTok != ',')
         return LogError("Expected ',' or ']' in array literal");
       getNextToken(); // eat ,
+      SkipNewlines();
     }
   }
 
@@ -1075,6 +1093,7 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
 
   std::vector<Parameter> Args;
   getNextToken(); // eat '('
+  SkipNewlines();
 
   // Handle empty parameter list
   if (CurTok == ')') {
@@ -1085,11 +1104,13 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
 
   // Parse parameters
   while (true) {
+    SkipNewlines();
     // Check for ref parameter
     bool paramIsRef = false;
     if (CurTok == tok_ref) {
       paramIsRef = true;
       getNextToken(); // eat 'ref'
+      SkipNewlines();
     }
 
     if (!IsValidType())
@@ -1121,6 +1142,7 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
       return LogErrorP("Expected ',' or ')' in parameter list");
 
     getNextToken(); // eat ','
+    SkipNewlines();
   }
 
   TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
@@ -2089,6 +2111,55 @@ bool ParseTypeIdentifier(bool isRef) {
     return false;
   }
 
+  SkipNewlines();
+
+  // Handle constructor call (struct name followed directly by '(')
+  if (CurTok == '(' && StructNames.contains(Type)) {
+    getNextToken(); // eat '('
+    SkipNewlines();
+
+    std::vector<std::unique_ptr<ExprAST>> Args;
+    if (CurTok != ')') {
+      while (true) {
+        SkipNewlines();
+        if (auto Arg = ParseExpression()) {
+          Args.push_back(std::move(Arg));
+        } else {
+          fprintf(stderr, "Error: Expected expression in constructor arguments\n");
+          return false;
+        }
+
+        SkipNewlines();
+        if (CurTok == ')')
+          break;
+
+        if (CurTok != ',') {
+          fprintf(stderr, "Error: Expected ')' or ',' in constructor arguments\n");
+          return false;
+        }
+        getNextToken(); // eat ','
+        SkipNewlines();
+      }
+    }
+
+    if (CurTok != ')') {
+      fprintf(stderr, "Error: Expected ')' after constructor arguments\n");
+      return false;
+    }
+    getNextToken(); // eat ')'
+
+    auto Call = std::make_unique<CallExprAST>(Type, std::move(Args));
+    if (auto CallIR = Call->codegen()) {
+      fprintf(stderr, "Generated struct instantiation IR:\n");
+      CallIR->print(llvm::errs());
+      fprintf(stderr, "\n");
+    } else {
+      fprintf(stderr, "Error: Failed to generate struct instantiation\n");
+      return false;
+    }
+    return true;
+  }
+
   if (CurTok != tok_identifier) {
     fprintf(stderr, "Error: Expected identifier after type\n");
     return false;
@@ -2097,22 +2168,27 @@ bool ParseTypeIdentifier(bool isRef) {
   std::string Name = IdentifierStr;
   getNextToken(); // eat identifier
 
+  SkipNewlines();
+
   // Check what follows
   if (CurTok == '(') {
     // It's a function definition
     // Need to parse the full prototype and then the body
     getNextToken(); // eat '('
+    SkipNewlines();
     
     std::vector<Parameter> Args;
     
     // Parse parameters
     if (CurTok != ')') {
       while (true) {
+        SkipNewlines();
         // Check for ref parameter
         bool paramIsRef = false;
         if (CurTok == tok_ref) {
           paramIsRef = true;
           getNextToken(); // eat 'ref'
+          SkipNewlines();
         }
 
         if (!IsValidType()) {
@@ -2141,6 +2217,8 @@ bool ParseTypeIdentifier(bool isRef) {
         param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
         Args.push_back(param);
 
+        SkipNewlines();
+
         if (CurTok == ')') {
           getNextToken(); // eat ')'
           break;
@@ -2152,6 +2230,7 @@ bool ParseTypeIdentifier(bool isRef) {
         }
 
         getNextToken(); // eat ','
+        SkipNewlines();
       }
     } else {
       getNextToken(); // eat ')'
@@ -2181,12 +2260,14 @@ bool ParseTypeIdentifier(bool isRef) {
   } else if (CurTok == '=') {
     // It's a variable declaration
     getNextToken(); // eat '='
+    SkipNewlines();
 
     // Check if the initializer has 'ref' keyword (for linking two variables)
     bool initializerIsRef = false;
     if (CurTok == tok_ref) {
       initializerIsRef = true;
       getNextToken(); // eat 'ref'
+      SkipNewlines();
     }
 
     auto Initializer = ParseExpression();
@@ -2290,9 +2371,11 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       
       // Parse constructor as a function with void return type
       getNextToken(); // eat '('
+      SkipNewlines();
       
       std::vector<Parameter> Args;
       while (CurTok != ')' && CurTok != tok_eof) {
+        SkipNewlines();
         // Parse parameter type
         if (!IsValidType()) {
           LogError("Expected parameter type");
@@ -2321,6 +2404,8 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
         param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
         Args.push_back(std::move(param));
         
+        SkipNewlines();
+
         if (CurTok == ')') break;
         
         if (CurTok != ',') {
@@ -2328,6 +2413,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
           return nullptr;
         }
         getNextToken(); // eat ','
+        SkipNewlines();
       }
       
       if (CurTok != ')') {

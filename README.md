@@ -202,6 +202,7 @@ Hybrid/
 - Function definitions and calls
 - All primitive types and arrays
 - Mulitidimensional and jagged arrays
+- Multiline literals (arrays, function arguments, constructor calls)
 - Rich numeric literal formats (`0b`, `0o`, `0x`, scientific notation)
 - If-else statements
 - While loops
@@ -259,7 +260,6 @@ Hybrid/
     - `??=`
 
 **Planned Features**
-- Multiline literals
 - Stuctures
     - `class`
     - `enum`

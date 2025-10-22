@@ -43,6 +43,25 @@ Array literals are comma-separated values enclosed in square brackets:
 ["hello", "world"]     // String array literal
 ```
 
+### Multiline Array Literals
+
+When an array literal grows beyond a couple of values, split it across multiple lines for readability. Hybrid's lexer keeps track of the open bracket, so each element (including nested expressions) can be indented on its own line until the matching closing bracket:
+
+```c
+int[] values = [
+    start,
+    step + offset,
+    compute(
+        step,
+        3,
+        4
+    ),
+    42
+]
+```
+
+The same formatting works for multidimensional (`[,]`) and jagged (`[][]`) literals; indent the inner lists and finish with the closing delimiter on a fresh line.
+
 ### Type Inference
 
 Array element types are inferred from the literals:

@@ -72,6 +72,31 @@ int getAnswer()
 }
 ```
 
+### Multiline Parameter Lists
+
+Complex signatures often read better when each parameter sits on its own line. Hybrid accepts newline-separated parameter lists as long as the closing parenthesis sits on a new line by itself:
+
+```c
+int transform(
+    int x,
+    int y,
+    int scale
+)
+{
+    return scale * (x + y)
+}
+```
+
+Use the same layout when calling the function; indent the arguments underneath the opening parenthesis and close the call on a fresh line:
+
+```c
+int result = transform(
+    source.x,
+    source.y,
+    computeScale()
+)
+```
+
 ### Array Parameters
 
 Arrays can be passed as parameters by reference:

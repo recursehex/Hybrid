@@ -151,6 +151,22 @@ int@ handle = null     // Pointers are implicitly nullable
 [true, false, true]    // Boolean array
 ```
 
+Multiline array literals are also supported. Place each element on its own line (including expressions or nested calls) and close the literal with the matching bracket on a new line:
+
+```c
+int[] samples = [
+    1,
+    compute(
+        base,
+        offset,
+        2
+    ),
+    5
+]
+```
+
+The same indentation rules apply to rectangular (`[,]`) and jagged (`[][]`) literals, making it easier to visualize large datasets.
+
 ## Language Safety Features
 
 Hybrid includes several safety features designed to prevent common programming errors:

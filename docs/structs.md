@@ -173,6 +173,15 @@ int xCoord = p1.x  // 10
 int yCoord = p1.y  // 20
 ```
 
+For longer argument lists, break the constructor call across multiple lines. The call follows the same multiline rules as function invocations:
+
+```c
+Rectangle positioned = Rectangle(
+    originX,
+    originY + offset
+)
+```
+
 ### Without Assignment
 
 Structs can be instantiated without assignment (standalone constructor calls):

@@ -229,95 +229,11 @@ void MainLoop() {
       break;
     case tok_identifier:
       {
-        // Check if this identifier is a struct type
         if (StructNames.contains(IdentifierStr)) {
-          // It's a struct type, need to look ahead to determine what it is
-          std::string structName = IdentifierStr;
-          getNextToken(); // consume the struct name
-          
-          if (CurTok == '(') {
-            // Struct constructor call
-            // Put the tokens back for expression parsing
-            // Since can't easily "unget" tokens, create a CallExprAST directly
-            getNextToken(); // eat '('
-            std::vector<std::unique_ptr<ExprAST>> Args;
-            if (CurTok != ')') {
-              while (true) {
-                if (auto Arg = ParseExpression())
-                  Args.push_back(std::move(Arg));
-                else {
-                  getNextToken(); // error recovery
-                  break;
-                }
-                
-                if (CurTok == ')')
-                  break;
-                  
-                if (CurTok != ',') {
-                  fprintf(stderr, "Error: Expected ')' or ',' in argument list\n");
-                  getNextToken(); // error recovery
-                  break;
-                }
-                getNextToken();
-              }
-            }
-            
-            if (CurTok == ')') {
-              getNextToken(); // eat ')'
-              
-              // Create and codegen the constructor call
-              auto Call = std::make_unique<CallExprAST>(structName, std::move(Args));
-              if (auto CallIR = Call->codegen()) {
-                if (gInteractiveMode) fprintf(stderr, "Generated struct instantiation IR:\n");
-                CallIR->print(llvm::errs());
-                if (gInteractiveMode) fprintf(stderr, "\n");
-              } else {
-                fprintf(stderr, "Error: Failed to generate struct instantiation\n");
-              }
-            }
-          } else {
-            // Variable declaration
-            // The struct name has been consumed, current token should be the variable name
-            if (CurTok == tok_identifier) {
-              std::string varName = IdentifierStr;
-              getNextToken(); // eat variable name
-              
-              if (CurTok == '=') {
-                getNextToken(); // eat '='
-                auto Init = ParseExpression();
-                if (Init) {
-                  TypeInfo declInfo;
-                  declInfo.typeName = structName;
-                  declInfo.pointerDepth = 0;
-                  declInfo.isArray = false;
-                  declInfo.isNullable = false;
-                  declInfo.elementNullable = false;
-                  declInfo.refStorage = RefStorageClass::None;
-                  declInfo.isMutable = true;
-                  declInfo.declaredRef = false;
-                  auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), varName, std::move(Init));
-                  if (auto VarIR = VarDecl->codegen()) {
-                  if (gInteractiveMode) fprintf(stderr, "Generated variable declaration IR:\n");
-                  VarIR->print(llvm::errs());
-                  if (gInteractiveMode) fprintf(stderr, "\n");
-                  }
-                }
-              } else {
-                fprintf(stderr, "Error: Expected '=' after variable name (all variables must be initialized)\n");
-                getNextToken(); // error recovery
-              }
-            } else if (CurTok == '[' || CurTok == tok_nullable || CurTok == tok_at) {
-              // Array type - put back the struct name processing
-              // Need to restore the state
-              IdentifierStr = structName;
-              CurTok = tok_identifier;
-              if (!ParseTypeIdentifier()) {
-                getNextToken();
-              }
-            } else {
-              fprintf(stderr, "Error: Expected variable name or '(' after struct type '%s'\n", structName.c_str());
-              // Token already consumed, just continue
-            }
+          if (!ParseTypeIdentifier()) {
+            // If parsing as a type-prefixed declaration failed,
+            // consume the current token to avoid stalling
+            getNextToken();
           }
         } else {
           // For C-style declarations, functions start with type keywords,

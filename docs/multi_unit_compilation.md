@@ -1,6 +1,6 @@
 # Multi-Unit Compilation
 
-Hybrid’s front-end routes all parser, lexer, and code generation state through
+Hybrid's front-end routes all parser, lexer, and code generation state through
 `CompilerSession`. You can now feed multiple source files to a single driver
 invocation, and the session will track shared types while clearing per-unit
 scratch state.

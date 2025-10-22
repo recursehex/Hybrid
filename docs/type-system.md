@@ -55,7 +55,7 @@ Arrays are implemented as structs containing a pointer to elements and a size in
 
 ### Strings and Unicode
 
-`string` values are stored as UTF-16 sequences. Every string literal is emitted as a 16-bit array that shares a single global instance: identical literals point at the same address, so pointer equality works while still representing Unicode text correctly. Character literals adopt the consumer’s width, so `'😊'` becomes a 32-bit `lchar` in wide contexts, but narrows to `char`/`schar` if it fits the target range. Use the sized character aliases (`schar`, `char`, `lchar`) when you need to control storage explicitly.
+`string` values are stored as UTF-16 sequences. Every string literal is emitted as a 16-bit array that shares a single global instance: identical literals point at the same address, so pointer equality works while still representing Unicode text correctly. Character literals adopt the consumer's width, so `'😊'` becomes a 32-bit `lchar` in wide contexts, but narrows to `char`/`schar` if it fits the target range. Use the sized character aliases (`schar`, `char`, `lchar`) when you need to control storage explicitly.
 
 ## Variable Declarations
 
@@ -114,9 +114,9 @@ While types must be explicitly declared, the compiler performs automatic type in
 
 Number literals automatically adapt to the target type in binary operations, eliminating the need for explicit casts in most common cases. This feature, similar to C#, Rust, and Swift, improves code readability while maintaining type safety.
 
-Character literals behave the same way: a literal will regenerate at the consumer’s width. For example, `'A'` becomes an 8-bit `schar` when assigned to an ASCII array, stays 16-bit for `char`, and upgrades to 32-bit `lchar` when the surrounding expression requires it. If the literal cannot fit, the compiler falls back to the wider type and surfaces a type error.
+Character literals behave the same way: a literal will regenerate at the consumer's width. For example, `'A'` becomes an 8-bit `schar` when assigned to an ASCII array, stays 16-bit for `char`, and upgrades to 32-bit `lchar` when the surrounding expression requires it. If the literal cannot fit, the compiler falls back to the wider type and surfaces a type error.
 
-Array literals reuse the same logic; every element is re-emitted using the array’s element type before storage.
+Array literals reuse the same logic; every element is re-emitted using the array's element type before storage.
 
 #### How It Works
 
