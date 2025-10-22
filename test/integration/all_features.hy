@@ -122,12 +122,11 @@ int main()
     }
     assert oddCount == 5
     assert counter == 10
-    
-    // TODO: Add binary literals
-    // int bitwise = 0b1010
-    // bitwise &= 0b1100
-    // bitwise |= 0b0011
-    // bitwise ^= 0b1111
+
+    int bitwise = 0b1010
+    bitwise &= 0b1100
+    bitwise |= 0b0011
+    bitwise ^= 0b1111
     int bitwise = 15
     
     int result = (i + int: s) * int: f / (int: b + 1)

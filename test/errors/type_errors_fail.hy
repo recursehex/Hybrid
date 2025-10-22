@@ -19,6 +19,11 @@ takes_int(true)                 // Error: bool cannot be passed to int parameter
 long wideValue = 1000000
 int narrowed = wideValue        // Error: requires explicit cast from long to int
 
+// Test 4b: Assigning same-width signed value to smaller type
+int implicitSource = 10
+short implicitShort = implicitSource   // Error: requires explicit cast from int to short
+uint unsignedAssign = implicitSource   // Error: requires explicit cast from int to uint
+
 // Test 5: Assigning string to numeric type
 int stringToInt = "123"         // Error: string cannot be assigned to int
 

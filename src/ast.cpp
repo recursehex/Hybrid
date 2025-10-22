@@ -3,6 +3,7 @@
 
 #include "compiler_session.h"
 #include "codegen_context.h"
+#include "parser.h"
 
 // LLVM includes for code generation
 #include "llvm/ADT/APFloat.h"
@@ -694,6 +695,115 @@ static std::optional<bool> unsignedHintFromTypeName(const std::string &typeName)
     return false;
 
   return std::nullopt;
+}
+
+static bool isIntegerLiteralExpr(const ExprAST *expr) {
+  if (!expr)
+    return false;
+
+  if (dynamic_cast<const NumberExprAST *>(expr))
+    return true;
+
+  if (dynamic_cast<const CharExprAST *>(expr))
+    return true;
+
+  ConstantValue constantResult(0LL);
+  if (EvaluateConstantExpression(expr, constantResult)) {
+    return constantResult.type == ConstantValue::INTEGER ||
+           constantResult.type == ConstantValue::UNSIGNED_INTEGER;
+  }
+
+  return false;
+}
+
+static std::string describeTypeForDiagnostic(llvm::Type *type) {
+  if (!type)
+    return "value";
+
+  if (type->isIntegerTy()) {
+    const unsigned bits = type->getIntegerBitWidth();
+    if (bits == 1)
+      return "bool";
+    return std::to_string(bits) + "-bit integer";
+  }
+
+  if (type->isFloatTy())
+    return "float";
+  if (type->isDoubleTy())
+    return "double";
+  if (type->isPointerTy())
+    return "pointer";
+  return "value";
+}
+
+static bool requiresExplicitCastForIntegerConversion(const ExprAST *sourceExpr,
+                                                     llvm::Type *sourceType,
+                                                     std::string_view sourceTypeName,
+                                                     llvm::Type *targetType,
+                                                     std::string_view targetTypeName) {
+  if (!sourceType || !targetType)
+    return false;
+
+  if (!sourceType->isIntegerTy() || !targetType->isIntegerTy())
+    return false;
+
+  if (sourceType->isIntegerTy(1) || targetType->isIntegerTy(1))
+    return false;
+
+  const unsigned sourceBits = sourceType->getIntegerBitWidth();
+  const unsigned targetBits = targetType->getIntegerBitWidth();
+  const bool sourceIsLiteral = isIntegerLiteralExpr(sourceExpr);
+
+  if (sourceBits > targetBits)
+    return !sourceIsLiteral;
+
+  std::string cleanSource = sanitizeBaseTypeName(sourceTypeName);
+  std::string cleanTarget = sanitizeBaseTypeName(targetTypeName);
+
+  auto sourceUnsigned = unsignedHintFromTypeName(cleanSource);
+  auto targetUnsigned = unsignedHintFromTypeName(cleanTarget);
+
+  if (sourceUnsigned && targetUnsigned &&
+      sourceUnsigned.value() != targetUnsigned.value()) {
+    return !sourceIsLiteral;
+  }
+
+  return false;
+}
+
+static bool diagnoseDisallowedImplicitIntegerConversion(const ExprAST *sourceExpr,
+                                                        llvm::Value *sourceValue,
+                                                        llvm::Type *targetType,
+                                                        std::string_view targetTypeName,
+                                                        std::string_view contextDescription) {
+  if (!sourceExpr || !sourceValue || !targetType)
+    return false;
+
+  if (!requiresExplicitCastForIntegerConversion(sourceExpr,
+                                                sourceValue->getType(),
+                                                sourceExpr->getTypeName(),
+                                                targetType,
+                                                targetTypeName))
+    return false;
+
+  std::string cleanSource = sanitizeBaseTypeName(sourceExpr->getTypeName());
+  if (cleanSource.empty())
+    cleanSource = describeTypeForDiagnostic(sourceValue->getType());
+
+  std::string cleanTarget = sanitizeBaseTypeName(std::string(targetTypeName));
+  if (cleanTarget.empty())
+    cleanTarget = describeTypeForDiagnostic(targetType);
+
+  std::string message = "Cannot implicitly convert '" + cleanSource +
+                        "' to '" + cleanTarget + "'";
+  if (!contextDescription.empty()) {
+    message += " in ";
+    message.append(contextDescription);
+  }
+  message += "; explicit cast required";
+
+  LogErrorV(message.c_str());
+  return true;
 }
 
 // Type conversion helper
@@ -2722,6 +2832,8 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
+            if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
+              return nullptr;
             R = castToType(R, ActualLLVMType);
             Builder->CreateStore(R, Ptr);
             updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
@@ -2738,6 +2850,9 @@ llvm::Value *BinaryExprAST::codegen() {
           }
           // Get type name for proper range checking
           const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName());
+          std::string targetTypeName = info && !info->typeName.empty() ? info->typeName : LHSE->getTypeName();
+          if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, VarType, targetTypeName, "assignment to '" + LHSE->getName() + "'"))
+            return nullptr;
     if (info && !info->typeName.empty()) {
       R = castToType(R, VarType, info->typeName);
     } else {
@@ -2758,6 +2873,8 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
+            if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
+              return nullptr;
             R = castToType(R, ActualLLVMType);
             Builder->CreateStore(R, Ptr);
             updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
@@ -2774,6 +2891,9 @@ llvm::Value *BinaryExprAST::codegen() {
           }
           // Get type name for proper range checking
           const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName());
+          std::string targetTypeName = info && !info->typeName.empty() ? info->typeName : LHSE->getTypeName();
+          if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, VarType, targetTypeName, "assignment to '" + LHSE->getName() + "'"))
+            return nullptr;
           if (info && !info->typeName.empty()) {
             R = castToType(R, VarType, info->typeName);
           } else {
@@ -3825,6 +3945,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
           return nullptr;
 
         // Cast and store the value
+        if (diagnoseDisallowedImplicitIntegerConversion(getInitializer(), InitVal, VarType, getType(), "initializer for '" + getName() + "'"))
+          return nullptr;
         InitVal = castToType(InitVal, VarType, getType());
         Builder->CreateStore(InitVal, GV);
 
@@ -3887,6 +4009,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
             return nullptr;
 
           // Cast the initializer to the variable type if needed
+          if (diagnoseDisallowedImplicitIntegerConversion(getInitializer(), InitVal, VarType, getType(), "initializer for '" + getName() + "'"))
+            return nullptr;
           InitVal = castToType(InitVal, VarType, getType());
 
           // Store the initial value
@@ -3984,6 +4108,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
 
         // Cast and store the value
+        if (diagnoseDisallowedImplicitIntegerConversion(getInitializer(), InitVal, VarType, getType(), "initializer for '" + getName() + "'"))
+          return nullptr;
         InitVal = castToType(InitVal, VarType, getType());
         Builder->CreateStore(InitVal, Alloca);
 
@@ -4037,6 +4163,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Cast and store the initial value if present
         if (InitVal) {
+          if (diagnoseDisallowedImplicitIntegerConversion(getInitializer(), InitVal, VarType, getType(), "initializer for '" + getName() + "'"))
+            return nullptr;
           InitVal = castToType(InitVal, VarType, getType());
           Builder->CreateStore(InitVal, Alloca);
         }

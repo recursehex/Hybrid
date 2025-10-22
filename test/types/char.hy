@@ -28,7 +28,7 @@ char toUpper(char c)
 int processChar(char c)
 {
     // Convert char to int for testing
-    int value = c
+    int value = int: c
     return value
 }
 
