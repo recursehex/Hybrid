@@ -4116,7 +4116,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
       Builder->SetInsertPoint(BB);
     } else {
       llvm::BasicBlock &EntryBB = InitFunc->getEntryBlock();
-      Builder->SetInsertPoint(&EntryBB, EntryBB.end());
+      if (llvm::Instruction *Term = EntryBB.getTerminator())
+        Builder->SetInsertPoint(Term);
+      else
+        Builder->SetInsertPoint(&EntryBB, EntryBB.end());
     }
     return InitFunc;
   };
