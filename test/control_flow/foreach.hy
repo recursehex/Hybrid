@@ -8,7 +8,7 @@ int sum_array()
 
     for int n in nums
     {
-        total = total + n
+        total += n
     }
 
     return total
@@ -23,8 +23,8 @@ float avg_array()
     
     for float v in values
     {
-        sum = sum + v
-        count = count + 1
+        sum += v
+        count += 1
     }
     
     return sum / count
@@ -41,7 +41,7 @@ int nested_foreach()
     {
         for int y in inner
         {
-            result = result + (x * y)
+            result += x * y
         }
     }
     
@@ -60,13 +60,33 @@ int foreach_with_break()
         {
             break
         }
-        sum = sum + num
+        sum += num
     }
     
     return sum
+}
+
+// Test 5: Foreach with ref variable mutating the collection
+int foreach_ref_updates()
+{
+    int[] values = [1, 2, 3, 4]
+    
+    for ref int value in values
+    {
+        value += 10
+    }
+    
+    int total = 0
+    for int value in values
+    {
+        total += value
+    }
+    
+    return total
 }
 
 assert sum_array() == 15
 assert avg_array() == 3.0
 assert nested_foreach() == 180
 assert foreach_with_break() == 60
+assert foreach_ref_updates() == 50

@@ -8,7 +8,7 @@ For loops provide flexible iteration with initialization, condition, and step co
 
 ### Basic Syntax
 
-```c
+```cpp
 // Basic for-to loop
 for type variable = initial to limit
 {
@@ -36,7 +36,7 @@ for initial to limit
 
 ### Basic For Loops
 
-```c
+```cpp
 // Forward loop
 for int i = 1 to 10
 {
@@ -67,7 +67,7 @@ for int i = 1 to limit
 
 For loops without variable declarations use internal counters:
 
-```c
+```cpp
 // Anonymous counter
 for 0 to 5
 {
@@ -124,7 +124,7 @@ for int i = 0 to 15 by 2 + 1
 
 Advanced step operations using mathematical operators:
 
-```c
+```cpp
 // Multiplication step
 for int i = 1 to 100 by * 2
 {
@@ -155,7 +155,7 @@ for int i = 17 to 1 by % 5
 
 Custom conditions for precise loop control:
 
-```c
+```cpp
 // Less than (exclusive upper bound)
 int size = 5
 for int i = 0 to i < size
@@ -193,7 +193,7 @@ for int i = 0 to i < 20 by 3
 
 Full support for float and double types:
 
-```c
+```cpp
 // Basic float loop
 for float f = 0.0 to 1.0 by 0.1
 {
@@ -235,7 +235,7 @@ for float f = 0.0 to f < 1.0 by 0.2
 
 For loops can be nested with other loop types:
 
-```c
+```cpp
 // Nested for loops
 for int i = 1 to 3
 {
@@ -271,7 +271,7 @@ for int i = 0 to 1
 
 Control flow statements work in for loops:
 
-```c
+```cpp
 // Break example
 for int i = 1 to 10
 {
@@ -318,12 +318,18 @@ for type variable in collection
 
 ### Examples
 
-```c
+```cpp
 // Iterate over an array
 int[] numbers = [1, 2, 3]
 for int num in numbers
 {
     sum += num
+}
+
+// Mutate elements in-place with ref
+for ref int value in numbers
+{
+    value += 10
 }
 
 // Process each element
@@ -367,7 +373,7 @@ for int i in outerList
 - The loop variable is scoped to the loop body
 - The loop variable type must match the collection element type
 - Arrays are automatically sized based on their initialization
-- The loop variable is a copy of the array element
+- The loop variable is a copy of the array element unless `ref` is used (e.g. `for ref int x in array`)
 
 ## Implementation Details
 
@@ -375,7 +381,7 @@ for int i in outerList
 - Block statements create new scopes for local variables
 - Control flow statements can be nested to any depth
 - LLVM IR uses phi nodes and basic blocks for control flow
-- Foreach loops use internal counters and array indexing for iteration
+- Foreach loops use internal counters and array indexing for iteration, storing pointers when `ref` loop variables are used so element mutations update the source array
 - For loops create separate AST nodes (`ForLoopStmtAST`) from foreach loops (`ForEachStmtAST`)
 - For loops automatically detect increment vs decrement based on initial and limit values
 - Anonymous for loops generate internal variable names (`__anon_loop_var_N`)

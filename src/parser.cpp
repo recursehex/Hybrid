@@ -1266,6 +1266,14 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   // Skip newlines after 'for'
   while (CurTok == tok_newline)
     getNextToken();
+
+  bool isRef = false;
+  if (CurTok == tok_ref) {
+    isRef = true;
+    getNextToken(); // eat 'ref'
+    while (CurTok == tok_newline)
+      getNextToken();
+  }
   
   // Parse type
   if (!IsBuiltInType()) {
@@ -1319,7 +1327,9 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
     return nullptr;
   }
 
-  return std::make_unique<ForEachStmtAST>(Type, VarName, std::move(Collection), std::move(Body));
+  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+
+  return std::make_unique<ForEachStmtAST>(std::move(declInfo), VarName, std::move(Collection), std::move(Body));
 }
 
 /// usestmt ::= 'use' identifier
@@ -1809,9 +1819,21 @@ std::unique_ptr<StmtAST> ParseForStatement() {
   // Skip newlines after 'for'
   while (CurTok == tok_newline)
     getNextToken();
-  
+
+  bool isRef = false;
+  if (CurTok == tok_ref) {
+    isRef = true;
+    getNextToken(); // eat 'ref'
+    while (CurTok == tok_newline)
+      getNextToken();
+  }
+
   // Check if it's a type or something else
   bool hasType = IsBuiltInType();
+  if (!hasType && isRef) {
+    LogError("Expected type after 'ref' in foreach loop");
+    return nullptr;
+  }
   
   if (hasType) {
     std::string type = IdentifierStr;
@@ -1853,8 +1875,15 @@ std::unique_ptr<StmtAST> ParseForStatement() {
           return nullptr;
         }
 
-        return std::make_unique<ForEachStmtAST>(type, varName, std::move(Collection), std::move(Body));
+        TypeInfo declInfo = buildDeclaredTypeInfo(type, isRef);
+        return std::make_unique<ForEachStmtAST>(std::move(declInfo), varName,
+                                                std::move(Collection), std::move(Body));
       } else if (CurTok == '=') {
+        if (isRef) {
+          LogError("ref is not supported for for-to loops");
+          return nullptr;
+        }
+
         // It's a for-to loop, parse it
         getNextToken(); // eat '='
         

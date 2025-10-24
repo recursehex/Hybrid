@@ -252,7 +252,7 @@ Hybrid/
 - Assert statement
     - `assert num == 42`
 - String interpolation
-    - $"Hello, \`name\`!"
+    - ```$"Hello, `name`!"```
 - Nullable types
     - `type?`
 - Nullity operators

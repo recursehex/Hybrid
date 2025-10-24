@@ -129,17 +129,22 @@ public:
 
 /// ForEachStmtAST - Statement class for foreach loops.
 class ForEachStmtAST : public StmtAST {
-  std::string Type;
+  TypeInfo DeclaredType;
   std::string VarName;
   std::unique_ptr<ExprAST> Collection;
   std::unique_ptr<BlockStmtAST> Body;
 
 public:
-  ForEachStmtAST(const std::string &Type, const std::string &VarName,
+  ForEachStmtAST(TypeInfo DeclaredType, const std::string &VarName,
                  std::unique_ptr<ExprAST> Collection,
                  std::unique_ptr<BlockStmtAST> Body)
-      : Type(Type), VarName(VarName), Collection(std::move(Collection)),
+      : DeclaredType(std::move(DeclaredType)), VarName(VarName), Collection(std::move(Collection)),
         Body(std::move(Body)) {}
+
+  const TypeInfo &getTypeInfo() const { return DeclaredType; }
+  const std::string &getTypeName() const { return DeclaredType.typeName; }
+  const std::string &getVarName() const { return VarName; }
+  bool isRef() const { return DeclaredType.declaredRef; }
   
   void print() const;
   llvm::Value *codegen() override;

@@ -900,7 +900,9 @@ llvm::StructType *getArrayStructType(llvm::Type *ElementType, unsigned rank) {
 
 // Add print method for debugging
 void ForEachStmtAST::print() const {
-  std::cout << "Parsed a foreach loop: for " << Type << " " << VarName << " in <expression>" << std::endl;
+  std::cout << "Parsed a foreach loop: for "
+            << (isRef() ? "ref " : "") << getTypeName() << " " << VarName
+            << " in <expression>" << std::endl;
 }
 
 void ForLoopStmtAST::print() const {
@@ -3022,33 +3024,66 @@ llvm::Value *BinaryExprAST::codegen() {
     // Compound assignment operators: a += b is equivalent to a = a + b
     if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
       // Simple variable compound assignment
-      llvm::Value *Variable = NamedValues[LHSE->getName()];
+      const std::string &varName = LHSE->getName();
+      llvm::Value *Variable = NamedValues[varName];
+      bool isLocal = true;
       if (!Variable) {
-        Variable = GlobalValues[LHSE->getName()];
+        Variable = GlobalValues[varName];
+        isLocal = false;
         if (!Variable)
           return LogErrorV("Unknown variable name for compound assignment");
       }
-      
-      // Load current value
-      llvm::Value *CurrentVal;
-      if (NamedValues[LHSE->getName()]) {
-        // Local variable - alloca
+
+      const TypeInfo *info = lookupTypeInfo(varName);
+      std::string lhsPromoteType;
+      if (info)
+        lhsPromoteType = typeNameFromInfo(*info);
+      else
+        lhsPromoteType = LHSE->getTypeName();
+
+      bool isAlias = info && info->isAlias();
+      llvm::Value *StoragePtr = nullptr;   // Points to the actual value for alias variables
+      llvm::Type *ValueType = nullptr;
+      llvm::Value *CurrentVal = nullptr;
+
+      if (isLocal) {
         llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
-        CurrentVal = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, LHSE->getName());
+        if (isAlias) {
+          StoragePtr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (varName + "_ptr").c_str());
+          if (!StoragePtr->getType()->isPointerTy())
+            return LogErrorV("Invalid ref storage for compound assignment");
+          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
+          if (!ValueType)
+            return LogErrorV("Invalid type for ref variable in compound assignment");
+          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
+        } else {
+          ValueType = Alloca->getAllocatedType();
+          CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
+        }
       } else {
-        // Global variable
         llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(Variable);
-        CurrentVal = Builder->CreateLoad(GV->getValueType(), Variable, LHSE->getName());
+        if (isAlias) {
+          StoragePtr = Builder->CreateLoad(GV->getValueType(), Variable, (varName + "_ptr").c_str());
+          if (!StoragePtr->getType()->isPointerTy())
+            return LogErrorV("Invalid ref storage for compound assignment");
+          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
+          if (!ValueType)
+            return LogErrorV("Invalid type for ref variable in compound assignment");
+          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
+        } else {
+          ValueType = GV->getValueType();
+          CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
+        }
       }
-      
+
+      if (!CurrentVal || !ValueType)
+        return LogErrorV("Failed to load value for compound assignment");
+
       // Perform the operation
       llvm::Value *Result;
       char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
       
       // Promote types for the operation
-      std::string lhsPromoteType;
-      if (const TypeInfo *info = lookupTypeInfo(LHSE->getName()))
-        lhsPromoteType = typeNameFromInfo(*info);
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
@@ -3098,8 +3133,21 @@ llvm::Value *BinaryExprAST::codegen() {
           return LogErrorV("Unknown compound assignment operator");
       }
       
-      // Store the result back
-      Builder->CreateStore(Result, Variable);
+      // Cast result back to the original storage type if needed
+      llvm::Value *ResultToStore = Result;
+      if (ResultToStore->getType() != ValueType) {
+        std::string castTargetName = !lhsPromoteType.empty() ? lhsPromoteType : LHSE->getTypeName();
+        ResultToStore = castToType(ResultToStore, ValueType, castTargetName);
+        if (!ResultToStore)
+          return nullptr;
+      }
+
+      // Store the result back to the correct destination
+      if (isAlias) {
+        Builder->CreateStore(ResultToStore, StoragePtr);
+      } else {
+        Builder->CreateStore(ResultToStore, Variable);
+      }
       // Return a void value to indicate this is a statement, not an expression
       setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -4220,16 +4268,18 @@ llvm::Value *ExpressionStmtAST::codegen() {
 // Generate code for for each statements
 llvm::Value *ForEachStmtAST::codegen() {
   // Get the element type from the foreach declaration
-  llvm::Type *ElemType = getTypeFromString(Type);
+  const std::string &TypeName = getTypeName();
+  llvm::Type *ElemType = getTypeFromString(TypeName);
   if (!ElemType)
     return LogErrorV("Unknown element type in foreach loop");
 
   llvm::Type *SourceElemType = ElemType;
+  bool DeclaredRef = isRef();
 
   // Get the collection (array) to iterate over
   llvm::Value *CollectionVal = nullptr;
   if (auto *ArrayLiteral = dynamic_cast<ArrayExprAST*>(Collection.get())) {
-    CollectionVal = ArrayLiteral->codegen_with_element_target(ElemType, Type);
+    CollectionVal = ArrayLiteral->codegen_with_element_target(ElemType, TypeName);
   } else {
     CollectionVal = Collection->codegen();
     if (!CollectionVal)
@@ -4299,7 +4349,13 @@ llvm::Value *ForEachStmtAST::codegen() {
   Builder->CreateStore(llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)), CounterAlloca);
   
   // Create an alloca for the loop variable
-  llvm::AllocaInst *VarAlloca = Builder->CreateAlloca(ElemType, nullptr, VarName);
+  llvm::AllocaInst *VarAlloca = nullptr;
+  if (DeclaredRef) {
+    llvm::PointerType *AliasPtrType = llvm::PointerType::get(*TheContext, 0);
+    VarAlloca = Builder->CreateAlloca(AliasPtrType, nullptr, VarName);
+  } else {
+    VarAlloca = Builder->CreateAlloca(ElemType, nullptr, VarName);
+  }
   
   // Jump to the condition check
   Builder->CreateBr(CondBB);
@@ -4315,22 +4371,42 @@ llvm::Value *ForEachStmtAST::codegen() {
   LoopBB->insertInto(TheFunction);
   Builder->SetInsertPoint(LoopBB);
   
-  // Load the current array element and store it in the loop variable
+  // Load or bind the current array element and store it in the loop variable
   llvm::Value *ElemPtr = Builder->CreateGEP(SourceElemType, ArrayPtr, CounterVal, "elemptr");
-  llvm::Value *ElemVal = Builder->CreateLoad(SourceElemType, ElemPtr, "elemval");
+  if (DeclaredRef) {
+    if (SourceElemType != ElemType)
+      return LogErrorV("ref foreach variable type must match collection element type");
 
-  llvm::Value *StoreVal = ElemVal;
-  if (ElemVal->getType() != ElemType) {
-    StoreVal = castToType(ElemVal, ElemType, Type);
-    if (!StoreVal)
-      return nullptr;
+    llvm::Value *PtrForStore = ElemPtr;
+    if (PtrForStore->getType() != VarAlloca->getAllocatedType())
+      PtrForStore = Builder->CreateBitCast(PtrForStore, VarAlloca->getAllocatedType(), "elemref.ptrcast");
+    Builder->CreateStore(PtrForStore, VarAlloca);
+  } else {
+    llvm::Value *ElemVal = Builder->CreateLoad(SourceElemType, ElemPtr, "elemval");
+
+    llvm::Value *StoreVal = ElemVal;
+    if (ElemVal->getType() != ElemType) {
+      StoreVal = castToType(ElemVal, ElemType, TypeName);
+      if (!StoreVal)
+        return nullptr;
+    }
+
+    Builder->CreateStore(StoreVal, VarAlloca);
   }
-
-  Builder->CreateStore(StoreVal, VarAlloca);
   
   // Add the loop variable to the symbol table
   llvm::Value *OldVal = NamedValues[VarName];
   NamedValues[VarName] = VarAlloca;
+
+  std::optional<TypeInfo> OldTypeInfo;
+  if (const TypeInfo *ExistingInfo = lookupLocalTypeInfo(VarName))
+    OldTypeInfo = *ExistingInfo;
+
+  if (DeclaredRef) {
+    rememberLocalType(VarName, runtimeTypeFrom(getTypeInfo(), RefStorageClass::RefAlias, true));
+  } else {
+    rememberLocalType(VarName, getTypeInfo());
+  }
   
   // Push the exit and continue blocks for break/skip statements
   LoopExitBlocks.push_back(AfterBB);
@@ -4349,6 +4425,10 @@ llvm::Value *ForEachStmtAST::codegen() {
       NamedValues[VarName] = OldVal;
     else
       NamedValues.erase(VarName);
+    if (OldTypeInfo)
+      rememberLocalType(VarName, *OldTypeInfo);
+    else
+      LocalTypes.erase(VarName);
     return nullptr;
   }
   
@@ -4375,6 +4455,10 @@ llvm::Value *ForEachStmtAST::codegen() {
     NamedValues[VarName] = OldVal;
   else
     NamedValues.erase(VarName);
+  if (OldTypeInfo)
+    rememberLocalType(VarName, *OldTypeInfo);
+  else
+    LocalTypes.erase(VarName);
   
   // Return a dummy value
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
