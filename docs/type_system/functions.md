@@ -114,6 +114,31 @@ float average(float[] values)
 }
 ```
 
+## Function Overloading
+
+Hybrid supports function overloading for both free functions and class methods. Multiple functions may share the same name as long as their signatures differ by parameter types, `ref` qualifiers, or return type/`ref` return modifiers.
+
+```cpp
+int    distance(int x1, int y1, int x2, int y2) { /* ... */ }
+double distance(double x1, double y1, double x2, double y2) { /* ... */ }
+
+int main()
+{
+    int d = distance(0, 0, 3, 4)                    // picks the int overload
+    double precise = distance(0.0, 0.0, 1.5, 2.0)   // resolves to the double version
+    return d + int: precise
+}
+```
+
+During code generation the compiler records every overload. Call sites resolve to the "best" matching overload using these rules:
+
+- All argument counts must match exactly.
+- `ref` arguments must line up with `ref` parameters.
+- The compiler prefers exact type matches. If multiple overloads remain viable, it considers overloads that require implicit numeric promotions.
+- Ambiguous calls (e.g. two viable overloads requiring the same number of conversions) are rejected with a compile-time error.
+
+Extern declarations and struct constructors participate in the same mechanism, so overloading works consistently across modules and within struct method groups.
+
 ## Return Types
 
 ### Supported Return Types

@@ -4,6 +4,15 @@
 
 Hybrid is a statically-typed programming language that combines elements from multiple language paradigms. It features C-style syntax with mandatory type declarations, automatic memory management via LLVM, and a clean, expressive syntax.
 
+## Program Entry Point
+
+Hybrid programs run through a `main` function defined in the root compilation unit. Two signatures are supported:
+
+- `int main()` - returns an explicit status code. The compiler enforces that all paths set the return value. Returning `0` signals success; any non-zero value propagates to the host process, allowing tests and scripts to detect failures.
+- `void main()` - indicates the program terminates successfully. If execution reaches the end of the function without an explicit `return`, the compiler inserts a `return 0` on your behalf.
+
+Both forms run global initializers and top-level expressions (when present) before executing user code. Pick the signature that matches your intent: use `void main()` for scripts that never fail, and `int main()` when downstream tooling should observe failure exit codes.
+
 ## Basic Syntax
 
 ### Comments

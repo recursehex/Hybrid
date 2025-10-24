@@ -22,7 +22,7 @@ Additional conveniences:
 - Integer literals are automatically range-checked during lexing; values that would overflow 64 bits trigger a diagnostic.
 - During code generation a literal adopts the type of its context. For example `0xFF` stored in a `byte` remains 8 bits, while the same literal in a `long` is sign-extended to 64 bits.
 
-See [Type System – Literal Type Inference](type-system.md#context-aware-literal-type-inference) for how Hybrid narrows or widens literals based on surrounding expressions.
+See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for how Hybrid narrows or widens literals based on surrounding expressions.
 
 ## Operator Precedence
 

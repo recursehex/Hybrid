@@ -120,7 +120,7 @@ triangle[2][0] = 42
 ```
 
 - Jagged arrays are ideal for ragged data because each row can be resized independently.
-- Indexing uses one set of brackets per dimension (`triangle[row][column]`), mirroring their “array of arrays” structure.
+- Indexing uses one set of brackets per dimension (`triangle[row][column]`), mirroring their "array of arrays" structure.
 - Bounds checking occurs per access: first when you index into the outer array, then again when you index the chosen inner array.
 
 Hybrid lets you mix shapes when you nest arrays more deeply. For example, `int[][,,]` describes an array whose elements are rectangular 3D arrays, while `int[,][]` would be a rectangular 2D shell whose elements are jagged arrays.

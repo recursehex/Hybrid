@@ -96,7 +96,7 @@ The test suite compiles and executes generated LLVM IR:
 
 - **Automatic compilation**: If `clang` is available, tests are compiled to native binaries
 - **Runtime library**: A temporary runtime library is created with support functions (e.g. `print()`)
-- **Execution verification**: Tests are run and exit codes are checked
+- **Execution verification**: Tests are run and exit codes are checked. A Hybrid program that returns a non-zero status from `int main()` is reported as a failing test.
 - **Assert detection**: Runtime aborts (exit code 134/SIGABRT) are detected as test failures
 - **Cleanup**: All temporary files are automatically removed
 
@@ -120,7 +120,7 @@ Additionally, runtime errors are detected:
 | Exit Code | Description |
 |-----------|-------------|
 | `134` (SIGABRT) | Runtime abort (e.g. from `assert` statements) |
-| Non-zero | Other runtime errors |
+| Non-zero | Program returned a non-zero status from `int main()` or raised another runtime error |
 
 ### Test Classification
 
