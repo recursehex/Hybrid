@@ -14,10 +14,22 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
+
+struct FunctionOverload {
+  std::string mangledName;
+  TypeInfo returnType;
+  bool returnsByRef = false;
+  std::vector<TypeInfo> parameterTypes;
+  std::vector<bool> parameterIsRef;
+  bool isUnsafe = false;
+  bool isExtern = false;
+  llvm::Function *function = nullptr;
+};
 
 /// CodegenContext stores all mutable IR-generation state for a compiler
 /// session. It replaces the previous collection of global variables used by
@@ -35,6 +47,8 @@ struct CodegenContext {
   std::map<std::string, std::vector<int64_t>> arraySizes;
   std::map<std::string, std::vector<std::pair<std::string, unsigned>>> structFieldIndices;
   std::map<std::string, std::map<std::string, std::string>> structFieldTypes;
+
+  std::map<std::string, std::vector<FunctionOverload>> functionOverloads;
 
   std::vector<llvm::BasicBlock *> loopExitBlocks;
   std::vector<llvm::BasicBlock *> loopContinueBlocks;
@@ -55,6 +69,7 @@ inline void CodegenContext::reset() {
   arraySizes.clear();
   structFieldIndices.clear();
   structFieldTypes.clear();
+  functionOverloads.clear();
   loopExitBlocks.clear();
   loopContinueBlocks.clear();
   nonNullFactsStack.clear();

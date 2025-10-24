@@ -32,5 +32,5 @@ int main()
 {
     int result = test_nested_loops()
     assert result == 13
-    return result
+    return 0
 }

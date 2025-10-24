@@ -136,5 +136,5 @@ int main()
     assert result5 == 1
     assert result6 == 20
     assert result1 + result2 + result3 + result4 + result5 + result6 == 102
-    return result1 + result2 + result3 + result4 + result5 + result6
+    return 0
 }

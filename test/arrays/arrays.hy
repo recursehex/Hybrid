@@ -207,6 +207,5 @@ int main()
     // Test type inference and compatibility
     test_type_inference()
 
-    // Return aggregate result
-    return global_sum + local_result + sum_before + sum_after + complex_result
+    return 0
 }

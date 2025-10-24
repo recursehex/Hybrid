@@ -29,5 +29,5 @@ int main()
     assert sum == 8
     assert expr_result == 15
     assert sum + expr_result == 23
-    return sum + expr_result
+    return 0
 }

@@ -609,6 +609,8 @@ class PrototypeAST {
   std::vector<Parameter> Args;
   bool IsUnsafe;
   bool ReturnsByRef;
+  bool IsExtern = false;
+  mutable std::string MangledName;
 
 public:
   PrototypeAST(TypeInfo ReturnTypeInfo, const std::string &Name,
@@ -621,6 +623,10 @@ public:
   const std::vector<Parameter> &getArgs() const { return Args; }
   bool isUnsafe() const { return IsUnsafe; }
   bool returnsByRef() const { return ReturnsByRef; }
+  bool isExtern() const { return IsExtern; }
+  void markAsExtern() { IsExtern = true; }
+
+  const std::string &getMangledName() const;
 
   llvm::Function *codegen();
 };

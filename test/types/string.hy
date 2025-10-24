@@ -47,5 +47,5 @@ int main()
 {
     int result = testStringOps()
     assert result == 1
-    return result
+    return 0
 }

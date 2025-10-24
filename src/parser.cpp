@@ -1190,7 +1190,10 @@ std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 /// external ::= 'extern' prototype
 std::unique_ptr<PrototypeAST> ParseExtern() {
   getNextToken(); // eat extern.
-  return ParsePrototype();
+  auto Proto = ParsePrototype();
+  if (Proto)
+    Proto->markAsExtern();
+  return Proto;
 }
 
 /// returnstmt ::= 'return' ['ref'] expression?

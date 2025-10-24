@@ -23,6 +23,9 @@
 #include <cmath>
 #include <climits>
 #include <map>
+#include <sstream>
+#include <iomanip>
+#include <cstdio>
 #include <ranges>
 #include <string_view>
 #include <optional>
@@ -266,6 +269,123 @@ static std::string typeNameFromInfo(const TypeInfo &info) {
   if (info.isNullable)
     result = ensureOuterNullable(result);
   return result;
+}
+
+static std::string sanitizeForMangle(const std::string &input) {
+  std::string result;
+  result.reserve(input.size() * 3);
+  for (unsigned char c : input) {
+    if (std::isalnum(c) || c == '_') {
+      result.push_back(static_cast<char>(c));
+    } else {
+      char buffer[4];
+      std::snprintf(buffer, sizeof(buffer), "%02X", c);
+      result.push_back('_');
+      result.append(buffer, 2);
+    }
+  }
+  return result;
+}
+
+static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
+  return lhs.typeName == rhs.typeName &&
+         lhs.pointerDepth == rhs.pointerDepth &&
+         lhs.isArray == rhs.isArray &&
+         lhs.arrayDepth == rhs.arrayDepth &&
+         lhs.arrayRanks == rhs.arrayRanks &&
+         lhs.isMultidimensional == rhs.isMultidimensional &&
+         lhs.isNullable == rhs.isNullable &&
+         lhs.elementNullable == rhs.elementNullable &&
+         lhs.refStorage == rhs.refStorage &&
+         lhs.isMutable == rhs.isMutable &&
+         lhs.declaredRef == rhs.declaredRef;
+}
+
+static std::vector<TypeInfo> gatherParamTypes(const std::vector<Parameter> &params) {
+  std::vector<TypeInfo> types;
+  types.reserve(params.size());
+  for (const auto &param : params)
+    types.push_back(param.DeclaredType);
+  return types;
+}
+
+static std::vector<bool> gatherParamRefFlags(const std::vector<Parameter> &params) {
+  std::vector<bool> flags;
+  flags.reserve(params.size());
+  for (const auto &param : params)
+    flags.push_back(param.IsRef);
+  return flags;
+}
+
+static FunctionOverload *findRegisteredOverload(const std::string &name,
+                                                const TypeInfo &returnType,
+                                                bool returnsByRef,
+                                                const std::vector<TypeInfo> &paramTypes,
+                                                const std::vector<bool> &paramIsRef) {
+  auto it = CG.functionOverloads.find(name);
+  if (it == CG.functionOverloads.end())
+    return nullptr;
+
+  for (auto &overload : it->second) {
+    if (!typeInfoEquals(overload.returnType, returnType))
+      continue;
+    if (overload.returnsByRef != returnsByRef)
+      continue;
+    if (overload.parameterTypes.size() != paramTypes.size())
+      continue;
+
+    bool matches = true;
+    for (size_t i = 0; i < paramTypes.size(); ++i) {
+      if (overload.parameterIsRef[i] != paramIsRef[i] ||
+          !typeInfoEquals(overload.parameterTypes[i], paramTypes[i])) {
+        matches = false;
+        break;
+      }
+    }
+
+    if (matches)
+      return &overload;
+  }
+
+  return nullptr;
+}
+
+static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
+                                                  const std::string &mangledName) {
+  std::vector<TypeInfo> paramTypes = gatherParamTypes(proto.getArgs());
+  std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
+
+  FunctionOverload *existing = findRegisteredOverload(
+      proto.getName(), proto.getReturnTypeInfo(), proto.returnsByRef(),
+      paramTypes, paramIsRef);
+
+  if (existing) {
+    if (existing->mangledName.empty())
+      existing->mangledName = mangledName;
+    existing->isUnsafe = proto.isUnsafe();
+    existing->isExtern = proto.isExtern();
+    return *existing;
+  }
+
+  FunctionOverload entry;
+  entry.mangledName = mangledName;
+  entry.returnType = proto.getReturnTypeInfo();
+  entry.returnsByRef = proto.returnsByRef();
+  entry.parameterTypes = std::move(paramTypes);
+  entry.parameterIsRef = std::move(paramIsRef);
+  entry.isUnsafe = proto.isUnsafe();
+  entry.isExtern = proto.isExtern();
+
+  auto &overloads = CG.functionOverloads[proto.getName()];
+  overloads.push_back(std::move(entry));
+  return overloads.back();
+}
+
+static FunctionOverload *lookupFunctionOverload(const PrototypeAST &proto) {
+  std::vector<TypeInfo> paramTypes = gatherParamTypes(proto.getArgs());
+  std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
+  return findRegisteredOverload(proto.getName(), proto.getReturnTypeInfo(),
+                                proto.returnsByRef(), paramTypes, paramIsRef);
 }
 
 struct ParsedTypeDescriptor {
@@ -634,8 +754,18 @@ void InitializeModule() {
   std::vector<llvm::Type*> PrintArgs = {llvm::Type::getInt32Ty(*TheContext)};
   llvm::FunctionType *PrintType = llvm::FunctionType::get(
       llvm::Type::getVoidTy(*TheContext), PrintArgs, false);
-  llvm::Function::Create(PrintType, llvm::Function::ExternalLinkage,
-                        "print", TheModule.get());
+  llvm::Function *PrintFunc = llvm::Function::Create(
+      PrintType, llvm::Function::ExternalLinkage, "print", TheModule.get());
+
+  FunctionOverload printOverload;
+  printOverload.mangledName = "print";
+  printOverload.returnType = makeTypeInfo("void");
+  printOverload.returnsByRef = false;
+  printOverload.parameterTypes.push_back(makeTypeInfo("int"));
+  printOverload.parameterIsRef.push_back(false);
+  printOverload.isExtern = true;
+  printOverload.function = PrintFunc;
+  CG.functionOverloads["print"].push_back(std::move(printOverload));
 }
 
 // Get the LLVM module for printing
@@ -3701,33 +3831,118 @@ llvm::Value *CallExprAST::codegen() {
     return StructAlloca;
   }
   
-  // Look up the name in the global module table
-  llvm::Function *CalleeF = TheModule->getFunction(getCallee());
-  if (!CalleeF)
-    return LogErrorV("Unknown function referenced");
+  auto overloadIt = CG.functionOverloads.find(getCallee());
+  if (overloadIt == CG.functionOverloads.end())
+    return LogErrorV(("Unknown function referenced: " + getCallee()).c_str());
 
-  // If argument mismatch error
-  if (CalleeF->arg_size() != getArgs().size())
-    return LogErrorV("Incorrect # arguments passed");
+  std::vector<bool> ArgIsRef;
+  ArgIsRef.reserve(getArgs().size());
+  std::vector<llvm::Value *> ArgValues;
+  ArgValues.reserve(getArgs().size());
 
-  std::vector<llvm::Value *> ArgsV;
-  unsigned i = 0;
-  for (auto &Arg : CalleeF->args()) {
-    llvm::Value *ArgVal = getArgs()[i]->codegen();
-    if (!ArgVal)
+  for (const auto &ArgExpr : getArgs()) {
+    bool isRef = dynamic_cast<RefExprAST *>(ArgExpr.get()) != nullptr;
+    ArgIsRef.push_back(isRef);
+    llvm::Value *Value = ArgExpr->codegen();
+    if (!Value)
       return nullptr;
-
-    // Cast the argument to the expected parameter type
-    ArgVal = castToType(ArgVal, Arg.getType());
-    ArgsV.push_back(ArgVal);
-    ++i;
+    ArgValues.push_back(Value);
   }
 
-  // Don't assign a name to void function calls
-  if (CalleeF->getReturnType()->isVoidTy())
-    return Builder->CreateCall(CalleeF, ArgsV);
-  else
-    return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
+  struct CandidateResult {
+    FunctionOverload *overload = nullptr;
+    unsigned conversions = 0;
+  };
+
+  std::vector<CandidateResult> viable;
+  viable.reserve(overloadIt->second.size());
+
+  for (auto &overload : overloadIt->second) {
+    if (overload.parameterTypes.size() != ArgValues.size())
+      continue;
+
+    llvm::Function *CandidateFunc = overload.function;
+    if (!CandidateFunc)
+      CandidateFunc = TheModule->getFunction(overload.mangledName);
+    if (!CandidateFunc)
+      continue;
+    overload.function = CandidateFunc;
+
+    bool compatible = true;
+    unsigned conversions = 0;
+
+    for (size_t idx = 0; idx < ArgValues.size(); ++idx) {
+      if (overload.parameterIsRef[idx] != ArgIsRef[idx]) {
+        compatible = false;
+        break;
+      }
+
+      llvm::Type *ExpectedType = CandidateFunc->getFunctionType()->getParamType(idx);
+      llvm::Type *ActualType = ArgValues[idx]->getType();
+
+      if (ActualType == ExpectedType)
+        continue;
+
+      if (areTypesCompatible(ActualType, ExpectedType)) {
+        ++conversions;
+        continue;
+      }
+
+      compatible = false;
+      break;
+    }
+
+    if (compatible)
+      viable.push_back({&overload, conversions});
+  }
+
+  if (viable.empty())
+    return LogErrorV(("No matching overload found for call to '" + getCallee() + "'").c_str());
+
+  auto bestIt = std::min_element(
+      viable.begin(), viable.end(),
+      [](const CandidateResult &lhs, const CandidateResult &rhs) {
+        return lhs.conversions < rhs.conversions;
+      });
+
+  unsigned bestConversions = bestIt->conversions;
+  unsigned bestCount = static_cast<unsigned>(std::count_if(
+      viable.begin(), viable.end(),
+      [bestConversions](const CandidateResult &candidate) {
+        return candidate.conversions == bestConversions;
+      }));
+
+  if (bestCount > 1)
+    return LogErrorV(("Ambiguous call to '" + getCallee() + "'").c_str());
+
+  FunctionOverload *chosen = bestIt->overload;
+  llvm::Function *CalleeF = chosen->function;
+  if (!CalleeF)
+    return LogErrorV(("Internal error: overload for '" + getCallee() + "' lacks function definition").c_str());
+
+  std::vector<llvm::Value *> CallArgs;
+  CallArgs.reserve(ArgValues.size());
+
+  for (size_t idx = 0; idx < ArgValues.size(); ++idx) {
+    llvm::Value *ArgVal = ArgValues[idx];
+    llvm::Type *ExpectedType = CalleeF->getFunctionType()->getParamType(idx);
+    if (!chosen->parameterIsRef[idx]) {
+      const std::string targetTypeName = typeNameFromInfo(chosen->parameterTypes[idx]);
+      ArgVal = castToType(ArgVal, ExpectedType, targetTypeName);
+    }
+    CallArgs.push_back(ArgVal);
+  }
+
+  llvm::Value *CallValue = nullptr;
+  if (CalleeF->getReturnType()->isVoidTy()) {
+    CallValue = Builder->CreateCall(CalleeF, CallArgs);
+    setTypeName("void");
+  } else {
+    CallValue = Builder->CreateCall(CalleeF, CallArgs, "calltmp");
+    setTypeName(typeNameFromInfo(chosen->returnType));
+  }
+
+  return CallValue;
 }
 
 //===----------------------------------------------------------------------===//
@@ -5037,16 +5252,52 @@ llvm::Value *UnsafeBlockStmtAST::codegen() {
 // Function and Prototype Code Generation
 //===----------------------------------------------------------------------===//
 
+const std::string &PrototypeAST::getMangledName() const {
+  if (!MangledName.empty())
+    return MangledName;
+
+  if (IsExtern || Name.rfind("__", 0) == 0) {
+    MangledName = Name;
+    return MangledName;
+  }
+
+  if (Name == "main") {
+    const bool hasParameters = !Args.empty();
+    const bool returnsVoid = ReturnTypeInfo.typeName == "void" && !returnsByRef();
+    if (!hasParameters && !returnsVoid) {
+      MangledName = Name;
+      return MangledName;
+    }
+  }
+
+  std::string signature;
+  signature.reserve(32 + Args.size() * 16);
+  signature.append("R");
+  signature.push_back(returnsByRef() ? 'R' : 'V');
+  signature.push_back('_');
+  signature.append(sanitizeForMangle(typeNameFromInfo(ReturnTypeInfo)));
+  signature.append("_P");
+  signature.append(std::to_string(Args.size()));
+
+  for (const auto &Param : Args) {
+    signature.push_back('_');
+    signature.push_back(Param.IsRef ? 'R' : 'V');
+    signature.push_back('_');
+    signature.append(sanitizeForMangle(typeNameFromInfo(Param.DeclaredType)));
+  }
+
+  MangledName = Name + "$" + signature;
+  return MangledName;
+}
+
 // Generate code for function prototypes
 llvm::Function *PrototypeAST::codegen() {
-  // Convert parameter types
   std::vector<llvm::Type*> ParamTypes;
+  ParamTypes.reserve(Args.size());
   for (const auto &Param : Args) {
     llvm::Type *ParamType = getTypeFromString(Param.DeclaredType.typeName);
     if (!ParamType)
       return LogErrorF("Unknown parameter type");
-
-    // If it's a ref parameter, use pointer type
     if (Param.IsRef) {
       ParamTypes.push_back(llvm::PointerType::get(*TheContext, 0));
     } else {
@@ -5054,83 +5305,114 @@ llvm::Function *PrototypeAST::codegen() {
     }
   }
 
-  // Get return type
   llvm::Type *RetType = getTypeFromString(ReturnTypeInfo.typeName);
   if (!RetType)
     return LogErrorF("Unknown return type");
 
-  // If it returns by ref, use pointer type
-  if (returnsByRef()) {
+  if (returnsByRef())
     RetType = llvm::PointerType::get(*TheContext, 0);
-  }
 
-  // Create the function type
   llvm::FunctionType *FT = llvm::FunctionType::get(RetType, ParamTypes, false);
 
-  // Create the function
-  llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, Name, TheModule.get());
+  const std::string &Mangled = getMangledName();
 
-  // Set names for all arguments
+  llvm::Function *F = TheModule->getFunction(Mangled);
+  if (!F) {
+    F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, Mangled, TheModule.get());
+  } else if (F->getFunctionType() != FT) {
+    return LogErrorF("Function redefinition with incompatible signature");
+  }
+
   unsigned Idx = 0;
   for (auto &Arg : F->args())
     Arg.setName(Args[Idx++].Name);
 
+  FunctionOverload &entry = registerFunctionOverload(*this, Mangled);
+  entry.function = F;
+
   return F;
+}
+
+static void ensureVoidMainWrapper(llvm::Function *UserMain) {
+  if (!UserMain)
+    return;
+
+  auto *Int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::Function *EntryFunc = ScriptMainFunction;
+
+  if (!EntryFunc) {
+    auto *MainType = llvm::FunctionType::get(Int32Ty, false);
+    EntryFunc = llvm::Function::Create(MainType, llvm::Function::ExternalLinkage, "main", TheModule.get());
+    ScriptMainFunction = EntryFunc;
+  } else if (EntryFunc->getReturnType() != Int32Ty) {
+    EntryFunc->eraseFromParent();
+    auto *MainType = llvm::FunctionType::get(Int32Ty, false);
+    EntryFunc = llvm::Function::Create(MainType, llvm::Function::ExternalLinkage, "main", TheModule.get());
+    ScriptMainFunction = EntryFunc;
+  }
+
+  EntryFunc->deleteBody();
+  llvm::BasicBlock *EntryBB = llvm::BasicBlock::Create(*TheContext, "entry", EntryFunc);
+  llvm::IRBuilder<> TmpBuilder(*TheContext);
+  TmpBuilder.SetInsertPoint(EntryBB);
+  TmpBuilder.CreateCall(UserMain);
+  TmpBuilder.CreateRet(llvm::ConstantInt::get(Int32Ty, 0));
+  llvm::verifyFunction(*EntryFunc);
+  ScriptMainIsSynthetic = false;
 }
 
 // Generate code for function definitions
 llvm::Function *FunctionAST::codegen() {
-  // First, check for an existing function from a previous 'extern' declaration
-  llvm::Function *TheFunction = TheModule->getFunction(getProto()->getName());
-  
+  const bool isSourceMain = getProto()->getName() == "main";
+  const bool isVoidMain = isSourceMain &&
+                          getProto()->getReturnType() == "void" &&
+                          !getProto()->returnsByRef();
+
+  const std::string &MangledName = getProto()->getMangledName();
+  llvm::Function *TheFunction = TheModule->getFunction(MangledName);
+
   if (!TheFunction)
     TheFunction = getProto()->codegen();
-  
+
   if (!TheFunction)
     return nullptr;
 
-  if (getProto()->getName() == "main" && ScriptMainIsSynthetic &&
+  FunctionOverload *overloadEntry = lookupFunctionOverload(*getProto());
+  if (overloadEntry)
+    overloadEntry->function = TheFunction;
+
+  if (isSourceMain && ScriptMainIsSynthetic &&
       ScriptMainFunction && ScriptMainFunction == TheFunction) {
     TheFunction->deleteBody();
     ScriptMainIsSynthetic = false;
   }
-  
-  // Create a new basic block to start insertion into
+
   llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
   Builder->SetInsertPoint(BB);
-  
-  // Record the function arguments in the NamedValues map
+
   NamedValues.clear();
-  LocalTypes.clear();  // Clear local types for new function
+  LocalTypes.clear();
   NonNullFacts.clear();
   ensureBaseNonNullScope();
-  // Clear local array sizes, but keep global ones
-  for (auto it = ArraySizes.begin(); it != ArraySizes.end(); ) {
+
+  for (auto it = ArraySizes.begin(); it != ArraySizes.end();) {
     if (NamedValues.count(it->first) || LocalTypes.count(it->first)) {
       it = ArraySizes.erase(it);
     } else {
       ++it;
     }
   }
-  
-  // Get parameter info from the prototype
+
   const auto &Params = getProto()->getArgs();
   size_t i = 0;
 
   for (auto &Arg : TheFunction->args()) {
-    // Check if this is a ref parameter
     bool isRefParam = (i < Params.size() && Params[i].IsRef);
 
-    // Create an alloca for this variable
     llvm::AllocaInst *Alloca = Builder->CreateAlloca(Arg.getType(), nullptr, Arg.getName());
-
-    // Store the initial value into the alloca
     Builder->CreateStore(&Arg, Alloca);
-
-    // Add arguments to variable symbol table
     NamedValues[std::string(Arg.getName())] = Alloca;
 
-    // Track the type of the parameter
     if (i < Params.size()) {
       if (isRefParam) {
         TypeInfo paramInfo = Params[i].DeclaredType;
@@ -5141,12 +5423,11 @@ llvm::Function *FunctionAST::codegen() {
         rememberLocalType(std::string(Arg.getName()), Params[i].DeclaredType);
       }
     }
-    i++;
+    ++i;
   }
-  
-  // Emit global variable initializers once at the beginning of main()
+
   static bool InitializedGlobalsEmitted = false;
-  if (!InitializedGlobalsEmitted && TheFunction->getName() == "main") {
+  if (!InitializedGlobalsEmitted && isSourceMain) {
     if (auto *InitFunc = TheModule->getFunction("__anon_var_decl")) {
       if (!InitFunc->empty()) {
         Builder->CreateCall(InitFunc);
@@ -5156,25 +5437,20 @@ llvm::Function *FunctionAST::codegen() {
   }
 
   static bool TopLevelExecEmitted = false;
-  if (!TopLevelExecEmitted && TheFunction->getName() == "main" &&
-      TopLevelExecFunction) {
+  if (!TopLevelExecEmitted && isSourceMain && TopLevelExecFunction) {
     Builder->CreateCall(TopLevelExecFunction);
     TopLevelExecEmitted = true;
   }
 
-  // Generate code for the function body
   if (getBody()->codegen()) {
-    // Finish off the function if no explicit return
     if (!Builder->GetInsertBlock()->getTerminator()) {
       if (TheFunction->getReturnType()->isVoidTy()) {
         Builder->CreateRetVoid();
       } else {
-        // For non-void functions, return a default value
         Builder->CreateRet(llvm::Constant::getNullValue(TheFunction->getReturnType()));
       }
     }
-    
-    // Validate the generated code, checking for consistency
+
     llvm::verifyFunction(*TheFunction);
 
     Builder->ClearInsertionPoint();
@@ -5182,11 +5458,15 @@ llvm::Function *FunctionAST::codegen() {
     LocalTypes.clear();
     NonNullFacts.clear();
 
+    if (isVoidMain)
+      ensureVoidMainWrapper(TheFunction);
+
     return TheFunction;
   }
-  
-  // Error reading body, remove function
+
   TheFunction->eraseFromParent();
+  if (overloadEntry)
+    overloadEntry->function = nullptr;
   Builder->ClearInsertionPoint();
   NonNullFacts.clear();
   return nullptr;

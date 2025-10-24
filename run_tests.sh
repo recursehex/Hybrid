@@ -167,7 +167,6 @@ run_test() {
                     set -e  # Re-enable exit on error
 
                     # Check for runtime abort (assert failures): exit code 134 = SIGABRT
-                    # Other exit codes are normal program returns, not errors
                     if [ $runtime_exit_code -eq 134 ]; then
                         has_errors=1
                     fi
@@ -175,6 +174,39 @@ run_test() {
 
                 # Clean up temporary files
                 rm -f "$temp_ir" "$temp_bin"
+            fi
+        fi
+    fi
+
+    # For fail/error tests that compiled cleanly, run the generated program to
+    # detect failure modes like non-zero exit codes.
+    if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+        if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
+            if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
+                local module_start=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
+                if [ -n "$module_start" ]; then
+                    module_start=$((module_start + 1))
+                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated")
+
+                    local temp_ir=$(mktemp /tmp/hybrid_test_fail.XXXXXX)
+                    mv "$temp_ir" "${temp_ir}.ll"
+                    temp_ir="${temp_ir}.ll"
+                    local temp_bin=$(mktemp /tmp/hybrid_bin_fail.XXXXXX)
+                    echo "$clean_ir" > "$temp_ir"
+
+                    if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                        set +e
+                        runtime_output=$("$temp_bin" 2>&1)
+                        runtime_exit_code=$?
+                        set -e
+
+                        if [ $runtime_exit_code -ne 0 ]; then
+                            has_errors=1
+                        fi
+                    fi
+
+                    rm -f "$temp_ir" "$temp_bin"
+                fi
             fi
         fi
     fi

@@ -50,5 +50,5 @@ int main()
 {
     int result = testCharOps()
     assert result == 65
-    return result
+    return 0
 }
