@@ -17,6 +17,53 @@ TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
 
+# Progress tracking (used for failures-only mode)
+PROGRESS_BAR_WIDTH=40
+PROGRESS_COUNT=0
+PROGRESS_TOTAL=0
+PROGRESS_VISIBLE=0
+
+ensure_progress_newline() {
+    if [ $PROGRESS_VISIBLE -eq 1 ]; then
+        printf "\n"
+        PROGRESS_VISIBLE=0
+    fi
+}
+
+update_progress_display() {
+    if [ $FAILURES_ONLY -ne 1 ]; then
+        return
+    fi
+    if [ $PROGRESS_TOTAL -le 0 ]; then
+        return
+    fi
+
+    if [ $PROGRESS_COUNT -gt $PROGRESS_TOTAL ]; then
+        PROGRESS_COUNT=$PROGRESS_TOTAL
+    fi
+
+    local completed_chars=$((PROGRESS_COUNT * PROGRESS_BAR_WIDTH / PROGRESS_TOTAL))
+    local remaining_chars=$((PROGRESS_BAR_WIDTH - completed_chars))
+
+    printf -v hashes '%*s' "$completed_chars" ''
+    hashes=${hashes// /#}
+    printf -v spaces '%*s' "$remaining_chars" ''
+
+    printf "\rProgress: [%s%s] %d/%d" "$hashes" "$spaces" "$PROGRESS_COUNT" "$PROGRESS_TOTAL"
+    PROGRESS_VISIBLE=1
+}
+
+mark_test_completed() {
+    if [ $FAILURES_ONLY -ne 1 ]; then
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        return
+    fi
+
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    PROGRESS_COUNT=$((PROGRESS_COUNT + 1))
+    update_progress_display
+}
+
 # Initialize command line option variables early to avoid unset variable errors
 VERBOSE_MODE=0
 FAILURES_ONLY=0
@@ -240,6 +287,7 @@ run_test() {
     fi
 
     if [ $VERBOSE_MODE -eq 1 ] && [ $should_show_output -eq 1 ]; then
+        ensure_progress_newline
         echo -e "${BLUE}=== Test: $test_name ===${NC}"
         echo "File: $test_file"
         echo "Content:"
@@ -280,6 +328,7 @@ run_test() {
         echo "========================================"
         echo
     elif [ $should_show_output -eq 1 ]; then
+        ensure_progress_newline
         echo -e "${YELLOW}Running test: $test_name${NC}"
         echo "----------------------------------------"
         
@@ -309,7 +358,7 @@ run_test() {
         echo
     fi
     
-    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    mark_test_completed
 }
 
 run_multi_unit_tests() {
@@ -318,6 +367,7 @@ run_multi_unit_tests() {
         return
     fi
 
+    ensure_progress_newline
     echo
     echo -e "${BLUE}Multi-unit Compilation Tests${NC}"
     echo "-------------------------------"
@@ -360,6 +410,7 @@ run_multi_unit_tests() {
             fi
         else
             FAILED_TESTS=$((FAILED_TESTS + 1))
+            ensure_progress_newline
             echo -e "${RED}✗ FAILED: $test_name${NC}"
             if [ "$expect" = "pass" ]; then
                 echo -e "${RED}  Expected success but command failed with status $status${NC}"
@@ -372,6 +423,11 @@ run_multi_unit_tests() {
         fi
 
         rm -f "$temp_output"
+
+        if [ $FAILURES_ONLY -eq 1 ]; then
+            PROGRESS_COUNT=$((PROGRESS_COUNT + 1))
+            update_progress_display
+        fi
     done
 }
 
@@ -476,6 +532,8 @@ TOTAL_DISCOVERED_TESTS=$((SINGLE_TEST_COUNT + EFFECTIVE_MULTI_UNIT_TEST_COUNT))
 echo "Found $TOTAL_DISCOVERED_TESTS total tests to run"
 echo
 
+PROGRESS_TOTAL=$TOTAL_DISCOVERED_TESTS
+
 # Run tests
 if [ $VERBOSE_MODE -eq 1 ]; then
     echo "Running tests in verbose mode..."
@@ -489,6 +547,8 @@ done
 if [ $RUN_MULTI_UNIT_TESTS -eq 1 ]; then
     run_multi_unit_tests
 fi
+
+ensure_progress_newline
 
 # Print summary
 echo "==============================="
