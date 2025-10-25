@@ -66,7 +66,7 @@ mark_test_completed() {
 
 # Initialize command line option variables early to avoid unset variable errors
 VERBOSE_MODE=0
-FAILURES_ONLY=0
+FAILURES_ONLY=1
 TEST_PATTERN=""
 RUN_MULTI_UNIT_TESTS=1
 
@@ -444,7 +444,11 @@ while [[ $# -gt 0 ]]; do
             VERBOSE_MODE=1
             shift
             ;;
-        -f|--failures-only)
+        -f|--full)
+            FAILURES_ONLY=0
+            shift
+            ;;
+        --failures-only)
             FAILURES_ONLY=1
             shift
             ;;
@@ -453,17 +457,19 @@ while [[ $# -gt 0 ]]; do
             echo
             echo "Options:"
             echo "  -v, --verbose       Show detailed output for each test"
-            echo "  -f, --failures-only Only show failing tests (hide passing tests)"
+            echo "  -f, --full          Show full output for each test"
+            echo "      --failures-only Show only failing tests (default)"
             echo "  -h, --help          Show this help message"
             echo
             echo "Test Pattern:"
             echo "  Can be a category name, file path, or pattern to match"
             echo
             echo "Examples:"
-            echo "  $0                  # Run all tests"
+            echo "  $0                  # Run all tests (compact mode)"
             echo "  $0 -v               # Run all tests with verbose output"
-            echo "  $0 -f               # Run all tests but only show failures"
-            echo "  $0 -f -v            # Show verbose output only for failing tests"
+            echo "  $0 -f               # Run all tests with full output"
+            echo "  $0 -f -v            # Full output with verbose details"
+            echo "  $0 --failures-only  # Explicitly run in compact mode (default)"
             echo "  $0 structs          # Run all tests in structs category"
             echo "  $0 operators        # Run all tests in operators category"
             echo "  $0 test_bool        # Run tests matching 'test_bool'"
