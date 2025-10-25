@@ -122,6 +122,15 @@ Additionally, runtime errors are detected:
 | `134` (SIGABRT) | Runtime abort (e.g. from `assert` statements) |
 | Non-zero | Program returned a non-zero status from `int main()` or raised another runtime error |
 
+### Diagnostic Quality
+
+Error reporting is centralized through `reportCompilerError()` in `compiler_session.cpp`. Whenever new parser or code generation features are added:
+- Capture precise token locations via the lexer's `SourceLocation` plumbing and pass them through the parser.
+- Emit diagnostics with contextual hints by calling `LogError`, `LogErrorS`, `LogErrorP`, or `LogErrorV` so messages stay consistent.
+- Add regression coverage in `test/errors/` whenever a new diagnostic string is introduced to ensure the test runner continues to recognize expected failures.
+
+Treat descriptive errors as a first-class requirement. Pipe new failure paths through the shared helpers instead of printing ad-hoc messages.
+
 ### Test Classification
 
 Tests are classified by their expected behavior:

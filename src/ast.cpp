@@ -52,7 +52,9 @@
 
 static void ensureBaseNonNullScope();
 
-llvm::Value *LogErrorV(const char *Str);
+llvm::Value *LogErrorV(const char *Str, std::string_view hint = {});
+llvm::Value *LogErrorV(const std::string &Str, std::string_view hint = {});
+llvm::Function *LogErrorF(const char *Str, std::string_view hint = {});
 
 static llvm::Function *TopLevelExecFunction = nullptr;
 static llvm::Function *ScriptMainFunction = nullptr;
@@ -775,15 +777,17 @@ llvm::Module *getModule() {
 
 
 // Error handling utilities
-llvm::Value *LogErrorV(const char *Str) {
-  fprintf(stderr, "Error: %s\n", Str);
-  currentParser().hadError = true;
+llvm::Value *LogErrorV(const char *Str, std::string_view hint) {
+  reportCompilerError(Str, hint);
   return nullptr;
 }
 
-llvm::Function *LogErrorF(const char *Str) {
-  fprintf(stderr, "Error: %s\n", Str);
-  currentParser().hadError = true;
+llvm::Value *LogErrorV(const std::string &Str, std::string_view hint) {
+  return LogErrorV(Str.c_str(), hint);
+}
+
+llvm::Function *LogErrorF(const char *Str, std::string_view hint) {
+  reportCompilerError(Str, hint);
   return nullptr;
 }
 
@@ -3549,7 +3553,8 @@ llvm::Value *BinaryExprAST::codegen() {
     }
   }
   
-  return LogErrorV("invalid binary operator");
+  return LogErrorV("Binary operator '" + Op + "' is not supported",
+                   "Check for typos or ensure this operator has code generation support.");
 }
 
 // Generate code for unary expressions like -, !, ++, --

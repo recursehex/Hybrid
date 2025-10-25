@@ -102,7 +102,8 @@ static bool isHexDigit(int ch) {
 static int lexPrefixedIntegerLiteral(LexerContext &lex,
                                      int &LastChar,
                                      unsigned radix,
-                                     char prefixChar) {
+                                     char prefixChar,
+                                     SourceLocation tokenStart) {
   auto isValidDigit = [&](int ch) {
     switch (radix) {
       case 2: return isBinaryDigit(ch);
@@ -125,6 +126,7 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
     std::cerr << "Error: Numeric literal '0" << static_cast<char>(prefixChar)
               << "' is missing digits\n";
     LastChar = CurrentChar;
+    lex.setTokenStart(tokenStart);
     return tok_error;
   }
 
@@ -136,6 +138,7 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
     std::cerr << "Error: Invalid digit '" << static_cast<char>(CurrentChar)
               << "' in numeric literal '" << spelling << "'\n";
     LastChar = CurrentChar;
+    lex.setTokenStart(tokenStart);
     return tok_error;
   }
 
@@ -144,15 +147,19 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
   spelling += static_cast<char>(prefixChar);
   spelling += digits;
 
-  if (!buildIntegerLiteral(digits, radix, spelling, lex.numericLiteral))
+  if (!buildIntegerLiteral(digits, radix, spelling, lex.numericLiteral)) {
+    lex.setTokenStart(tokenStart);
     return tok_error;
+  }
 
+  lex.setTokenStart(tokenStart);
   return tok_number;
 }
 
 } // namespace
 
 static bool prepareInterpolatedLiteralSegment(LexerContext &lex, int &LastChar) {
+  SourceLocation segmentStart = lex.lastCharLocation();
   std::string segment;
 
   while (true) {
@@ -163,19 +170,25 @@ static bool prepareInterpolatedLiteralSegment(LexerContext &lex, int &LastChar) 
     }
 
     if (LastChar == '`') {
+      SourceLocation tickLocation = lex.lastCharLocation();
       LastChar = lex.consumeChar();
       lex.currentInterpolatedLiteral = std::move(segment);
       lex.pendingInterpolatedExprStart = true;
       lex.pendingInterpolatedStringEnd = false;
+      lex.interpolatedSegmentLocation = segmentStart;
+      lex.interpolatedExprStartLocation = tickLocation;
       lex.inInterpolatedString = true;
       return true;
     }
 
     if (LastChar == '"') {
+      SourceLocation quoteLocation = lex.lastCharLocation();
       LastChar = lex.consumeChar();
       lex.currentInterpolatedLiteral = std::move(segment);
       lex.pendingInterpolatedExprStart = false;
       lex.pendingInterpolatedStringEnd = true;
+      lex.interpolatedSegmentLocation = segmentStart;
+      lex.interpolatedStringEndLocation = quoteLocation;
       lex.inInterpolatedString = false;
       return true;
     }
@@ -243,6 +256,7 @@ int gettok() {
   // Pending interpolated string literal segment
   if (lex.pendingInterpolatedLiteralSegment) {
     lex.pendingInterpolatedLiteralSegment = false;
+    lex.setTokenStart(lex.interpolatedSegmentLocation);
     lex.stringLiteral = lex.currentInterpolatedLiteral;
     return tok_interpolated_string_segment;
   }
@@ -250,6 +264,7 @@ int gettok() {
   // Pending interpolated expression start
   if (lex.pendingInterpolatedExprStart) {
     lex.pendingInterpolatedExprStart = false;
+    lex.setTokenStart(lex.interpolatedExprStartLocation);
     lex.inInterpolatedExpression = true;
     return tok_interpolated_expr_start;
   }
@@ -257,18 +272,23 @@ int gettok() {
   // Pending interpolated string end
   if (lex.pendingInterpolatedStringEnd) {
     lex.pendingInterpolatedStringEnd = false;
+    lex.setTokenStart(lex.interpolatedStringEndLocation);
     lex.stringLiteral = lex.currentInterpolatedLiteral;
     return tok_interpolated_string_end;
   }
 
   // Handle end of interpolated expression
   if (lex.inInterpolatedString && lex.inInterpolatedExpression && LastChar == '`') {
+    SourceLocation endTickLocation = lex.lastCharLocation();
     LastChar = lex.consumeChar();
     lex.inInterpolatedExpression = false;
     if (!prepareInterpolatedLiteralSegment(lex, LastChar)) {
+      lex.setTokenStart(endTickLocation);
       return tok_error;
     }
     lex.pendingInterpolatedLiteralSegment = true;
+    lex.interpolatedSegmentLocation = lex.lastCharLocation();
+    lex.setTokenStart(endTickLocation);
     return tok_interpolated_expr_end;
   }
 
@@ -278,13 +298,16 @@ int gettok() {
 
   if (lex.inInterpolatedString && !lex.inInterpolatedExpression) {
     if (!prepareInterpolatedLiteralSegment(lex, LastChar)) {
+      lex.setTokenStart(lex.interpolatedSegmentLocation);
       return tok_error;
     }
     lex.stringLiteral = lex.currentInterpolatedLiteral;
+    lex.setTokenStart(lex.interpolatedSegmentLocation);
     return tok_interpolated_string_segment;
   }
 
   if (!lex.inInterpolatedString && LastChar == '$') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '"') {
       lex.inInterpolatedString = true;
@@ -294,15 +317,19 @@ int gettok() {
       lex.pendingInterpolatedLiteralSegment = false;
       LastChar = lex.consumeChar();
       if (!prepareInterpolatedLiteralSegment(lex, LastChar)) {
+        lex.setTokenStart(start);
         return tok_error;
       }
       lex.stringLiteral = lex.currentInterpolatedLiteral;
+      lex.setTokenStart(start);
       return tok_interpolated_string_start;
     }
     lex.unconsumeChar(NextChar);
   }
 
   if (isalpha(LastChar) || LastChar == '_') { // identifier: [a-zA-Z_][a-zA-Z0-9_]*
+    SourceLocation start = lex.lastCharLocation();
+    lex.setTokenStart(start);
     lex.identifierStr = LastChar;
     while (isalnum((LastChar = lex.consumeChar())) || LastChar == '_')
       lex.identifierStr += LastChar;
@@ -389,14 +416,16 @@ int gettok() {
   }
 
   if (isdigit(LastChar)) {
+    SourceLocation start = lex.lastCharLocation();
+    lex.setTokenStart(start);
     if (LastChar == '0') {
       int NextChar = lex.consumeChar();
       if (NextChar == 'b' || NextChar == 'B') {
-        return lexPrefixedIntegerLiteral(lex, LastChar, 2, static_cast<char>(NextChar));
+        return lexPrefixedIntegerLiteral(lex, LastChar, 2, static_cast<char>(NextChar), start);
       } else if (NextChar == 'o' || NextChar == 'O') {
-        return lexPrefixedIntegerLiteral(lex, LastChar, 8, static_cast<char>(NextChar));
+        return lexPrefixedIntegerLiteral(lex, LastChar, 8, static_cast<char>(NextChar), start);
       } else if (NextChar == 'x' || NextChar == 'X') {
-        return lexPrefixedIntegerLiteral(lex, LastChar, 16, static_cast<char>(NextChar));
+        return lexPrefixedIntegerLiteral(lex, LastChar, 16, static_cast<char>(NextChar), start);
       } else {
         lex.unconsumeChar(NextChar);
       }
@@ -453,12 +482,14 @@ int gettok() {
   }
 
   if (LastChar == '.') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (isdigit(NextChar)) {
       std::string literal = ".";
       literal += static_cast<char>(NextChar);
       bool hasExponent = false;
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       while (isDecimalDigit(LastChar)) {
         literal += static_cast<char>(LastChar);
         LastChar = lex.consumeChar();
@@ -474,6 +505,7 @@ int gettok() {
         }
         if (!isDecimalDigit(LastChar)) {
           std::cerr << "Error: Invalid exponent in floating-point literal '" << literal << "'\n";
+          lex.setTokenStart(start);
           return tok_error;
         }
         while (isDecimalDigit(LastChar)) {
@@ -482,8 +514,11 @@ int gettok() {
         }
       }
 
-      if (!buildFloatingLiteral(literal, true, hasExponent, lex.numericLiteral))
+      if (!buildFloatingLiteral(literal, true, hasExponent, lex.numericLiteral)) {
+        lex.setTokenStart(start);
         return tok_error;
+      }
+      lex.setTokenStart(start);
       return tok_number;
     } else {
       lex.unconsumeChar(NextChar);
@@ -491,6 +526,8 @@ int gettok() {
   }
 
   if (LastChar == '"') { // String literal: "..."
+    SourceLocation start = lex.lastCharLocation();
+    lex.setTokenStart(start);
     lex.stringLiteral = "";
     LastChar = lex.consumeChar();
     while (LastChar != '"' && LastChar != EOF) {
@@ -546,6 +583,8 @@ string_continue:
   }
 
   if (LastChar == '\'') { // Character literal: '.'
+    SourceLocation start = lex.lastCharLocation();
+    lex.setTokenStart(start);
     LastChar = lex.consumeChar();
     if (LastChar == EOF) {
       return LastChar; // Error case - EOF in character literal
@@ -666,6 +705,7 @@ char_literal_end:
   // Check for arithmetic operators and their compound assignments
   if (LastChar == '+' || LastChar == '-' || LastChar == '*' || LastChar == '/' || LastChar == '%') {
     char Op = LastChar;
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     
     // Handle // comment special case
@@ -682,18 +722,21 @@ char_literal_end:
     // Handle increment operator
     if (Op == '+' && NextChar == '+') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_inc; // ++
     }
 
     // Handle decrement operator
     if (Op == '-' && NextChar == '-') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_dec; // --
     }
 
     // Handle arrow operator for pointer member access
     if (Op == '-' && NextChar == '>') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_arrow; // ->
     }
 
@@ -701,11 +744,11 @@ char_literal_end:
     if (NextChar == '=') {
       LastChar = lex.consumeChar();
       switch (Op) {
-        case '+': return tok_plus_eq;   // +=
-        case '-': return tok_minus_eq;  // -=
-        case '*': return tok_mult_eq;   // *=
-        case '/': return tok_div_eq;    // /=
-        case '%': return tok_mod_eq;    // %=
+        case '+': lex.setTokenStart(start); return tok_plus_eq;   // +=
+        case '-': lex.setTokenStart(start); return tok_minus_eq;  // -=
+        case '*': lex.setTokenStart(start); return tok_mult_eq;   // *=
+        case '/': lex.setTokenStart(start); return tok_div_eq;    // /=
+        case '%': lex.setTokenStart(start); return tok_mod_eq;    // %=
       }
     } else {
       // Not a compound assignment, put the character back
@@ -715,12 +758,15 @@ char_literal_end:
 
   // Check for comparison operators
   if (LastChar == '=') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '=') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_eq;  // ==
     } else if (NextChar == '>') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_lambda;  // =>
     } else {
       // Not == or =>, put the character back
@@ -729,146 +775,181 @@ char_literal_end:
   }
   
   if (LastChar == '!') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '=') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_ne;  // !=
     } else {
       // Not !=, put the character back and return ! token
       lex.unconsumeChar(NextChar);
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_not;  // !
     }
   }
   
   if (LastChar == '<') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '=') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_le;  // <=
     } else if (NextChar == '<') {
       NextChar = lex.consumeChar();
       if (NextChar == '=') {
         LastChar = lex.consumeChar();
+        lex.setTokenStart(start);
         return tok_left_shift_eq;  // <<=
       } else {
         // Not <<=, put the character back and return << token
         lex.unconsumeChar(NextChar);
         LastChar = lex.consumeChar();
+        lex.setTokenStart(start);
         return tok_left_shift;  // <<
       }
     } else {
       // Not <= or <<, put the character back and return < token
       lex.unconsumeChar(NextChar);
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_lt;  // <
     }
   }
   
   if (LastChar == '>') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '=') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_ge;  // >=
     } else if (NextChar == '>') {
       NextChar = lex.consumeChar();
       if (NextChar == '=') {
         LastChar = lex.consumeChar();
+        lex.setTokenStart(start);
         return tok_right_shift_eq;  // >>=
       } else {
         // Not >>=, put the character back and return >> token
         lex.unconsumeChar(NextChar);
         LastChar = lex.consumeChar();
+        lex.setTokenStart(start);
         return tok_right_shift;  // >>
       }
     } else {
       // Not >= or >>, put the character back and return > token
       lex.unconsumeChar(NextChar);
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_gt;  // >
     }
   }
   
   if (LastChar == '&') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '&') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_and;  // &&
     } else if (NextChar == '=') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_and_eq;  // &=
     } else {
       // Not && or &=, put the character back and return & token
       lex.unconsumeChar(NextChar);
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_bitwise_and;  // &
     }
   }
   
   if (LastChar == '|') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '|') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_or;  // ||
     } else if (NextChar == '=') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_or_eq;  // |=
     } else {
       // Not || or |=, put the character back and return | token
       lex.unconsumeChar(NextChar);
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_bitwise_or;  // |
     }
   }
   
   if (LastChar == '^') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
     if (NextChar == '=') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_xor_eq;  // ^=
     } else {
       // Not ^=, put the character back and return ^ token
       lex.unconsumeChar(NextChar);
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_bitwise_xor;  // ^
     }
   }
 
   // Check for colon (type casting operator)
   if (LastChar == ':') {
+    SourceLocation start = lex.lastCharLocation();
     LastChar = lex.consumeChar();
+    lex.setTokenStart(start);
     return tok_colon;
   }
 
   // Check for dot (member access).
   if (LastChar == '.') {
+    SourceLocation start = lex.lastCharLocation();
     LastChar = lex.consumeChar();
+    lex.setTokenStart(start);
     return tok_dot;
   }
 
   // Check for @ (dereference/pointer type)
   if (LastChar == '@') {
+    SourceLocation start = lex.lastCharLocation();
     LastChar = lex.consumeChar();
+    lex.setTokenStart(start);
     return tok_at;
   }
 
   // Check for # (address-of)
   if (LastChar == '#') {
+    SourceLocation start = lex.lastCharLocation();
     LastChar = lex.consumeChar();
+    lex.setTokenStart(start);
     return tok_hash;
   }
 
   // Check for nullable related tokens ( ?, ?. , ?[, ??, ??= )
   if (LastChar == '?') {
+    SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
 
     if (NextChar == '.') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_null_safe_access;
     }
 
     if (NextChar == '[') {
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_null_array_access;
     }
 
@@ -876,20 +957,24 @@ char_literal_end:
       int ThirdChar = lex.consumeChar();
       if (ThirdChar == '=') {
         LastChar = lex.consumeChar();
-        return tok_null_coalescing_assign;
+        lex.setTokenStart(start);
+       return tok_null_coalescing_assign;
       }
       lex.unconsumeChar(ThirdChar);
       LastChar = lex.consumeChar();
+      lex.setTokenStart(start);
       return tok_null_coalescing;
     }
 
     lex.unconsumeChar(NextChar);
     LastChar = lex.consumeChar();
+    lex.setTokenStart(start);
     return tok_nullable;
   }
 
   // Check for newline.
   if (LastChar == '\n' || LastChar == '\r') {
+    SourceLocation start = lex.lastCharLocation();
     if (LastChar == '\r') {
       LastChar = lex.consumeChar();
       if (LastChar == '\n') {
@@ -898,15 +983,20 @@ char_literal_end:
     } else {
       LastChar = lex.consumeChar();
     }
+    lex.setTokenStart(start);
     return tok_newline;
   }
 
   // Check for end of file.  Don't eat the EOF.
-  if (LastChar == EOF)
+  if (LastChar == EOF) {
+    lex.setTokenStart(lex.lastCharLocation());
     return tok_eof;
+  }
 
   // Otherwise, just return the character as its ascii value.
   int ThisChar = LastChar;
+  SourceLocation start = lex.lastCharLocation();
   LastChar = lex.consumeChar();
+  lex.setTokenStart(start);
   return ThisChar;
 }

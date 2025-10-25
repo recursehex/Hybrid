@@ -15,9 +15,10 @@ void enterUnsafeContext();
 void exitUnsafeContext();
 
 // Error handling
-std::unique_ptr<ExprAST> LogError(const char *Str);
-std::unique_ptr<PrototypeAST> LogErrorP(const char *Str);
-std::unique_ptr<StmtAST> LogErrorS(const char *Str);
+std::unique_ptr<ExprAST> LogError(const char *Str, std::string_view hint = {});
+std::unique_ptr<ExprAST> LogError(const std::string &Str, std::string_view hint = {});
+std::unique_ptr<PrototypeAST> LogErrorP(const char *Str, std::string_view hint = {});
+std::unique_ptr<StmtAST> LogErrorS(const char *Str, std::string_view hint = {});
 
 // Parsing functions
 std::unique_ptr<ExprAST> ParseNumberExpr();

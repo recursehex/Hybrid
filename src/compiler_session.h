@@ -15,6 +15,13 @@
 #include "numeric_literal.h"
 #include "codegen_context.h"
 
+struct SourceLocation {
+  std::size_t line = 0;
+  std::size_t column = 0;
+
+  constexpr bool isValid() const noexcept { return line != 0; }
+};
+
 /// LexerContext holds all mutable lexer state for a compilation unit.
 struct LexerContext {
   std::string identifierStr;
@@ -36,10 +43,29 @@ struct LexerContext {
   std::size_t bufferedCursor = 0;
   bool useBufferedInput = false;
 
+  struct PendingChar {
+    int ch = EOF;
+    SourceLocation location{};
+  };
+
+  std::vector<PendingChar> pushbackBuffer;
+  std::size_t nextLine = 1;
+  std::size_t nextColumn = 1;
+  std::size_t lastCharLine = 0;
+  std::size_t lastCharColumn = 0;
+  std::size_t tokenLine = 1;
+  std::size_t tokenColumn = 1;
+  SourceLocation interpolatedSegmentLocation{};
+  SourceLocation interpolatedExprStartLocation{};
+  SourceLocation interpolatedStringEndLocation{};
+
   void reset();
   void setInputBuffer(std::string_view contents);
   int consumeChar();
   void unconsumeChar(int ch);
+  void setTokenStart(SourceLocation loc);
+  SourceLocation tokenStart() const;
+  SourceLocation lastCharLocation() const;
 };
 
 /// ParserContext wraps the parser's per-run state, replacing the previous
@@ -51,6 +77,8 @@ struct ParserContext {
   int loopNestingDepth = 0;
   int unsafeContextLevel = 0;
   bool hadError = false;
+  SourceLocation currentTokenLocation{};
+  SourceLocation previousTokenLocation{};
 
   void reset(bool clearSymbols = true);
   void clearPrecedence();
@@ -87,5 +115,8 @@ bool hasCompilerSession();
 LexerContext &currentLexer();
 ParserContext &currentParser();
 CodegenContext &currentCodegen();
+
+std::string describeTokenForDiagnostics(int token);
+void reportCompilerError(const std::string &message, std::string_view hint = {});
 
 #endif // HYBRID_COMPILER_SESSION_H

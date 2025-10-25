@@ -138,7 +138,14 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
 /// CurTok/getNextToken - Provide a simple token buffer.  CurTok is the current
 /// token the parser is looking at.  getNextToken reads another token from the
 /// lexer and updates CurTok with its results.
-int getNextToken() { return CurTok = gettok(); }
+int getNextToken() {
+  ParserContext &parser = currentParser();
+  parser.previousTokenLocation = parser.currentTokenLocation;
+  int next = gettok();
+  parser.curTok = next;
+  parser.currentTokenLocation = currentLexer().tokenStart();
+  return next;
+}
 
 static void SkipNewlines() {
   while (CurTok == tok_newline)
@@ -322,20 +329,22 @@ int GetTokPrecedence() {
 }
 
 /// LogError* - These are little helper functions for error handling.
-std::unique_ptr<ExprAST> LogError(const char *Str) {
-  fprintf(stderr, "Error: %s\n", Str);
-  currentParser().hadError = true;
+std::unique_ptr<ExprAST> LogError(const std::string &Str, std::string_view hint) {
+  reportCompilerError(Str, hint);
   return nullptr;
 }
-std::unique_ptr<ExprAST> LogError(const std::string &Str) {
-  return LogError(Str.c_str());
+
+std::unique_ptr<ExprAST> LogError(const char *Str, std::string_view hint) {
+  return LogError(std::string(Str), hint);
 }
-std::unique_ptr<PrototypeAST> LogErrorP(const char *Str) {
-  LogError(Str);
+
+std::unique_ptr<PrototypeAST> LogErrorP(const char *Str, std::string_view hint) {
+  LogError(Str, hint);
   return nullptr;
 }
-std::unique_ptr<StmtAST> LogErrorS(const char *Str) {
-  LogError(Str);
+
+std::unique_ptr<StmtAST> LogErrorS(const char *Str, std::string_view hint) {
+  LogError(Str, hint);
   return nullptr;
 }
 
@@ -791,13 +800,16 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     } else {
       // Not a cast, restore state and continue with default handling
       // This shouldn't happen in normal parsing flow, but handle it gracefully
-      return LogError("unexpected type token in expression");
+      return LogError("Unexpected type name in expression",
+                      "Did you mean to create a cast using 'Type: expression'?");
     }
   }
   
   switch (CurTok) {
   default:
-    return LogError("unknown token when expecting an expression");
+    return LogError(
+        "Unexpected token while parsing an expression",
+        "Insert an expression or remove the unexpected token.");
   case tok_identifier:
     return ParseIdentifierExpr();
   case tok_this:
@@ -919,7 +931,9 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     } else if (isascii(CurTok)) {
       BinOp = std::string(1, (char)CurTok);
     } else {
-      return LogError("Unknown binary operator");
+      return LogError(
+          "Unsupported binary operator",
+          "Check the operator spelling or ensure it is supported in this context.");
     }
     
     getNextToken(); // eat binop

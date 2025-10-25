@@ -166,7 +166,7 @@ run_test() {
     
     # Check for error patterns in output
     local has_errors=0
-    if grep -q "Error:" <<< "$output" 2>/dev/null; then
+    if grep -q "Error" <<< "$output" 2>/dev/null; then
         has_errors=1
     fi
     if grep -q "Failed to generate" <<< "$output" 2>/dev/null; then
@@ -179,6 +179,9 @@ run_test() {
         has_errors=1
     fi
     if grep -q "invalid binary operator" <<< "$output" 2>/dev/null; then
+        has_errors=1
+    fi
+    if grep -q "Binary operator" <<< "$output" 2>/dev/null; then
         has_errors=1
     fi
     if grep -q "Expected.*after" <<< "$output" 2>/dev/null; then
@@ -291,7 +294,7 @@ run_test() {
         echo -e "${BLUE}=== Test: $test_name ===${NC}"
         echo "File: $test_file"
         echo "Content:"
-        cat "$test_file"
+        awk '{printf(" %4d %s\n", NR, $0)}' "$test_file"
         echo
         echo "Output:"
         printf "%s\n" "$output"
@@ -315,7 +318,7 @@ run_test() {
                 fi
                 if [ $has_errors -eq 1 ]; then
                     echo -e "${RED}  Errors found in output:${NC}"
-                    echo "$output" | grep -E "(Error:|Failed to generate|Unknown function|Unknown variable|invalid binary operator|Expected.*after)" | head -3
+                    echo "$output" | grep -E "(Error|Failed to generate|Unknown function|Unknown variable|Binary operator|Expected.*after)" | head -3
                 fi
             fi
         fi
@@ -351,7 +354,7 @@ run_test() {
                 fi
                 if [ $has_errors -eq 1 ]; then
                     echo -e "${RED}  Errors found in output:${NC}"
-                    echo "$output" | grep -E "(Error:|Failed to generate|Unknown function|Unknown variable|invalid binary operator|Expected.*after)" | head -3
+                    echo "$output" | grep -E "(Error|Failed to generate|Unknown function|Unknown variable|Binary operator|Expected.*after)" | head -3
                 fi
             fi
         fi
