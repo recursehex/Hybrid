@@ -16,7 +16,9 @@ Hybrid provides comprehensive Unicode support across all character types and str
 
 ### 1. Direct UTF-8 Input
 
-You can directly type or paste Unicode characters in your source code:
+You can directly type or paste Unicode characters in your source code. The lexer
+validates the UTF-8 spelling and converts it to the engine's native widths
+(`string` → UTF-16, `lchar` → UTF-32) during compilation:
 
 ```c
 char euro = '€'         // Euro sign
@@ -68,7 +70,7 @@ When using character literals without explicit type declaration, the compiler au
 '😀'      // Requires 32-bit, uses lchar
 ```
 
-Character literals also adapt to the surrounding context. When an expression expects an 8-bit `schar`/`byte`, 16-bit `char`/`short`, or 32-bit `lchar`/`int`, the literal is regenerated at that width so comparisons like `'A' == byteValue` and declarations such as `schar small = 'A'` work without manual casts. Once the value is stored, however, converting it to a different width (or to an integer type) does require an explicit cast, e.g. `schar narrow = schar: wideChar`, `char ascii = char: codePoint`, or `int code = int: letter`. If the literal cannot fit the target width, the compiler falls back to the wider default and reports a type error.
+Character literals also adapt to the surrounding context. When an expression expects an 8-bit `schar`/`byte`, 16-bit `char`/`short`, or 32-bit `lchar`/`int`, the literal is regenerated at that width so comparisons like `'A' == byteValue` and declarations such as `schar small = 'A'` work without manual casts. Once the value is stored, however, converting it to a different width (or to an integer type) does require an explicit cast, e.g. `schar narrow = schar: wideChar`, `char ascii = char: codePoint`, or `int code = int: letter`. If the literal cannot fit the target width, the compiler falls back to the wider default and reports a type error. Invalid UTF-8 sequences produce diagnostics during lexing so they never reach codegen.
 
 ### Type-Specific Assignment
 
@@ -82,14 +84,14 @@ lchar full_unicode = '🎨'   // 32-bit, full Unicode
 
 ## String Handling
 
-### UTF-8 Encoding
+### UTF-16 Storage and Conversion
 
-Strings in Hybrid are stored as UTF-8 encoded byte sequences:
-
-```c
-string text = "Hello αβγ 你好 🌍"
-// Stored as UTF-8 bytes internally
-```
+Strings in Hybrid are stored as UTF-16 code units. During lexing the source UTF-8
+spelling of every string literal is validated and converted to UTF-16 using
+LLVM's conversion helpers. Invalid byte sequences trigger a compiler error with
+line and column information rather than slipping through to code generation.
+Identical literals are interned so pointer comparisons remain stable while still
+representing full Unicode text correctly.
 
 ### String Escape Sequences
 
@@ -127,13 +129,15 @@ lchar[] emoji = ['😀', '😎', '🎉', '🚀']  // Emoji array
 
 ### 3. Character Validation
 
+The lexer performs strict UTF-8 validation for every character literal and
+produces canonical 32-bit code points. You can still add helper routines if you
+need additional classification logic, e.g.:
+
 ```c
-// Check if character is in ASCII range
 bool isAscii(char c) {
     return c <= 127
 }
 
-// Check if character requires lchar
 bool needsLchar(lchar c) {
     return c > 65535
 }
@@ -196,35 +200,37 @@ Currency[] currencies = [
 ### Current Limitations
 
 1. **No Normalization**: Unicode normalization is not performed
-2. **No Collation**: String comparison is byte-based, not locale-aware
+2. **No Collation**: String comparison is code-unit based, not locale-aware
 3. **No Grapheme Clusters**: Multi-codepoint characters (like flags) may not display correctly
-4. **Limited Validation**: Invalid UTF-8 sequences may cause undefined behavior
 
 ### Future Enhancements
 
 - Unicode normalization (NFC, NFD)
 - Locale-aware string operations
 - Grapheme cluster support
-- Better validation and error handling
 - Regular expressions with Unicode support
 
 ## Technical Details
 
 ### UTF-8 Decoding
 
-The lexer performs UTF-8 decoding for character literals:
+The lexer performs strict UTF-8 decoding for both string and character literals
+using LLVM's `ConvertUTF` helpers:
 
-1. **1-byte sequences** (U+0000 - U+007F): Direct ASCII
+1. **1-byte sequences** (U+0000 - U+007F): direct ASCII
 2. **2-byte sequences** (U+0080 - U+07FF): 110xxxxx 10xxxxxx
 3. **3-byte sequences** (U+0800 - U+FFFF): 1110xxxx 10xxxxxx 10xxxxxx
 4. **4-byte sequences** (U+10000 - U+10FFFF): 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+
+Invalid sequences raise diagnostics during lexing so malformed input never
+enters code generation.
 
 ### Storage in LLVM IR
 
 - `schar`: `i8` (8-bit integer)
 - `char`: `i16` (16-bit integer)
 - `lchar`: `i32` (32-bit integer)
-- Strings: `ptr` to UTF-8 byte sequence
+- Strings: `ptr` to immutable UTF-16 data (opaque pointer in IR)
 
 ### Escape Sequence Parsing
 

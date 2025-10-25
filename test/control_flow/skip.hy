@@ -1,14 +1,17 @@
 // Test skip statement in while loop
-int test_skip_while() {
+int test_skip_while()
+{
     int sum = 0
     int i = 0
     
-    while i < 10 {
-        i = i + 1
-        if i == 5 {
+    while i < 10
+    {
+        i++
+        if i == 5
+        {
             skip  // Skip when i is 5
         }
-        sum = sum + i
+        sum += i
     }
     
     // Should return 50 (55 - 5)
@@ -17,15 +20,18 @@ int test_skip_while() {
 }
 
 // Test skip statement in foreach loop
-int test_skip_foreach() {
+int test_skip_foreach() 
+{
     int[] numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     int sum = 0
     
-    for int num in numbers {
-        if num == 5 {
+    for int num in numbers 
+    {
+        if num == 5 
+        {
             skip  // Skip when num is 5
         }
-        sum = sum + num
+        sum += num
     }
     
     // Should return 50 (55 - 5)
@@ -34,19 +40,23 @@ int test_skip_foreach() {
 }
 
 // Test nested loops with skip
-int test_nested_skip() {
+int test_nested_skip()
+{
     int sum = 0
     int i = 0
     
-    while i < 3 {
-        i = i + 1
+    while i < 3
+    {
+        i++
         int j = 0
-        while j < 3 {
-            j = j + 1
-            if j == 2 {
+        while j < 3
+        {
+            j++
+            if j == 2
+            {
                 skip  // Skip affects inner loop only
             }
-            sum = sum + j
+            sum += j
         }
     }
     
@@ -57,16 +67,19 @@ int test_nested_skip() {
 }
 
 // Test skip with multiple conditions
-int test_skip_multiple() {
+int test_skip_multiple()
+{
     int sum = 0
     int i = 0
     
-    while i < 10 {
-        i = i + 1
-        if i == 3 || i == 5 || i == 7 {
+    while i < 10
+    {
+        i++
+        if i == 3 || i == 5 || i == 7
+        {
             skip  // Skip multiple values
         }
-        sum = sum + i
+        sum += i
     }
     
     // Should return 40 (55 - 3 - 5 - 7)
@@ -75,21 +88,12 @@ int test_skip_multiple() {
 }
 
 // Main function to test all skip scenarios
-int main() {
-    int result1 = test_skip_while()
-    int result2 = test_skip_foreach()
-    int result3 = test_nested_skip()
-    int result4 = test_skip_multiple()
-    
-    // Print results for verification
-    print(result1)  // Should print 50
-    print(result2)  // Should print 50
-    print(result3)  // Should print 12
-    print(result4)  // Should print 40
-    assert result1 == 50
-    assert result2 == 50
-    assert result3 == 12
-    assert result4 == 40
+int main()
+{
+    assert test_skip_while() == 50
+    assert test_skip_foreach() == 50
+    assert test_nested_skip() == 12
+    assert test_skip_multiple() == 40
     
     return 0
 }

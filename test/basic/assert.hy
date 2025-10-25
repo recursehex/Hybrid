@@ -1,5 +1,6 @@
 // Basic assert statement tests
-int main() {
+int main()
+{
     // Test assert with simple boolean expression
     assert true
     assert 1 == 1

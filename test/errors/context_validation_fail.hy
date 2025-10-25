@@ -1,5 +1,5 @@
 // Test loop context validation for break and skip statements
-// This file demonstrates that break/skip statements are now validated at parse time
+// This file demonstrates that break/skip statements are validated at parse time
 
 // Test 1: break in top-level function (should fail)
 void test_break_toplevel()

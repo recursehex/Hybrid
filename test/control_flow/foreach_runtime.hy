@@ -6,7 +6,7 @@ int test_array_var()
     int[] numbers = [10, 20, 30, 40, 50]
     int sum = 0
     
-    // This should now work with runtime size tracking
+    // This should work with runtime size tracking
     for int n in numbers
     {
         sum += n

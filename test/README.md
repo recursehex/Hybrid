@@ -86,6 +86,10 @@ Use the `run_tests.sh` script in the project root:
 # Run with verbose output (shows test content and output)
 ./run_tests.sh -v
 ./run_tests.sh -v structs
+
+# Run with full pass/fail output (shows every test's pass or fail status)
+./run_tests.sh -f
+./run_tests.sh -f structs
 ```
 
 ## Writing New Tests

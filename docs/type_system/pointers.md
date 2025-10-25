@@ -237,12 +237,12 @@ unsafe void pointerArray()
 
     // Access through array
     int sum = 0
-    sum = sum + @ptrs[0]  // Add 1
-    sum = sum + @ptrs[1]  // Add 2
-    sum = sum + @ptrs[2]  // Add 3
+    sum += @ptrs[0]     // Add 1
+    sum += @ptrs[1]     // Add 2
+    sum += @ptrs[2]     // Add 3
 
     // Modify through pointers
-    @ptrs[0] = 100       // a is now 100
+    @ptrs[0] = 100      // a is now 100
 }
 ```
 

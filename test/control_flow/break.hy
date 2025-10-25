@@ -121,20 +121,12 @@ int test_break_after_statements()
 // Main function to run tests
 int main()
 {
-    int result1 = test_break_while()            // 5
-    int result2 = test_conditional_break()      // 21
-    int result3 = test_nested_break()           // 40
-    int result4 = test_break_outer()            // 15
-    int result5 = test_multiple_breaks()        // 1
-    int result6 = test_break_after_statements() // 20
+    assert test_break_while() == 5
+    assert test_conditional_break() == 21
+    assert test_nested_break() == 40
+    assert test_break_outer() == 15
+    assert test_multiple_breaks() == 1
+    assert test_break_after_statements() == 20
     
-    // Return sum to verify: 5 + 21 + 40 + 15 + 1 + 20 = 102
-    assert result1 == 5
-    assert result2 == 21
-    assert result3 == 40
-    assert result4 == 15
-    assert result5 == 1
-    assert result6 == 20
-    assert result1 + result2 + result3 + result4 + result5 + result6 == 102
     return 0
 }

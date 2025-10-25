@@ -7,6 +7,7 @@
 #include <iostream>
 
 #include "llvm/Support/Error.h"
+#include "llvm/Support/ConvertUTF.h"
 
 #include "compiler_session.h"
 
@@ -80,6 +81,59 @@ static bool buildFloatingLiteral(const std::string &literal,
   }
 
   outLiteral = NumericLiteral::makeFloating(value, literal, hadDecimal, hadExponent);
+  return true;
+}
+
+static unsigned utf8SequenceLength(unsigned char firstByte) {
+  if ((firstByte & 0x80u) == 0)
+    return 1;
+  if ((firstByte & 0xE0u) == 0xC0u)
+    return 2;
+  if ((firstByte & 0xF0u) == 0xE0u)
+    return 3;
+  if ((firstByte & 0xF8u) == 0xF0u)
+    return 4;
+  return 0;
+}
+
+static bool decodeSingleUTF8CodePoint(const std::string &bytes,
+                                      uint32_t &codePoint,
+                                      std::string &errorMessage) {
+  errorMessage.clear();
+
+  const auto *sourceStart =
+      reinterpret_cast<const llvm::UTF8 *>(bytes.data());
+  const auto *sourceEnd = sourceStart + bytes.size();
+  llvm::UTF32 temp = 0;
+  llvm::UTF32 *targetStart = &temp;
+  llvm::UTF32 *target = targetStart;
+  llvm::ConversionResult result = llvm::ConvertUTF8toUTF32(
+      &sourceStart, sourceEnd, &target, targetStart + 1,
+      llvm::strictConversion);
+
+  if (result != llvm::conversionOK || sourceStart != sourceEnd ||
+      target != targetStart + 1) {
+    switch (result) {
+      case llvm::sourceExhausted:
+        errorMessage =
+            "Invalid UTF-8 character literal: unexpected end of sequence";
+        break;
+      case llvm::sourceIllegal:
+        errorMessage =
+            "Invalid UTF-8 character literal: illegal byte sequence";
+        break;
+      case llvm::targetExhausted:
+        errorMessage =
+            "Internal error: UTF-32 conversion buffer exhausted while decoding character literal";
+        break;
+      default:
+        errorMessage = "Invalid UTF-8 character literal";
+        break;
+    }
+    return false;
+  }
+
+  codePoint = temp;
   return true;
 }
 
@@ -653,39 +707,44 @@ string_continue:
         }
         default: lex.charLiteral = LastChar; break;
       }
-    } else if ((LastChar & 0x80) != 0) {
-      // UTF-8 multi-byte character
-      uint32_t unicode = 0;
-      int bytes_to_read = 0;
-      
-      if ((LastChar & 0xE0) == 0xC0) { // 2-byte UTF-8
-        unicode = LastChar & 0x1F;
-        bytes_to_read = 1;
-      } else if ((LastChar & 0xF0) == 0xE0) { // 3-byte UTF-8
-        unicode = LastChar & 0x0F;
-        bytes_to_read = 2;
-      } else if ((LastChar & 0xF8) == 0xF0) { // 4-byte UTF-8
-        unicode = LastChar & 0x07;
-        bytes_to_read = 3;
-      } else {
-        // Invalid UTF-8 start byte
+    } else {
+      std::string utf8Bytes;
+      utf8Bytes.push_back(static_cast<char>(LastChar));
+      unsigned expectedLength =
+          utf8SequenceLength(static_cast<unsigned char>(utf8Bytes[0]));
+
+      if (expectedLength == 0) {
+        std::cerr << "Error: Invalid UTF-8 start byte in character literal\n";
         lex.charLiteral = '?';
         goto char_literal_end;
       }
-      
-      for (int i = 0; i < bytes_to_read; i++) {
+
+      for (unsigned i = 1; i < expectedLength; ++i) {
         LastChar = lex.consumeChar();
-        if ((LastChar & 0xC0) != 0x80) {
-          // Invalid UTF-8 continuation byte
+        if (LastChar == EOF) {
+          std::cerr << "Error: Incomplete UTF-8 sequence in character literal\n";
           lex.charLiteral = '?';
           goto char_literal_end;
         }
-        unicode = (unicode << 6) | (LastChar & 0x3F);
+        if ((LastChar & 0xC0) != 0x80) {
+          std::cerr << "Error: Invalid UTF-8 continuation byte in character literal\n";
+          lex.charLiteral = '?';
+          goto char_literal_end;
+        }
+        utf8Bytes.push_back(static_cast<char>(LastChar));
       }
-      
-      lex.charLiteral = unicode;
-    } else {
-      lex.charLiteral = LastChar;
+
+      uint32_t decoded = 0;
+      std::string decodeError;
+      if (!decodeSingleUTF8CodePoint(utf8Bytes, decoded, decodeError)) {
+        if (!decodeError.empty())
+          std::cerr << "Error: " << decodeError << "\n";
+        else
+          std::cerr << "Error: Invalid UTF-8 character literal\n";
+        lex.charLiteral = '?';
+      } else {
+        lex.charLiteral = decoded;
+      }
     }
     
 char_literal_end:

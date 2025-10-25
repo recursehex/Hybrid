@@ -190,7 +190,7 @@ else:
 
 ```c
 while i < 10 {
-    i = i + 1
+    i++
 }
 ```
 
@@ -217,7 +217,7 @@ exit:
 
 ```c
 for int num in numbers {
-    sum = sum + num
+    sum += num
 }
 ```
 

@@ -34,6 +34,58 @@
 #include <set>
 #include <functional>
 
+#include "llvm/Support/ConvertUTF.h"
+
+static bool convertUTF8LiteralToUTF16(const std::string &input,
+                                      std::vector<uint16_t> &output,
+                                      std::string &errorMessage) {
+  output.clear();
+
+  if (input.empty())
+    return true;
+
+  const auto *sourceStart =
+      reinterpret_cast<const llvm::UTF8 *>(input.data());
+  const auto *sourceEnd = sourceStart + input.size();
+
+  // UTF-16 code units will never exceed UTF-8 byte count for valid input,
+  // but reserve an extra slot to keep ConvertUTF from exhausting the buffer.
+  output.resize(input.size() + 1);
+
+  auto *targetStart =
+      reinterpret_cast<llvm::UTF16 *>(output.data());
+  auto *target = targetStart;
+  auto *targetEnd = targetStart + output.size();
+
+  llvm::ConversionResult result = llvm::ConvertUTF8toUTF16(
+      &sourceStart, sourceEnd, &target, targetEnd,
+      llvm::strictConversion);
+
+  if (result != llvm::conversionOK) {
+    output.clear();
+    switch (result) {
+      case llvm::sourceExhausted:
+        errorMessage =
+            "String literal ends with an incomplete UTF-8 sequence";
+        break;
+      case llvm::sourceIllegal:
+        errorMessage =
+            "String literal contains an invalid UTF-8 sequence";
+        break;
+      case llvm::targetExhausted:
+        errorMessage =
+            "Internal error: insufficient space while converting string literal to UTF-16";
+        break;
+      case llvm::conversionOK:
+        break;
+    }
+    return false;
+  }
+
+  output.resize(static_cast<std::size_t>(target - targetStart));
+  return true;
+}
+
 #define CG currentCodegen()
 #define TheContext (CG.llvmContext)
 #define TheModule (CG.module)
@@ -1136,13 +1188,17 @@ static llvm::Value *emitUTF16StringLiteral(const std::string &value) {
     global = it->second;
   } else {
     std::vector<llvm::Constant *> charValues;
-    charValues.reserve(value.size() + 1);
+    std::vector<uint16_t> utf16Units;
+    std::string conversionError;
+    if (!convertUTF8LiteralToUTF16(value, utf16Units, conversionError)) {
+      return LogErrorV(conversionError.c_str());
+    }
 
-    // TODO: Proper UTF-8 to UTF-16 conversion should be implemented here
-    // For now, treat each byte as a separate 16-bit character.
-    for (unsigned char c : value) {
-      charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext),
-                                                 static_cast<uint16_t>(c)));
+    charValues.reserve(utf16Units.size() + 1);
+
+    for (uint16_t unit : utf16Units) {
+      charValues.push_back(llvm::ConstantInt::get(
+          llvm::Type::getInt16Ty(*TheContext), unit));
     }
 
     // Append null terminator

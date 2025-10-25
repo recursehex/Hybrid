@@ -160,14 +160,14 @@ int y = ref x  // LLVM: @y = global ptr null
 
 ### Type Tracking
 
-The compiler now tracks reference metadata with a structured `TypeInfo` record instead of string prefixes:
+The compiler tracks reference metadata with a structured `TypeInfo` record instead of string prefixes:
 - `typeName` preserves the language-visible type (e.g. `int`, `MyStruct[]`).
 - `refStorage` captures whether a binding owns storage (`RefValue`) or aliases another binding (`RefAlias`).
 - `declaredRef` records whether the variable was declared with the `ref` keyword so the linker can validate future aliases.
 
 Both global and local symbol tables map identifiers directly to `TypeInfo`, eliminating the former `ref_`/`refptr_` bookkeeping.
 
-Pointer lowering now uses the pointee's actual LLVM type, so ref parameters and aliases carry typed pointers (`ptr <ty>` in opaque-pointer IR) instead of generic `i8*` placeholders.
+Pointer lowering uses the pointee's LLVM type, so ref parameters and aliases carry typed pointers (`ptr <ty>` in opaque-pointer IR) instead of generic `i8*` placeholders.
 
 ### Reading Through References
 

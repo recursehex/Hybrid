@@ -102,10 +102,23 @@ if command -v clang &> /dev/null; then
     RUNTIME_LIB="${RUNTIME_LIB}.o"
     cat > "${RUNTIME_LIB%.o}.c" << 'EOF'
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 void print(int x) {
     printf("%d\n", x);
+}
+
+int hybrid_strlen(const uint16_t *str) {
+    if (!str) {
+        return 0;
+    }
+
+    const uint16_t *p = str;
+    while (*p != 0) {
+        ++p;
+    }
+    return (int)(p - str);
 }
 EOF
     clang -c "${RUNTIME_LIB%.o}.c" -o "$RUNTIME_LIB" 2>/dev/null
