@@ -3126,25 +3126,53 @@ llvm::Value *BinaryExprAST::codegen() {
         if (!FieldPtr)
           return nullptr;
 
-        bool fieldAllowsNull = false;
         std::string objectTypeName = LHSMA->getObject()->getTypeName();
         ParsedTypeDescriptor objectDesc = parseTypeString(objectTypeName);
         std::string structName = objectDesc.sanitized;
+
+        bool fieldAllowsNull = false;
+        std::string fieldTypeName;
+        std::string cleanFieldTypeName;
         if (auto FieldTypesIt = StructFieldTypes.find(structName); FieldTypesIt != StructFieldTypes.end()) {
           if (auto TypeIt = FieldTypesIt->second.find(LHSMA->getMemberName()); TypeIt != FieldTypesIt->second.end()) {
-            ParsedTypeDescriptor fieldDesc = parseTypeString(TypeIt->second);
+            fieldTypeName = TypeIt->second;
+            ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
             fieldAllowsNull = typeAllowsNull(fieldDesc);
+            cleanFieldTypeName = fieldDesc.sanitized;
           }
         }
         if (rhsIsNullable && !fieldAllowsNull) {
           return LogErrorV(("Cannot assign nullable value to non-nullable field '" + LHSMA->getMemberName() + "'").c_str());
         }
 
-        // Cast RHS to the field type if necessary
-        // Need to determine the field type from the struct definition
-        // For now, trust that R has the correct type
-        // TODO: Add proper type checking
-        // R = castToType(R, FieldType);
+        llvm::Type *FieldType = nullptr;
+        if (auto StructIt = StructTypes.find(structName); StructIt != StructTypes.end()) {
+          auto FieldIndicesIt = StructFieldIndices.find(structName);
+          if (FieldIndicesIt != StructFieldIndices.end()) {
+            for (const auto &FieldEntry : FieldIndicesIt->second) {
+              if (FieldEntry.first == LHSMA->getMemberName()) {
+                FieldType = StructIt->second->getElementType(FieldEntry.second);
+                break;
+              }
+            }
+          }
+        }
+
+        if (!FieldType)
+          return LogErrorV(("Internal error: missing type info for field '" + LHSMA->getMemberName() + "'").c_str());
+
+        std::string diagFieldTypeName = cleanFieldTypeName;
+        if (diagFieldTypeName.empty())
+          diagFieldTypeName = sanitizeBaseTypeName(LHSMA->getTypeName());
+
+        std::string contextDescription = "assignment to field '" + LHSMA->getMemberName() + "'";
+        if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, FieldType, diagFieldTypeName, contextDescription))
+          return nullptr;
+
+        if (!diagFieldTypeName.empty())
+          R = castToType(R, FieldType, diagFieldTypeName);
+        else
+          R = castToType(R, FieldType);
 
         Builder->CreateStore(R, FieldPtr);
         // Return a void value to indicate this is a statement, not an expression
