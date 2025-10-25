@@ -229,8 +229,8 @@ run_test() {
                     runtime_exit_code=$?
                     set -e  # Re-enable exit on error
 
-                    # Check for runtime abort (assert failures): exit code 134 = SIGABRT
-                    if [ $runtime_exit_code -eq 134 ]; then
+                    # Treat any non-zero exit as a failure. 134 (SIGABRT) is a common assert signal.
+                    if [ $runtime_exit_code -ne 0 ]; then
                         has_errors=1
                     fi
                 fi
