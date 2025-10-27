@@ -359,6 +359,7 @@ void ParserContext::reset(bool clearSymbols) {
   hadError = false;
   currentTokenLocation = {};
   previousTokenLocation = {};
+  structDefinitionStack.clear();
   if (clearSymbols)
     structNames.clear();
 }

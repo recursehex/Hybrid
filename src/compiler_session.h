@@ -74,6 +74,7 @@ struct ParserContext {
   int curTok = 0;
   std::map<std::string, int> binopPrecedence;
   std::set<std::string> structNames;
+  std::vector<std::string> structDefinitionStack;
   int loopNestingDepth = 0;
   int unsafeContextLevel = 0;
   bool hadError = false;

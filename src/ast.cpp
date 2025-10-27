@@ -5572,36 +5572,56 @@ llvm::Function *FunctionAST::codegen() {
 llvm::Type *StructAST::codegen() {
   // Check if this struct type already exists
   if (StructTypes.contains(Name)) {
-    fprintf(stderr, "Error: Struct type already defined: %s\n", Name.c_str());
+    reportCompilerError("Struct type already defined: " + Name);
     return nullptr;
   }
   
   // Save the current insertion point to restore it after generating constructors
   auto SavedInsertBlock = Builder->GetInsertBlock();
   
-  // Create the struct type
-  std::vector<llvm::Type*> FieldTypes;
+  // Reserve an opaque struct so recursive field lookups can see it
+  llvm::StructType *StructType = llvm::StructType::create(*TheContext, Name);
+  StructTypes[Name] = StructType;
+
+  auto abandonStructDefinition = [&]() {
+    StructTypes.erase(Name);
+    StructFieldIndices.erase(Name);
+    StructFieldTypes.erase(Name);
+  };
+
+  std::vector<llvm::Type *> FieldTypes;
+  FieldTypes.reserve(Fields.size());
   std::vector<std::pair<std::string, unsigned>> FieldIndices;
-  
-  // Process fields
-  unsigned FieldIndex = 0;
+  FieldIndices.reserve(Fields.size());
   std::map<std::string, std::string> FieldTypeMap;
+
+  unsigned FieldIndex = 0;
   for (const auto &Field : Fields) {
-    llvm::Type *FieldType = getTypeFromString(Field->getType());
-    if (!FieldType) {
-      fprintf(stderr, "Error: Unknown field type: %s\n", Field->getType().c_str());
+    const std::string &FieldTypeName = Field->getType();
+    ParsedTypeDescriptor FieldDesc = parseTypeString(FieldTypeName);
+    if (FieldDesc.sanitized == Name && FieldDesc.pointerDepth == 0 &&
+        !FieldDesc.isNullable && !FieldDesc.isArray) {
+      reportCompilerError(
+          "Struct '" + Name + "' cannot contain non-nullable field '" +
+              Field->getName() + "' of its own type",
+          "Use a nullable or pointer field to avoid infinite size.");
+      abandonStructDefinition();
       return nullptr;
     }
+
+    llvm::Type *FieldType = getTypeFromString(FieldTypeName);
+    if (!FieldType) {
+      reportCompilerError("Unknown field type '" + FieldTypeName + "' in struct '" + Name + "'");
+      abandonStructDefinition();
+      return nullptr;
+    }
+
     FieldTypes.push_back(FieldType);
-    FieldIndices.push_back({Field->getName(), FieldIndex++});
-    FieldTypeMap[Field->getName()] = Field->getType();
+    FieldIndices.emplace_back(Field->getName(), FieldIndex++);
+    FieldTypeMap[Field->getName()] = FieldTypeName;
   }
-  
-  // Create the struct type
-  llvm::StructType *StructType = llvm::StructType::create(*TheContext, FieldTypes, Name);
-  
-  // Store the struct type
-  StructTypes[Name] = StructType;
+
+  StructType->setBody(FieldTypes);
   StructFieldIndices[Name] = FieldIndices;
   StructFieldTypes[Name] = FieldTypeMap;
   
