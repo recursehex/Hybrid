@@ -82,6 +82,39 @@ unsafe
 }
 ```
 
+### Pointer Arithmetic
+
+Hybrid supports C-style pointer arithmetic inside unsafe code. Offsets are scaled by the element size of the pointer, so advancing an `int@` by one moves four bytes, while advancing an `float@2` moves one pointer-sized slot (the nested pointer itself).
+
+```cs
+unsafe
+{
+    int[] numbers = [1, 2, 3, 4]
+    int@ ptr = #numbers[0]
+
+    int first = @ptr            // 1
+
+    int@ third = ptr + 2        // Move two elements forward
+    int thirdValue = @third     // 3
+
+    ptr += 1                    // Compound addition
+    int second = @ptr           // 2
+
+    --third                     // Prefix decrement
+    int secondAgain = @third    // 2
+
+    long distance = third - ptr // Difference in element count (0 here)
+}
+```
+
+The compiler enforces these rules:
+
+- Pointer arithmetic is only permitted inside `unsafe` blocks or functions.
+- Offsets must be integers (signed or unsigned); floating-point offsets are rejected.
+- `ptr + n`, `n + ptr`, `ptr - n`, `ptr += n`, `ptr -= n`, `++ptr`, `ptr++`, `--ptr`, and `ptr--` are all supported.
+- Subtracting two pointers yields the signed element distance (`long` on 64-bit targets, `int` on 32-bit).
+- Adding two pointers is not allowed, and subtraction requires both operands to have the same pointer type.
+
 ## Unsafe Contexts
 
 ### Unsafe Blocks
@@ -163,13 +196,15 @@ unsafe void pointerArithmetic()
     int[] array = [1, 2, 3, 4, 5]
     int@ ptr = #array[0]
 
-    // Access first element
-    int first = @ptr
+    int first = @ptr            // 1
 
-    // Note: Hybrid doesn't currently support pointer arithmetic like C
-    // Use array indexing instead
-    int@ secondPtr = #array[1]
-    int second = @secondPtr
+    int@ thirdPtr = ptr + 2     // Advance by two elements
+    int third = @thirdPtr       // 3
+
+    ptr++                       // Move to second element
+    int second = @ptr           // 2
+
+    long span = thirdPtr - ptr  // 1 element apart
 }
 ```
 
@@ -294,9 +329,9 @@ When you use `unsafe`:
 
 ### Current Limitations
 
-1. **No pointer arithmetic** - Unlike C/C++, you cannot yet do `ptr + 1` or `ptr++`
-2. **Manual null checks** - The compiler does not insert runtime null guards for pointers; check before dereferencing
-3. **Limited type tracking** - Type information may be lost in complex scenarios (e.g. pointer arrays in struct fields)
+1. **Manual null checks** - The compiler does not insert runtime null guards for pointers; check before dereferencing
+2. **Limited type tracking** - Type information may be lost in complex scenarios (e.g. pointer arrays in struct fields)
+3. **No bounds checking for arithmetic** - Pointer arithmetic is unchecked; you must ensure offsets stay within valid ranges
 4. **No dynamic memory allocation** - No `malloc`/`free` or `new`/`delete` equivalents
 
 ### Future Enhancements
@@ -314,7 +349,7 @@ Potential future additions:
 | Address-of | `#x` | `&x` | `&x` |
 | Dereference | `@ptr` | `*ptr` | `*ptr` |
 | Safety requirement | `unsafe` block | None | `unsafe` block |
-| Pointer arithmetic | No (currently) | Yes | In unsafe only |
+| Pointer arithmetic | Yes | Yes | Yes |
 | Null pointers | Yes (`null`) | Yes (`nullptr`) | Yes (`null`) |
 
 ## Summary

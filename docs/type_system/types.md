@@ -33,6 +33,10 @@
 | `schar` | 8-bit signed character | `i8` | `schar sc = 'A'` |
 | `lchar` | 32-bit Unicode character | `i32` | `lchar lc = '\u03a9'` |
 
+## Nullable Types
+
+All value and reference types are non-nullable by default. Append `?` to any type name to allow `null` assignments and propagate nullable results, like `string? maybeAlias = null`. Nullable annotations apply anywhere a type appears, including arrays (`int?[]` vs `int[]?`) and function signatures, while pointer types (`int@`, `float@2`, etc.) always allow `null`. Assigning a nullable expression to a non-nullable target is a compile-time error. Use helper functions or explicit conversions that validate nullability. Accessing members on a nullable struct requires the null-safe access operator `?.`. The compiler performs flow-sensitive narrowing to treat guarded variables as non-nullable within reachable branches.
+
 ## Array Types
 
 Arrays are declared using the `[]` syntax after the element type:

@@ -349,8 +349,6 @@ Array indexing uses `getelementptr` instruction:
 1. **Fixed Size**: Arrays must be initialized with literals; dynamic sizing not supported
 2. **No Length Property**: Array length must be tracked separately
 3. **Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
-4. **No Return Type**: Functions cannot return arrays directly
-5. **No Multi-dimensional**: Only single-dimensional arrays are supported
 
 ### Future Enhancements
 
@@ -358,7 +356,6 @@ Planned features include:
 - Dynamic array allocation with `new[]`
 - Array length property `size`
 - Bounds checking support for additional unsafe scenarios
-- Multi-dimensional arrays
 - Array slicing operations
 
 ## Examples

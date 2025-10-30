@@ -14,6 +14,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
@@ -107,6 +108,7 @@ static void ensureBaseNonNullScope();
 llvm::Value *LogErrorV(const char *Str, std::string_view hint = {});
 llvm::Value *LogErrorV(const std::string &Str, std::string_view hint = {});
 llvm::Function *LogErrorF(const char *Str, std::string_view hint = {});
+llvm::Type *getTypeFromString(const std::string &TypeStr);
 
 static llvm::Function *TopLevelExecFunction = nullptr;
 static llvm::Function *ScriptMainFunction = nullptr;
@@ -881,6 +883,115 @@ static std::optional<bool> unsignedHintFromTypeName(const std::string &typeName)
     return false;
 
   return std::nullopt;
+}
+
+static bool isPointerTypeDescriptor(const ParsedTypeDescriptor &desc) {
+  return desc.pointerDepth > 0 && !desc.isArray;
+}
+
+static std::optional<std::string> getPointerElementTypeName(const std::string &pointerTypeName) {
+  size_t atPos = pointerTypeName.find('@');
+  if (atPos == std::string::npos)
+    return std::nullopt;
+
+  unsigned depth = computePointerDepth(pointerTypeName);
+  std::string base = pointerTypeName.substr(0, atPos);
+  if (depth <= 1)
+    return base;
+
+  if (depth == 2)
+    return base + "@";
+
+  return base + "@" + std::to_string(depth - 1);
+}
+
+static llvm::IntegerType *getPointerIndexType() {
+  unsigned pointerBits = 64;
+  if (TheModule) {
+    const llvm::DataLayout &DL = TheModule->getDataLayout();
+    if (!DL.getStringRepresentation().empty()) {
+      unsigned size = DL.getPointerSizeInBits();
+      if (size > 0)
+        pointerBits = size;
+    }
+  }
+  return llvm::IntegerType::get(*TheContext, pointerBits);
+}
+
+static uint64_t getTypeSizeInBytes(llvm::Type *type) {
+  if (!type)
+    return 0;
+
+  if (TheModule) {
+    const llvm::DataLayout &DL = TheModule->getDataLayout();
+    if (!DL.getStringRepresentation().empty())
+      return DL.getTypeAllocSize(type);
+  }
+
+  if (type->isIntegerTy())
+    return type->getIntegerBitWidth() / 8;
+
+  if (type->isFloatingPointTy())
+    return type->getPrimitiveSizeInBits() / 8;
+
+  if (type->isPointerTy()) {
+    llvm::IntegerType *indexTy = getPointerIndexType();
+    return indexTy->getBitWidth() / 8;
+  }
+
+  return 0;
+}
+
+static llvm::Value *convertOffsetToPointerIndex(llvm::Value *offsetValue,
+                                                const std::string &offsetTypeName) {
+  if (!offsetValue->getType()->isIntegerTy())
+    return LogErrorV("Pointer arithmetic requires an integer offset");
+
+  llvm::IntegerType *indexType = getPointerIndexType();
+  if (offsetValue->getType() == indexType)
+    return offsetValue;
+
+  unsigned offsetBits = offsetValue->getType()->getIntegerBitWidth();
+  unsigned indexBits = indexType->getIntegerBitWidth();
+
+  std::string cleanName = sanitizeBaseTypeName(offsetTypeName);
+  bool isUnsigned = unsignedHintFromTypeName(cleanName).value_or(false);
+
+  if (offsetBits > indexBits)
+    return Builder->CreateTrunc(offsetValue, indexType, "ptroff.trunc");
+
+  if (isUnsigned)
+    return Builder->CreateZExt(offsetValue, indexType, "ptroff.zext");
+
+  return Builder->CreateSExt(offsetValue, indexType, "ptroff.sext");
+}
+
+static llvm::Value *emitPointerOffset(llvm::Value *ptrValue,
+                                      llvm::Value *offsetValue,
+                                      const std::string &pointerTypeName,
+                                      const std::string &offsetTypeName,
+                                      bool negateOffset,
+                                      const char *name) {
+  ParsedTypeDescriptor ptrDesc = parseTypeString(pointerTypeName);
+  if (!isPointerTypeDescriptor(ptrDesc))
+    return LogErrorV("Pointer arithmetic requires pointer operands");
+
+  llvm::Value *indexValue = convertOffsetToPointerIndex(offsetValue, offsetTypeName);
+  if (!indexValue)
+    return nullptr;
+
+  if (negateOffset)
+    indexValue = Builder->CreateNeg(indexValue, "ptroff.neg");
+
+  auto elementNameOpt = getPointerElementTypeName(ptrDesc.sanitized);
+  if (!elementNameOpt)
+    return LogErrorV("Cannot determine element type for pointer arithmetic");
+
+  llvm::Type *elementType = getTypeFromString(*elementNameOpt);
+  if (!elementType)
+    return LogErrorV("Unsupported element type for pointer arithmetic");
+
+  return Builder->CreateInBoundsGEP(elementType, ptrValue, indexValue, name);
 }
 
 static bool isIntegerLiteralExpr(const ExprAST *expr) {
@@ -2872,6 +2983,328 @@ llvm::Value *BinaryExprAST::codegen() {
   // Get type names from operands after potential regeneration
   std::string rawLeftTypeName = getLHS()->getTypeName();
   std::string rawRightTypeName = getRHS()->getTypeName();
+  ParsedTypeDescriptor leftDesc = parseTypeString(rawLeftTypeName);
+  ParsedTypeDescriptor rightDesc = parseTypeString(rawRightTypeName);
+
+  if ((Op == "+" || Op == "-") &&
+      (isPointerTypeDescriptor(leftDesc) || isPointerTypeDescriptor(rightDesc))) {
+    const bool lhsPointer = isPointerTypeDescriptor(leftDesc);
+    const bool rhsPointer = isPointerTypeDescriptor(rightDesc);
+
+    if (lhsPointer && rhsPointer) {
+      if (Op == "+")
+        return LogErrorV("Cannot add two pointer values");
+
+      if (leftDesc.sanitized != rightDesc.sanitized)
+        return LogErrorV("Pointer subtraction requires both operands to have the same pointer type");
+
+      auto elementNameOpt = getPointerElementTypeName(leftDesc.sanitized);
+      if (!elementNameOpt)
+        return LogErrorV("Cannot determine element type for pointer subtraction");
+
+      llvm::Type *elementType = getTypeFromString(*elementNameOpt);
+      if (!elementType)
+        return LogErrorV("Unsupported element type for pointer subtraction");
+
+      llvm::IntegerType *indexType = getPointerIndexType();
+      llvm::Value *lhsInt = Builder->CreatePtrToInt(L, indexType, "ptrlhs.int");
+      llvm::Value *rhsInt = Builder->CreatePtrToInt(R, indexType, "ptrrhs.int");
+      llvm::Value *byteDiff = Builder->CreateSub(lhsInt, rhsInt, "ptrdiff.bytes");
+
+      uint64_t elementSize = getTypeSizeInBytes(elementType);
+      if (elementSize == 0)
+        return LogErrorV("Cannot determine element size for pointer subtraction");
+
+      llvm::Value *resultValue = nullptr;
+      if (elementSize == 1) {
+        resultValue = byteDiff;
+      } else {
+        llvm::Value *elemSizeConst = llvm::ConstantInt::get(indexType, elementSize);
+        resultValue = Builder->CreateSDiv(byteDiff, elemSizeConst, "ptrdiff.elems");
+      }
+
+      const unsigned indexBits = indexType->getIntegerBitWidth();
+      setTypeName(indexBits <= 32 ? "int" : "long");
+      return resultValue;
+    }
+
+    if (Op == "-" && !lhsPointer)
+      return LogErrorV("Pointer subtraction requires the left-hand side to be a pointer");
+
+    const bool pointerOnLeft = lhsPointer;
+    llvm::Value *ptrValue = pointerOnLeft ? L : R;
+    llvm::Value *offsetValue = pointerOnLeft ? R : L;
+    const ParsedTypeDescriptor &pointerDesc = pointerOnLeft ? leftDesc : rightDesc;
+    const ParsedTypeDescriptor &offsetDesc = pointerOnLeft ? rightDesc : leftDesc;
+    const std::string &pointerTypeName = pointerOnLeft ? rawLeftTypeName : rawRightTypeName;
+    const std::string &offsetTypeName = pointerOnLeft ? rawRightTypeName : rawLeftTypeName;
+
+    if (isPointerTypeDescriptor(offsetDesc))
+      return LogErrorV("Pointer arithmetic requires an integer offset");
+    if (offsetValue->getType()->isFloatingPointTy())
+      return LogErrorV("Pointer arithmetic requires an integer offset");
+
+    llvm::Value *resultPtr = emitPointerOffset(
+        ptrValue, offsetValue, pointerTypeName, offsetTypeName,
+        /*negateOffset=*/(Op == "-" && pointerOnLeft), "ptrarith");
+    if (!resultPtr)
+      return nullptr;
+
+    setTypeName(pointerDesc.sanitized);
+    return resultPtr;
+  }
+
+  if (Op == "+=" || Op == "-=" || Op == "*=" || Op == "/=" || Op == "%=") {
+    // Compound assignment operators: a += b is equivalent to a = a + b
+    if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
+      // Simple variable compound assignment
+      const std::string &varName = LHSE->getName();
+      llvm::Value *Variable = NamedValues[varName];
+      bool isLocal = true;
+      if (!Variable) {
+        Variable = GlobalValues[varName];
+        isLocal = false;
+        if (!Variable)
+          return LogErrorV("Unknown variable name for compound assignment");
+      }
+
+      const TypeInfo *info = lookupTypeInfo(varName);
+      std::string lhsPromoteType;
+      if (info)
+        lhsPromoteType = typeNameFromInfo(*info);
+      else
+        lhsPromoteType = LHSE->getTypeName();
+
+      bool isAlias = info && info->isAlias();
+      llvm::Value *StoragePtr = nullptr;   // Points to the actual value for alias variables
+      llvm::Type *ValueType = nullptr;
+      llvm::Value *CurrentVal = nullptr;
+
+      if (isLocal) {
+        llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
+        if (isAlias) {
+          StoragePtr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (varName + "_ptr").c_str());
+          if (!StoragePtr->getType()->isPointerTy())
+            return LogErrorV("Invalid ref storage for compound assignment");
+          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
+          if (!ValueType)
+            return LogErrorV("Invalid type for ref variable in compound assignment");
+          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
+        } else {
+          ValueType = Alloca->getAllocatedType();
+          CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
+        }
+      } else {
+        llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(Variable);
+        if (isAlias) {
+          StoragePtr = Builder->CreateLoad(GV->getValueType(), Variable, (varName + "_ptr").c_str());
+          if (!StoragePtr->getType()->isPointerTy())
+            return LogErrorV("Invalid ref storage for compound assignment");
+          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
+          if (!ValueType)
+            return LogErrorV("Invalid type for ref variable in compound assignment");
+          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
+        } else {
+          ValueType = GV->getValueType();
+          CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
+        }
+      }
+
+      if (!CurrentVal || !ValueType)
+        return LogErrorV("Failed to load value for compound assignment");
+
+      if (CurrentVal->getType()->isPointerTy()) {
+        if (Op != "+=" && Op != "-=")
+          return LogErrorV("Pointer compound assignment only supports '+=' and '-='");
+
+        std::string pointerTypeName = lhsPromoteType.empty() ? getLHS()->getTypeName() : lhsPromoteType;
+        llvm::Value *NewPtr = emitPointerOffset(CurrentVal, R, pointerTypeName,
+                                                getRHS()->getTypeName(), Op == "-=", "ptrarith");
+        if (!NewPtr)
+          return nullptr;
+
+        if (isAlias) {
+          Builder->CreateStore(NewPtr, StoragePtr);
+        } else {
+          Builder->CreateStore(NewPtr, Variable);
+        }
+
+        setTypeName("void");
+        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      }
+
+      // Perform the operation
+      llvm::Value *Result;
+      char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
+
+      // Promote types for the operation
+      std::string rhsPromoteType = getRHS()->getTypeName();
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+      bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+      auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
+      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+      bool compoundUnsigned = lhsUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+      if (!compoundUnsigned) {
+        compoundUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(getLHS()->getTypeName())).value_or(false);
+      }
+      
+      switch (baseOp) {
+        case '+':
+          if (isFloat)
+            Result = Builder->CreateFAdd(PromotedCurrent, PromotedR, "addtmp");
+          else
+            Result = Builder->CreateAdd(PromotedCurrent, PromotedR, "addtmp");
+          break;
+        case '-':
+          if (isFloat)
+            Result = Builder->CreateFSub(PromotedCurrent, PromotedR, "subtmp");
+          else
+            Result = Builder->CreateSub(PromotedCurrent, PromotedR, "subtmp");
+          break;
+        case '*':
+          if (isFloat)
+            Result = Builder->CreateFMul(PromotedCurrent, PromotedR, "multmp");
+          else
+            Result = Builder->CreateMul(PromotedCurrent, PromotedR, "multmp");
+          break;
+        case '/':
+          if (isFloat)
+            Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateUDiv(PromotedCurrent, PromotedR, "divtmp");
+          else
+            Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
+          break;
+        case '%':
+          if (isFloat)
+            Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateURem(PromotedCurrent, PromotedR, "modtmp");
+          else
+            Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
+          break;
+        default:
+          return LogErrorV("Unknown compound assignment operator");
+      }
+      
+      // Cast result back to the original storage type if needed
+      llvm::Value *ResultToStore = Result;
+      if (ResultToStore->getType() != ValueType) {
+        std::string castTargetName = !lhsPromoteType.empty() ? lhsPromoteType : LHSE->getTypeName();
+        ResultToStore = castToType(ResultToStore, ValueType, castTargetName);
+        if (!ResultToStore)
+          return nullptr;
+      }
+
+      // Store the result back to the correct destination
+      if (isAlias) {
+        Builder->CreateStore(ResultToStore, StoragePtr);
+      } else {
+        Builder->CreateStore(ResultToStore, Variable);
+      }
+      // Return a void value to indicate this is a statement, not an expression
+      setTypeName("void");
+      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      
+    } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
+      // Array element compound assignment: arr[i] += val
+      auto accessOpt = computeArrayElementAccess(LHSE);
+      if (!accessOpt)
+        return nullptr;
+      auto &access = *accessOpt;
+
+      llvm::Value *ElementPtr = access.elementPtr;
+      llvm::Type *ElemType = access.elementLLVMType;
+      if (!ElementPtr || !ElemType || !ElementPtr->getType()->isPointerTy())
+        return LogErrorV("Invalid array element pointer");
+
+      std::string elementTypeNameForPromotion = sanitizeBaseTypeName(access.elementTypeName);
+      if (elementTypeNameForPromotion.empty())
+        elementTypeNameForPromotion = sanitizeBaseTypeName(LHSE->getTypeName());
+      
+      // Load current value
+      llvm::Value *CurrentVal = Builder->CreateLoad(ElemType, ElementPtr, "arrayload");
+      
+      if (CurrentVal->getType()->isPointerTy()) {
+        if (Op != "+=" && Op != "-=")
+          return LogErrorV("Pointer compound assignment only supports '+=' and '-='");
+
+        std::string pointerTypeName = access.elementTypeName.empty() ? LHSE->getTypeName() : access.elementTypeName;
+        llvm::Value *NewPtr = emitPointerOffset(CurrentVal, R, pointerTypeName,
+                                                getRHS()->getTypeName(), Op == "-=", "ptrarith");
+        if (!NewPtr)
+          return nullptr;
+
+        Builder->CreateStore(NewPtr, ElementPtr);
+        setTypeName("void");
+        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      }
+
+      // Perform the operation
+      llvm::Value *Result;
+      char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
+      
+      // Promote types for the operation
+      std::string rhsPromoteType = getRHS()->getTypeName();
+      auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
+      bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+      auto elementUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(elementTypeNameForPromotion));
+      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+      bool compoundUnsigned = elementUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+      if (!compoundUnsigned) {
+        compoundUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(LHSE->getArray()->getTypeName())).value_or(false);
+      }
+      
+      switch (baseOp) {
+        case '+':
+          if (isFloat)
+            Result = Builder->CreateFAdd(PromotedCurrent, PromotedR, "addtmp");
+          else
+            Result = Builder->CreateAdd(PromotedCurrent, PromotedR, "addtmp");
+          break;
+        case '-':
+          if (isFloat)
+            Result = Builder->CreateFSub(PromotedCurrent, PromotedR, "subtmp");
+          else
+            Result = Builder->CreateSub(PromotedCurrent, PromotedR, "subtmp");
+          break;
+        case '*':
+          if (isFloat)
+            Result = Builder->CreateFMul(PromotedCurrent, PromotedR, "multmp");
+          else
+            Result = Builder->CreateMul(PromotedCurrent, PromotedR, "multmp");
+          break;
+        case '/':
+          if (isFloat)
+            Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateUDiv(PromotedCurrent, PromotedR, "divtmp");
+          else
+            Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
+          break;
+        case '%':
+          if (isFloat)
+            Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateURem(PromotedCurrent, PromotedR, "modtmp");
+          else
+            Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
+          break;
+        default:
+          return LogErrorV("Unknown compound assignment operator");
+      }
+      
+      // Store the result back
+      Builder->CreateStore(Result, ElementPtr);
+      // Return a void value to indicate this is a statement, not an expression
+      setTypeName("void");
+      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      
+    } else {
+      return LogErrorV("destination of compound assignment must be a variable or array element");
+    }
+  }
+
   std::string leftTypeName = sanitizeBaseTypeName(rawLeftTypeName);
   std::string rightTypeName = sanitizeBaseTypeName(rawRightTypeName);
 
@@ -3297,10 +3730,30 @@ llvm::Value *BinaryExprAST::codegen() {
       if (!CurrentVal || !ValueType)
         return LogErrorV("Failed to load value for compound assignment");
 
+      if (CurrentVal->getType()->isPointerTy()) {
+        if (Op != "+=" && Op != "-=")
+          return LogErrorV("Pointer compound assignment only supports '+=' and '-='");
+
+        std::string pointerTypeName = lhsPromoteType.empty() ? getLHS()->getTypeName() : lhsPromoteType;
+        llvm::Value *NewPtr = emitPointerOffset(CurrentVal, R, pointerTypeName,
+                                                getRHS()->getTypeName(), Op == "-=", "ptrarith");
+        if (!NewPtr)
+          return nullptr;
+
+        if (isAlias) {
+          Builder->CreateStore(NewPtr, StoragePtr);
+        } else {
+          Builder->CreateStore(NewPtr, Variable);
+        }
+
+        setTypeName("void");
+        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      }
+
       // Perform the operation
       llvm::Value *Result;
       char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
-      
+
       // Promote types for the operation
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
@@ -3389,6 +3842,21 @@ llvm::Value *BinaryExprAST::codegen() {
       // Load current value
       llvm::Value *CurrentVal = Builder->CreateLoad(ElemType, ElementPtr, "arrayload");
       
+      if (CurrentVal->getType()->isPointerTy()) {
+        if (Op != "+=" && Op != "-=")
+          return LogErrorV("Pointer compound assignment only supports '+=' and '-='");
+
+        std::string pointerTypeName = access.elementTypeName.empty() ? LHSE->getTypeName() : access.elementTypeName;
+        llvm::Value *NewPtr = emitPointerOffset(CurrentVal, R, pointerTypeName,
+                                                getRHS()->getTypeName(), Op == "-=", "ptrarith");
+        if (!NewPtr)
+          return nullptr;
+
+        Builder->CreateStore(NewPtr, ElementPtr);
+        setTypeName("void");
+        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      }
+
       // Perform the operation
       llvm::Value *Result;
       char baseOp = Op[0]; // Get the base operator (+, -, *, /, %)
@@ -3652,6 +4120,34 @@ llvm::Value *UnaryExprAST::codegen() {
     llvm::Value *Val = Operand->codegen();
     llvm::Type *Ty = Val->getType();
 
+    llvm::Value *CurVal = Builder->CreateLoad(Ty, Ptr, "loadtmp");
+
+    if (Ty->isPointerTy()) {
+        ParsedTypeDescriptor ptrDesc = parseTypeString(Operand->getTypeName());
+        if (!isPointerTypeDescriptor(ptrDesc))
+            return LogErrorV("Pointer arithmetic requires pointer operands");
+
+        auto elementNameOpt = getPointerElementTypeName(ptrDesc.sanitized);
+        if (!elementNameOpt)
+            return LogErrorV("Cannot determine element type for pointer arithmetic");
+
+        llvm::Type *ElementType = getTypeFromString(*elementNameOpt);
+        if (!ElementType)
+            return LogErrorV("Unsupported element type for pointer arithmetic");
+
+        llvm::IntegerType *IndexType = getPointerIndexType();
+        llvm::Value *Step = (Op == "++")
+                                ? static_cast<llvm::Value *>(llvm::ConstantInt::get(IndexType, 1))
+                                : static_cast<llvm::Value *>(llvm::ConstantInt::getSigned(IndexType, -1));
+
+        llvm::Value *NextVal = Builder->CreateInBoundsGEP(
+            ElementType, CurVal, Step, Op == "++" ? "ptrinc" : "ptrdec");
+        Builder->CreateStore(NextVal, Ptr);
+
+        setTypeName(ptrDesc.sanitized);
+        return isPrefix ? NextVal : CurVal;
+    }
+
     llvm::Value *One = nullptr;
     if (Ty->isIntegerTy()) {
         One = llvm::ConstantInt::get(Ty, 1);
@@ -3661,7 +4157,6 @@ llvm::Value *UnaryExprAST::codegen() {
         return LogErrorV("++/-- requires integer or floating-point type");
     }
 
-    llvm::Value *CurVal = Builder->CreateLoad(Ty, Ptr, "loadtmp");
     llvm::Value *NextVal;
 
     if (Op == "++") {
