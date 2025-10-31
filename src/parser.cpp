@@ -2681,7 +2681,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
     if (!Body)
       return false;
 
-    TypeInfo ctorReturn = buildDeclaredTypeInfo("void", false);
+    TypeInfo ctorReturn = buildDeclaredTypeInfo(compositeName, false);
     auto Proto = std::make_unique<PrototypeAST>(std::move(ctorReturn), compositeName, std::move(Args));
     auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     Methods.emplace_back(std::move(Constructor), modifiers, MethodKind::Constructor, compositeName);

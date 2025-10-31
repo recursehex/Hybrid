@@ -41,6 +41,10 @@ struct CompositeTypeInfo {
   AggregateKind kind = AggregateKind::Struct;
   std::map<std::string, std::string> fieldTypes;
   std::map<std::string, MemberModifiers> fieldModifiers;
+  std::map<std::string, std::string> staticFieldTypes;
+  std::map<std::string, MemberModifiers> staticFieldModifiers;
+  std::map<std::string, std::string> staticFieldGlobals;
+  std::vector<std::string> constructorMangledNames;
   std::map<std::string, CompositeMemberInfo> methodInfo;
   std::vector<std::string> baseTypes;
   std::vector<std::string> genericParameters;

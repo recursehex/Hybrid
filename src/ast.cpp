@@ -3741,37 +3741,81 @@ llvm::Value *BinaryExprAST::codegen() {
         bool fieldAllowsNull = false;
         std::string fieldTypeName;
         std::string cleanFieldTypeName;
-        if (auto FieldTypesIt = StructFieldTypes.find(structName); FieldTypesIt != StructFieldTypes.end()) {
-          if (auto TypeIt = FieldTypesIt->second.find(LHSMA->getMemberName()); TypeIt != FieldTypesIt->second.end()) {
+        bool fieldIsStatic = false;
+        std::string staticGlobalName;
+
+        if (const CompositeTypeInfo *info = lookupCompositeInfo(structName)) {
+          if (auto TypeIt = info->staticFieldTypes.find(LHSMA->getMemberName());
+              TypeIt != info->staticFieldTypes.end()) {
             fieldTypeName = TypeIt->second;
             ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
             fieldAllowsNull = typeAllowsNull(fieldDesc);
             cleanFieldTypeName = fieldDesc.sanitized;
+            fieldIsStatic = true;
+            if (auto GlobIt = info->staticFieldGlobals.find(LHSMA->getMemberName());
+                GlobIt != info->staticFieldGlobals.end())
+              staticGlobalName = GlobIt->second;
           }
         }
+
+        if (fieldTypeName.empty()) {
+          if (auto FieldTypesIt = StructFieldTypes.find(structName); FieldTypesIt != StructFieldTypes.end()) {
+            if (auto TypeIt = FieldTypesIt->second.find(LHSMA->getMemberName());
+                TypeIt != FieldTypesIt->second.end()) {
+              fieldTypeName = TypeIt->second;
+              ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
+              fieldAllowsNull = typeAllowsNull(fieldDesc);
+              cleanFieldTypeName = fieldDesc.sanitized;
+            }
+          }
+        }
+
+        if (staticGlobalName.empty())
+          staticGlobalName = structName + "." + LHSMA->getMemberName();
+
         if (rhsIsNullable && !fieldAllowsNull) {
           return LogErrorV(("Cannot assign nullable value to non-nullable field '" + LHSMA->getMemberName() + "'").c_str());
         }
 
         llvm::Type *FieldType = nullptr;
-        if (auto StructIt = StructTypes.find(structName); StructIt != StructTypes.end()) {
-          auto FieldIndicesIt = StructFieldIndices.find(structName);
-          if (FieldIndicesIt != StructFieldIndices.end()) {
-            for (const auto &FieldEntry : FieldIndicesIt->second) {
-              if (FieldEntry.first == LHSMA->getMemberName()) {
-                FieldType = StructIt->second->getElementType(FieldEntry.second);
-                break;
+        if (!fieldIsStatic) {
+          if (auto StructIt = StructTypes.find(structName); StructIt != StructTypes.end()) {
+            auto FieldIndicesIt = StructFieldIndices.find(structName);
+            if (FieldIndicesIt != StructFieldIndices.end()) {
+              for (const auto &FieldEntry : FieldIndicesIt->second) {
+                if (FieldEntry.first == LHSMA->getMemberName()) {
+                  FieldType = StructIt->second->getElementType(FieldEntry.second);
+                  break;
+                }
               }
             }
           }
         }
 
+        if (!FieldType && fieldIsStatic) {
+          if (auto GlobalIt = CG.globalValues.find(staticGlobalName);
+              GlobalIt != CG.globalValues.end()) {
+            FieldType = GlobalIt->second->getValueType();
+          }
+        }
+
+        if (!FieldType) {
+          if (auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(FieldPtr))
+            FieldType = GV->getValueType();
+        }
+
         if (!FieldType)
           return LogErrorV(("Internal error: missing type info for field '" + LHSMA->getMemberName() + "'").c_str());
 
+        if (cleanFieldTypeName.empty() && !fieldTypeName.empty()) {
+          ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
+          cleanFieldTypeName = fieldDesc.sanitized;
+        }
+
+        if (cleanFieldTypeName.empty())
+          cleanFieldTypeName = sanitizeBaseTypeName(LHSMA->getTypeName());
+
         std::string diagFieldTypeName = cleanFieldTypeName;
-        if (diagFieldTypeName.empty())
-          diagFieldTypeName = sanitizeBaseTypeName(LHSMA->getTypeName());
 
         std::string contextDescription = "assignment to field '" + LHSMA->getMemberName() + "'";
         if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, FieldType, diagFieldTypeName, contextDescription))
@@ -4559,40 +4603,6 @@ llvm::Value *CallExprAST::codegen() {
     return LogErrorV("Unsupported call target expression");
   }
 
-  if (StructTypes.contains(getCallee())) {
-    std::string ConstructorName = getCallee() + "_new";
-    llvm::Function *ConstructorF = TheModule->getFunction(ConstructorName);
-    if (!ConstructorF)
-      return LogErrorV(("Unknown struct constructor: " + getCallee()).c_str());
-
-    setTypeName(getCallee());
-
-    if (ConstructorF->arg_size() != getArgs().size())
-      return LogErrorV("Incorrect # arguments passed to constructor");
-
-    std::vector<llvm::Value *> ArgsV;
-    unsigned i = 0;
-    for (auto &Arg : ConstructorF->args()) {
-      llvm::Value *ArgVal = getArgs()[i]->codegen();
-      if (!ArgVal)
-        return nullptr;
-
-      ArgVal = castToType(ArgVal, Arg.getType());
-      ArgsV.push_back(ArgVal);
-      ++i;
-    }
-
-    llvm::Value *ConstructedValue =
-        Builder->CreateCall(ConstructorF, ArgsV, "structtmp");
-
-    llvm::StructType *StructType = StructTypes[getCallee()];
-    llvm::AllocaInst *StructAlloca =
-        Builder->CreateAlloca(StructType, nullptr, getCallee() + "_inst");
-    Builder->CreateStore(ConstructedValue, StructAlloca);
-
-    return StructAlloca;
-  }
-
   std::vector<bool> ArgIsRef;
   ArgIsRef.reserve(getArgs().size());
   std::vector<llvm::Value *> ArgValues;
@@ -4648,6 +4658,27 @@ llvm::Value *CallExprAST::codegen() {
     if (!Value)
       return nullptr;
     ArgValues.push_back(Value);
+  }
+
+  if (StructTypes.contains(getCallee())) {
+    setTypeName(getCallee());
+
+    llvm::Value *ConstructedValue =
+        emitResolvedCall(getCallee(), std::move(ArgValues), ArgIsRef);
+    if (!ConstructedValue)
+      return nullptr;
+
+    llvm::StructType *StructType = StructTypes[getCallee()];
+    if (ConstructedValue->getType()->isPointerTy())
+      return ConstructedValue;
+
+    if (ConstructedValue->getType() != StructType)
+      ConstructedValue = castToType(ConstructedValue, StructType);
+
+    llvm::AllocaInst *StructAlloca = Builder->CreateAlloca(
+        StructType, nullptr, getCallee() + "_inst");
+    Builder->CreateStore(ConstructedValue, StructAlloca);
+    return StructAlloca;
   }
 
   return emitResolvedCall(getCallee(), std::move(ArgValues), ArgIsRef);
@@ -6456,6 +6487,27 @@ llvm::Type *StructAST::codegen() {
       return nullptr;
     }
 
+    const bool isStatic =
+        static_cast<uint8_t>(Field->getModifiers().storage & StorageFlag::Static) != 0;
+
+    if (isStatic) {
+      llvm::Constant *Init = llvm::Constant::getNullValue(FieldType);
+      std::string GlobalName = Name + "." + Field->getName();
+
+      auto *GV = new llvm::GlobalVariable(
+          *TheModule, FieldType,
+          static_cast<uint8_t>(Field->getModifiers().storage & StorageFlag::Const) != 0,
+          llvm::GlobalValue::InternalLinkage, Init, GlobalName);
+
+      CG.globalValues[GlobalName] = GV;
+      rememberGlobalType(GlobalName, makeTypeInfo(FieldTypeName));
+
+      compositeInfo.staticFieldTypes[Field->getName()] = FieldTypeName;
+      compositeInfo.staticFieldModifiers[Field->getName()] = Field->getModifiers();
+      compositeInfo.staticFieldGlobals[Field->getName()] = GlobalName;
+      continue;
+    }
+
     FieldTypes.push_back(FieldType);
     FieldIndices.emplace_back(Field->getName(), FieldIndex++);
     FieldTypeMap[Field->getName()] = FieldTypeName;
@@ -6466,6 +6518,9 @@ llvm::Type *StructAST::codegen() {
   StructFieldIndices[Name] = FieldIndices;
   StructFieldTypes[Name] = FieldTypeMap;
   compositeInfo.fieldTypes = FieldTypeMap;
+
+  CG.compositeMetadata[Name] = std::move(compositeInfo);
+  CompositeTypeInfo &metadata = CG.compositeMetadata[Name];
   
   // Generate constructor and other methods
   for (auto &MethodDef : Methods) {
@@ -6474,7 +6529,7 @@ llvm::Type *StructAST::codegen() {
       continue;
 
     if (MethodDef.getKind() == MethodKind::Constructor) {
-      std::string ConstructorName = Name + "_new";
+      std::string ConstructorName = Method->getProto()->getMangledName();
       const auto &CtorArgs = Method->getProto()->getArgs();
 
       std::vector<llvm::Type *> ParamTypes;
@@ -6543,6 +6598,11 @@ llvm::Type *StructAST::codegen() {
         }
 
         llvm::verifyFunction(*ConstructorFunc);
+
+        metadata.constructorMangledNames.push_back(ConstructorName);
+        FunctionOverload &ctorEntry =
+            registerFunctionOverload(*Method->getProto(), ConstructorName);
+        ctorEntry.function = ConstructorFunc;
       } else {
         ConstructorFunc->eraseFromParent();
         NamedValues.clear();
@@ -6572,9 +6632,9 @@ llvm::Type *StructAST::codegen() {
     }
 
     if (MethodDef.getKind() == MethodKind::ThisOverride)
-      compositeInfo.thisOverride = Method->getProto()->getName();
+      metadata.thisOverride = Method->getProto()->getName();
 
-    compositeInfo.methodInfo[MethodDef.getDisplayName()] =
+    metadata.methodInfo[MethodDef.getDisplayName()] =
         {MethodDef.getModifiers(), Method->getProto()->getName()};
 
     ScopedCompositeContext methodScope(Name, MethodDef.getKind(),
@@ -6591,8 +6651,6 @@ llvm::Type *StructAST::codegen() {
     Builder->ClearInsertionPoint();
   }
 
-  CG.compositeMetadata[Name] = std::move(compositeInfo);
-  
   return StructType;
 }
 
@@ -6615,6 +6673,74 @@ llvm::Value *MemberAccessExprAST::codegen() {
   }
   std::string StructLookupName = ObjectTypeDesc.sanitized;
 
+  const CompositeTypeInfo *info = lookupCompositeInfo(StructLookupName);
+  const MemberModifiers *modifiers = nullptr;
+  bool isStaticField = false;
+  std::string staticFieldType;
+  std::string staticGlobalName;
+  MemberModifiers defaultStaticModifiers;
+
+  if (info) {
+    (void)info;
+  }
+
+  if (info) {
+    if (auto modIt = info->fieldModifiers.find(MemberName);
+        modIt != info->fieldModifiers.end()) {
+      modifiers = &modIt->second;
+    } else if (auto staticIt = info->staticFieldModifiers.find(MemberName);
+               staticIt != info->staticFieldModifiers.end()) {
+      modifiers = &staticIt->second;
+      isStaticField = true;
+      if (auto typeIt = info->staticFieldTypes.find(MemberName);
+          typeIt != info->staticFieldTypes.end())
+        staticFieldType = typeIt->second;
+      if (auto globIt = info->staticFieldGlobals.find(MemberName);
+          globIt != info->staticFieldGlobals.end())
+        staticGlobalName = globIt->second;
+    }
+  }
+
+  if (!isStaticField) {
+    staticGlobalName = StructLookupName + "." + MemberName;
+    auto globalFallback = CG.globalValues.find(staticGlobalName);
+    if (globalFallback != CG.globalValues.end()) {
+      isStaticField = true;
+      if (!info || !modifiers) {
+        defaultStaticModifiers.access = MemberAccess::ReadPublicWritePrivate();
+        defaultStaticModifiers.storage |= StorageFlag::Static;
+        modifiers = &defaultStaticModifiers;
+      }
+      if (auto typeIt = CG.globalTypes.find(staticGlobalName);
+          typeIt != CG.globalTypes.end())
+        staticFieldType = typeIt->second.typeName;
+    } else {
+      staticGlobalName.clear();
+    }
+  }
+
+  if (isStaticField) {
+    if (!modifiers ||
+        !ensureMemberAccessAllowed(*modifiers, AccessIntent::Read,
+                                   StructLookupName, MemberName))
+      return nullptr;
+
+    auto globalIt = CG.globalValues.find(staticGlobalName);
+    if (globalIt == CG.globalValues.end())
+      return LogErrorV(("Static field storage not found for '" + MemberName +
+                        "' in type '" + StructLookupName + "'")
+                           .c_str());
+
+    llvm::GlobalVariable *GV = globalIt->second;
+    if (!staticFieldType.empty())
+      setTypeName(staticFieldType);
+    return Builder->CreateLoad(GV->getValueType(), GV, MemberName);
+  }
+
+  if (modifiers &&
+      !ensureMemberAccessAllowed(*modifiers, AccessIntent::Read,
+                                 StructLookupName, MemberName))
+    return nullptr;
 
   // If ObjectTypeName is empty but have a valid pointer, it might be a nested struct access
   // In that case, the ObjectPtr is already a pointer to a struct
@@ -6651,18 +6777,6 @@ llvm::Value *MemberAccessExprAST::codegen() {
     return LogErrorV(("Field not found in struct: " + MemberName).c_str());
   }
   
-  const MemberModifiers *modifiers = nullptr;
-  if (const auto *info = lookupCompositeInfo(StructLookupName)) {
-    auto modIt = info->fieldModifiers.find(MemberName);
-    if (modIt != info->fieldModifiers.end())
-      modifiers = &modIt->second;
-  }
-
-  if (modifiers &&
-      !ensureMemberAccessAllowed(*modifiers, AccessIntent::Read, StructLookupName,
-                                 MemberName))
-    return nullptr;
-
   // Generate GEP to access the field
   std::vector<llvm::Value*> Indices = {
     llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)),
@@ -6705,7 +6819,66 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
     return LogErrorV(("Cannot access nullable type '" + ObjectTypeName + "' without null-safe operator").c_str());
   }
   std::string StructLookupName = ObjectTypeDesc.sanitized;
-  
+
+  const CompositeTypeInfo *info = lookupCompositeInfo(StructLookupName);
+  const MemberModifiers *modifiers = nullptr;
+  bool isStaticField = false;
+  std::string staticGlobalName;
+  MemberModifiers defaultStaticModifiers;
+
+  if (info) {
+    (void)info;
+  }
+
+  if (info) {
+    if (auto modIt = info->fieldModifiers.find(MemberName);
+        modIt != info->fieldModifiers.end()) {
+      modifiers = &modIt->second;
+    } else if (auto staticIt = info->staticFieldModifiers.find(MemberName);
+               staticIt != info->staticFieldModifiers.end()) {
+      modifiers = &staticIt->second;
+      isStaticField = true;
+      if (auto globIt = info->staticFieldGlobals.find(MemberName);
+          globIt != info->staticFieldGlobals.end())
+        staticGlobalName = globIt->second;
+    }
+  }
+
+  if (!isStaticField) {
+    staticGlobalName = StructLookupName + "." + MemberName;
+    auto globalFallback = CG.globalValues.find(staticGlobalName);
+    if (globalFallback != CG.globalValues.end()) {
+      isStaticField = true;
+      if (!info || !modifiers) {
+        defaultStaticModifiers.access = MemberAccess::ReadPublicWritePrivate();
+        defaultStaticModifiers.storage |= StorageFlag::Static;
+        modifiers = &defaultStaticModifiers;
+      }
+    } else {
+      staticGlobalName.clear();
+    }
+  }
+
+  if (isStaticField) {
+    if (!modifiers ||
+        !ensureMemberAccessAllowed(*modifiers, AccessIntent::Write,
+                                   StructLookupName, MemberName))
+      return nullptr;
+
+    auto globalIt = CG.globalValues.find(staticGlobalName);
+    if (globalIt == CG.globalValues.end())
+      return LogErrorV(("Static field storage not found for '" + MemberName +
+                        "' in type '" + StructLookupName + "'")
+                           .c_str());
+
+    return globalIt->second;
+  }
+
+  if (modifiers &&
+      !ensureMemberAccessAllowed(*modifiers, AccessIntent::Write,
+                                 StructLookupName, MemberName))
+    return nullptr;
+
   // Find the struct type
   auto StructIt = StructTypes.find(StructLookupName);
   if (StructIt == StructTypes.end()) {
@@ -6718,18 +6891,6 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
     return LogErrorV("Internal error: struct field indices not found");
   }
   
-  const MemberModifiers *modifiers = nullptr;
-  if (const auto *info = lookupCompositeInfo(StructLookupName)) {
-    auto modIt = info->fieldModifiers.find(MemberName);
-    if (modIt != info->fieldModifiers.end())
-      modifiers = &modIt->second;
-  }
-
-  if (modifiers &&
-      !ensureMemberAccessAllowed(*modifiers, AccessIntent::Write, StructLookupName,
-                                 MemberName))
-    return nullptr;
-
   // Find the specific field
   unsigned FieldIndex = 0;
   bool FieldFound = false;
