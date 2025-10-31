@@ -118,7 +118,7 @@ void HandleUseStatement() {
 }
 
 void HandleStructDefinition() {
-  if (auto StructAST = ParseStructDefinition()) {
+  if (auto StructAST = ParseStructDefinition(AggregateKind::Struct)) {
     if (auto StructType = StructAST->codegen()) {
       if (gInteractiveMode) fprintf(stderr, "Generated struct type:\n");
       StructType->print(llvm::errs());
@@ -130,6 +130,18 @@ void HandleStructDefinition() {
   }
 }
 
+void HandleClassDefinition() {
+  if (auto ClassAST = ParseStructDefinition(AggregateKind::Class)) {
+    if (auto ClassType = ClassAST->codegen()) {
+      if (gInteractiveMode) fprintf(stderr, "Generated class type:\n");
+      ClassType->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    }
+  } else {
+    getNextToken();
+  }
+}
+
 void HandleUnsafe() {
   getNextToken(); // eat 'unsafe'
 
@@ -137,6 +149,10 @@ void HandleUnsafe() {
     // Handle unsafe struct definition
     enterUnsafeContext();
     HandleStructDefinition();
+    exitUnsafeContext();
+  } else if (CurTok == tok_class) {
+    enterUnsafeContext();
+    HandleClassDefinition();
     exitUnsafeContext();
   } else {
     // Handle unsafe function definition
@@ -190,6 +206,9 @@ void MainLoop() {
       break;
     case tok_struct:
       HandleStructDefinition();
+      break;
+    case tok_class:
+      HandleClassDefinition();
       break;
     case tok_switch:
       HandleSwitchStatement();

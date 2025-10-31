@@ -11,6 +11,8 @@
 #include "concepts.h"
 #include "numeric_literal.h"
 
+struct SourceLocation;
+
 enum class RefStorageClass {
   None,
   RefValue,
@@ -33,6 +35,108 @@ struct TypeInfo {
   bool isReference() const { return refStorage != RefStorageClass::None; }
   bool ownsStorage() const { return refStorage == RefStorageClass::RefValue; }
   bool isAlias() const { return refStorage == RefStorageClass::RefAlias; }
+};
+
+enum class AggregateKind : uint8_t {
+  Struct,
+  Class
+};
+
+enum class AccessFlag : uint8_t {
+  None = 0,
+  ReadPublic = 1 << 0,
+  WritePublic = 1 << 1,
+  ReadProtected = 1 << 2,
+  WriteProtected = 1 << 3,
+  ReadPrivate = 1 << 4,
+  WritePrivate = 1 << 5
+};
+
+constexpr inline AccessFlag operator|(AccessFlag lhs, AccessFlag rhs) {
+  return static_cast<AccessFlag>(
+      static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
+
+constexpr inline AccessFlag operator&(AccessFlag lhs, AccessFlag rhs) {
+  return static_cast<AccessFlag>(
+      static_cast<uint8_t>(lhs) & static_cast<uint8_t>(rhs));
+}
+
+constexpr inline AccessFlag operator~(AccessFlag flag) {
+  return static_cast<AccessFlag>(~static_cast<uint8_t>(flag));
+}
+
+inline AccessFlag &operator|=(AccessFlag &lhs, AccessFlag rhs) {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
+inline AccessFlag &operator&=(AccessFlag &lhs, AccessFlag rhs) {
+  lhs = lhs & rhs;
+  return lhs;
+}
+
+enum class StorageFlag : uint8_t {
+  None = 0,
+  Static = 1 << 0,
+  Const = 1 << 1
+};
+
+constexpr inline StorageFlag operator|(StorageFlag lhs, StorageFlag rhs) {
+  return static_cast<StorageFlag>(
+      static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
+
+constexpr inline StorageFlag operator&(StorageFlag lhs, StorageFlag rhs) {
+  return static_cast<StorageFlag>(
+      static_cast<uint8_t>(lhs) & static_cast<uint8_t>(rhs));
+}
+
+constexpr inline StorageFlag operator~(StorageFlag flag) {
+  return static_cast<StorageFlag>(~static_cast<uint8_t>(flag));
+}
+
+inline StorageFlag &operator|=(StorageFlag &lhs, StorageFlag rhs) {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
+inline StorageFlag &operator&=(StorageFlag &lhs, StorageFlag rhs) {
+  lhs = lhs & rhs;
+  return lhs;
+}
+
+struct MemberAccess {
+  AccessFlag flags = AccessFlag::None;
+
+  bool has(AccessFlag flag) const {
+    return static_cast<uint8_t>(flags & flag) != 0;
+  }
+
+  void add(AccessFlag flag) { flags |= flag; }
+
+  static MemberAccess None() { return MemberAccess{AccessFlag::None}; }
+  static MemberAccess PublicReadWrite() {
+    return MemberAccess{AccessFlag::ReadPublic | AccessFlag::WritePublic};
+  }
+  static MemberAccess ReadPublicWritePrivate() {
+    return MemberAccess{AccessFlag::ReadPublic | AccessFlag::WritePrivate};
+  }
+  static MemberAccess PrivateOnly() {
+    return MemberAccess{AccessFlag::ReadPrivate | AccessFlag::WritePrivate};
+  }
+  static MemberAccess ProtectedReadWrite() {
+    return MemberAccess{AccessFlag::ReadProtected | AccessFlag::WriteProtected};
+  }
+};
+
+struct MemberModifiers {
+  MemberAccess access{};
+  StorageFlag storage = StorageFlag::None;
+  bool isOverride = false;
+  bool isVirtual = false;
+  bool isAbstract = false;
+  bool isProperty = false;
 };
 
 // LLVM forward declarations
@@ -581,6 +685,7 @@ public:
 /// CallExprAST - Expression class for function calls.
 class CallExprAST : public ExprAST {
   std::string Callee;
+  std::unique_ptr<ExprAST> CalleeExpr;
   std::vector<std::unique_ptr<ExprAST>> Args;
 
 public:
@@ -588,8 +693,14 @@ public:
               std::vector<std::unique_ptr<ExprAST>> Args)
       : Callee(Callee), Args(std::move(Args)) {}
 
+  CallExprAST(std::unique_ptr<ExprAST> CalleeExpr,
+              std::vector<std::unique_ptr<ExprAST>> Args)
+      : CalleeExpr(std::move(CalleeExpr)), Args(std::move(Args)) {}
+
   llvm::Value *codegen() override;
   [[nodiscard]] const std::string &getCallee() const { return Callee; }
+  ExprAST *getCalleeExpr() const { return CalleeExpr.get(); }
+  bool hasCalleeExpr() const { return static_cast<bool>(CalleeExpr); }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
 };
 
@@ -651,13 +762,15 @@ public:
 class FieldAST {
   std::string Type;
   std::string Name;
+  MemberModifiers Modifiers;
 
 public:
-  FieldAST(const std::string &Type, const std::string &Name)
-      : Type(Type), Name(Name) {}
+  FieldAST(std::string Type, std::string Name, MemberModifiers Modifiers)
+      : Type(std::move(Type)), Name(std::move(Name)), Modifiers(Modifiers) {}
   
   const std::string &getType() const { return Type; }
   [[nodiscard]] const std::string &getName() const { return Name; }
+  const MemberModifiers &getModifiers() const { return Modifiers; }
 };
 
 /// MemberAccessExprAST - Expression class for struct member access (e.g. point.x).
@@ -699,23 +812,61 @@ public:
   llvm::Value *codegen_ptr() override;
 };
 
+enum class MethodKind : uint8_t {
+  Constructor,
+  Regular,
+  ThisOverride
+};
+
+struct MethodDefinition {
+  std::unique_ptr<FunctionAST> Function;
+  MemberModifiers Modifiers;
+  MethodKind Kind = MethodKind::Regular;
+  std::string DisplayName;
+
+  MethodDefinition(std::unique_ptr<FunctionAST> Function,
+                   MemberModifiers Modifiers,
+                   MethodKind Kind = MethodKind::Regular,
+                   std::string DisplayName = {})
+      : Function(std::move(Function)), Modifiers(Modifiers), Kind(Kind),
+        DisplayName(std::move(DisplayName)) {}
+
+  FunctionAST *get() const { return Function.get(); }
+  std::unique_ptr<FunctionAST> takeFunction() { return std::move(Function); }
+  const MemberModifiers &getModifiers() const { return Modifiers; }
+  MethodKind getKind() const { return Kind; }
+  const std::string &getDisplayName() const { return DisplayName; }
+};
+
 /// StructAST - Represents a struct definition.
 class StructAST {
+  AggregateKind Kind = AggregateKind::Struct;
   std::string Name;
   std::vector<std::unique_ptr<FieldAST>> Fields;
-  std::vector<std::unique_ptr<FunctionAST>> Methods;
+  std::vector<MethodDefinition> Methods;
+  std::vector<std::string> BaseTypes;
+  std::vector<std::string> GenericParameters;
 
 public:
-  StructAST(const std::string &Name,
+  StructAST(AggregateKind Kind,
+            std::string Name,
             std::vector<std::unique_ptr<FieldAST>> Fields,
-            std::vector<std::unique_ptr<FunctionAST>> Methods)
-      : Name(Name), Fields(std::move(Fields)), Methods(std::move(Methods)) {}
+            std::vector<MethodDefinition> Methods,
+            std::vector<std::string> BaseTypes = {},
+            std::vector<std::string> GenericParameters = {})
+      : Kind(Kind), Name(std::move(Name)), Fields(std::move(Fields)),
+        Methods(std::move(Methods)), BaseTypes(std::move(BaseTypes)),
+        GenericParameters(std::move(GenericParameters)) {}
   
   llvm::Type *codegen();
   
+  AggregateKind getKind() const { return Kind; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<std::unique_ptr<FieldAST>> &getFields() const { return Fields; }
-  const std::vector<std::unique_ptr<FunctionAST>> &getMethods() const { return Methods; }
+  const std::vector<MethodDefinition> &getMethods() const { return Methods; }
+  std::vector<MethodDefinition> &getMethods() { return Methods; }
+  const std::vector<std::string> &getBaseTypes() const { return BaseTypes; }
+  const std::vector<std::string> &getGenericParameters() const { return GenericParameters; }
 };
 
 // Initialize LLVM module

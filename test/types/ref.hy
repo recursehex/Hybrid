@@ -54,3 +54,12 @@ ref int original = 42
 ref int linked = original
 int copy = linked
 assert copy == 42   // copy should be 42 (value copied, not linked)
+
+// Test 8: Reference type returning function
+ref int getRef()
+{
+    int local = 42
+    return ref local
+}
+
+assert getRef() == 42

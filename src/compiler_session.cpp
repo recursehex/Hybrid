@@ -186,6 +186,8 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("skip");
     case tok_struct:
       return makeKeyword("struct");
+    case tok_class:
+      return makeKeyword("class");
     case tok_this:
       return makeKeyword("this");
     case tok_switch:
@@ -196,6 +198,16 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("default");
     case tok_assert:
       return makeKeyword("assert");
+    case tok_public:
+      return makeKeyword("public");
+    case tok_private:
+      return makeKeyword("private");
+    case tok_protected:
+      return makeKeyword("protected");
+    case tok_static:
+      return makeKeyword("static");
+    case tok_const:
+      return makeKeyword("const");
     case tok_int:
       return makeKeyword("int");
     case tok_float:
@@ -350,6 +362,28 @@ void reportCompilerError(const std::string &message, std::string_view hint) {
   parser.hadError = true;
 }
 
+void reportCompilerWarning(const std::string &message, std::string_view hint) {
+  const SourceLocation loc = bestErrorLocation();
+  std::ostringstream oss;
+  oss << "Warning";
+  if (loc.isValid()) {
+    oss << " at line " << loc.line << ", column " << loc.column;
+  }
+  oss << ": " << message;
+
+  const std::string tokenDescription = describeTokenForDiagnostics(currentParser().curTok);
+  if (!tokenDescription.empty()) {
+    oss << " (near " << tokenDescription << ")";
+  }
+
+  std::string formatted = oss.str();
+  fprintf(stderr, "%s\n", formatted.c_str());
+
+  if (!hint.empty()) {
+    fprintf(stderr, "  hint: %.*s\n", static_cast<int>(hint.size()), hint.data());
+  }
+}
+
 // ParserContext ----------------------------------------------------------------
 
 void ParserContext::reset(bool clearSymbols) {
@@ -360,8 +394,11 @@ void ParserContext::reset(bool clearSymbols) {
   currentTokenLocation = {};
   previousTokenLocation = {};
   structDefinitionStack.clear();
+  classDefinitionStack.clear();
   if (clearSymbols)
     structNames.clear();
+  if (clearSymbols)
+    classNames.clear();
 }
 
 void ParserContext::clearPrecedence() {

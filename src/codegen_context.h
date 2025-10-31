@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -31,6 +32,21 @@ struct FunctionOverload {
   llvm::Function *function = nullptr;
 };
 
+struct CompositeMemberInfo {
+  MemberModifiers modifiers;
+  std::string signature;
+};
+
+struct CompositeTypeInfo {
+  AggregateKind kind = AggregateKind::Struct;
+  std::map<std::string, std::string> fieldTypes;
+  std::map<std::string, MemberModifiers> fieldModifiers;
+  std::map<std::string, CompositeMemberInfo> methodInfo;
+  std::vector<std::string> baseTypes;
+  std::vector<std::string> genericParameters;
+  std::optional<std::string> thisOverride;
+};
+
 /// CodegenContext stores all mutable IR-generation state for a compiler
 /// session. It replaces the previous collection of global variables used by
 /// ast.cpp.
@@ -47,12 +63,15 @@ struct CodegenContext {
   std::map<std::string, std::vector<int64_t>> arraySizes;
   std::map<std::string, std::vector<std::pair<std::string, unsigned>>> structFieldIndices;
   std::map<std::string, std::map<std::string, std::string>> structFieldTypes;
+  std::map<std::string, CompositeTypeInfo> compositeMetadata;
 
   std::map<std::string, std::vector<FunctionOverload>> functionOverloads;
 
   std::vector<llvm::BasicBlock *> loopExitBlocks;
   std::vector<llvm::BasicBlock *> loopContinueBlocks;
   std::vector<std::set<std::string>> nonNullFactsStack;
+  std::vector<std::string> compositeContextStack;
+  std::vector<MethodKind> methodContextStack;
 
   void reset();
 };
@@ -69,10 +88,13 @@ inline void CodegenContext::reset() {
   arraySizes.clear();
   structFieldIndices.clear();
   structFieldTypes.clear();
+  compositeMetadata.clear();
   functionOverloads.clear();
   loopExitBlocks.clear();
   loopContinueBlocks.clear();
   nonNullFactsStack.clear();
+  compositeContextStack.clear();
+  methodContextStack.clear();
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

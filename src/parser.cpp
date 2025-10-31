@@ -15,6 +15,9 @@
 #define CurTok (currentParser().curTok)
 #define BinopPrecedence (currentParser().binopPrecedence)
 #define StructNames (currentParser().structNames)
+#define ClassNames (currentParser().classNames)
+#define StructDefinitionStack (currentParser().structDefinitionStack)
+#define ClassDefinitionStack (currentParser().classDefinitionStack)
 #define LoopNestingDepth (currentParser().loopNestingDepth)
 #define UnsafeContextLevel (currentParser().unsafeContextLevel)
 
@@ -26,6 +29,7 @@
 static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr();
 static void RecoverAfterExpressionError();
 static void SkipNewlines();
+static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args);
 
 static unsigned parsePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -177,7 +181,16 @@ bool IsBuiltInType()
 }
 
 static bool IsActiveStructName(const std::string &name) {
-  const auto &stack = currentParser().structDefinitionStack;
+  const auto &stack = StructDefinitionStack;
+  for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
+    if (*it == name)
+      return true;
+  }
+  return false;
+}
+
+static bool IsActiveClassName(const std::string &name) {
+  const auto &stack = ClassDefinitionStack;
   for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
     if (*it == name)
       return true;
@@ -191,7 +204,134 @@ bool IsValidType()
   return IsBuiltInType() ||
          (CurTok == tok_identifier &&
           (StructNames.contains(IdentifierStr) ||
-           IsActiveStructName(IdentifierStr)));
+           ClassNames.contains(IdentifierStr) ||
+           IsActiveStructName(IdentifierStr) ||
+           IsActiveClassName(IdentifierStr)));
+}
+
+enum class AccessSpecifier {
+  Default,
+  Public,
+  Private,
+  Protected
+};
+
+struct PendingMemberModifiers {
+  AccessSpecifier access = AccessSpecifier::Default;
+  bool hasExplicitAccess = false;
+  bool isStatic = false;
+  bool isConst = false;
+};
+
+static bool ParsePendingMemberModifiers(PendingMemberModifiers &out) {
+  PendingMemberModifiers pending;
+  bool parsing = true;
+
+  while (parsing) {
+    switch (CurTok) {
+    case tok_public:
+      if (pending.hasExplicitAccess) {
+        reportCompilerError("Duplicate access modifier", "Only one of public, private, or protected may be specified");
+        return false;
+      }
+      pending.access = AccessSpecifier::Public;
+      pending.hasExplicitAccess = true;
+      getNextToken();
+      SkipNewlines();
+      break;
+    case tok_private:
+      if (pending.hasExplicitAccess) {
+        reportCompilerError("Duplicate access modifier", "Only one of public, private, or protected may be specified");
+        return false;
+      }
+      pending.access = AccessSpecifier::Private;
+      pending.hasExplicitAccess = true;
+      getNextToken();
+      SkipNewlines();
+      break;
+    case tok_protected:
+      if (pending.hasExplicitAccess) {
+        reportCompilerError("Duplicate access modifier", "Only one of public, private, or protected may be specified");
+        return false;
+      }
+      pending.access = AccessSpecifier::Protected;
+      pending.hasExplicitAccess = true;
+      getNextToken();
+      SkipNewlines();
+      break;
+    case tok_static:
+      if (pending.isStatic) {
+        reportCompilerError("Duplicate 'static' modifier");
+        return false;
+      }
+      pending.isStatic = true;
+      getNextToken();
+      SkipNewlines();
+      break;
+    case tok_const:
+      if (pending.isConst) {
+        reportCompilerError("Duplicate 'const' modifier");
+        return false;
+      }
+      pending.isConst = true;
+      getNextToken();
+      SkipNewlines();
+      break;
+    default:
+      parsing = false;
+      break;
+    }
+  }
+
+  out = pending;
+  return true;
+}
+
+static MemberModifiers FinalizeMemberModifiers(const PendingMemberModifiers &pending,
+                                              AggregateKind kind) {
+  MemberModifiers modifiers;
+  if (kind == AggregateKind::Struct) {
+    modifiers.access = MemberAccess::PublicReadWrite();
+  } else {
+    modifiers.access = MemberAccess::ReadPublicWritePrivate();
+  }
+
+  switch (pending.access) {
+  case AccessSpecifier::Public:
+    modifiers.access = MemberAccess::PublicReadWrite();
+    break;
+  case AccessSpecifier::Private:
+    modifiers.access = MemberAccess::PrivateOnly();
+    break;
+  case AccessSpecifier::Protected:
+    modifiers.access = MemberAccess::ProtectedReadWrite();
+    break;
+  case AccessSpecifier::Default:
+    break;
+  }
+
+  if (pending.isStatic)
+    modifiers.storage |= StorageFlag::Static;
+  if (pending.isConst)
+    modifiers.storage |= StorageFlag::Const;
+
+  return modifiers;
+}
+
+static bool isPascalCase(const std::string &name) {
+  if (name.empty())
+    return false;
+
+  if (!std::isalpha(static_cast<unsigned char>(name.front())) ||
+      !std::isupper(static_cast<unsigned char>(name.front())))
+    return false;
+
+  for (char c : name) {
+    if (c == '_')
+      return false;
+  }
+
+  return true;
 }
 
 static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
@@ -460,6 +600,52 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
   return std::make_unique<InterpolatedStringExprAST>(std::move(merged));
 }
 
+static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
+  getNextToken(); // eat '('
+  SkipNewlines();
+
+  if (CurTok == ')') {
+    getNextToken(); // eat ')'
+    return true;
+  }
+
+  while (true) {
+    SkipNewlines();
+    bool argIsRef = false;
+    if (CurTok == tok_ref) {
+      argIsRef = true;
+      getNextToken(); // eat 'ref'
+      SkipNewlines();
+    }
+
+    auto Arg = ParseExpression();
+    if (!Arg)
+      return false;
+
+    if (argIsRef)
+      Args.push_back(std::make_unique<RefExprAST>(std::move(Arg)));
+    else
+      Args.push_back(std::move(Arg));
+
+    SkipNewlines();
+
+    if (CurTok == ')') {
+      getNextToken(); // eat ')'
+      break;
+    }
+
+    if (CurTok != ',') {
+      LogError("Expected ')' or ',' in argument list");
+      return false;
+    }
+
+    getNextToken(); // eat ','
+    SkipNewlines();
+  }
+
+  return true;
+}
+
 /// InferExprType - Infer the type of an expression at parse time
 /// Returns empty string if type cannot be determined
 static std::string InferExprType(const ExprAST* expr)
@@ -576,46 +762,9 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   if (CurTok != '(') // Simple variable ref.
     return std::make_unique<VariableExprAST>(IdName);
 
-  // Call.
-  getNextToken(); // eat (
-  SkipNewlines();
   std::vector<std::unique_ptr<ExprAST>> Args;
-  if (CurTok != ')') {
-    while (true) {
-      SkipNewlines();
-      // Check for ref argument
-      bool argIsRef = false;
-      if (CurTok == tok_ref) {
-        argIsRef = true;
-        getNextToken(); // eat 'ref'
-        SkipNewlines();
-      }
-
-      if (auto Arg = ParseExpression()) {
-        // Wrap in RefExprAST if it's a ref argument
-        if (argIsRef) {
-          Args.push_back(std::make_unique<RefExprAST>(std::move(Arg)));
-        } else {
-          Args.push_back(std::move(Arg));
-        }
-      }
-      else
-        return nullptr;
-
-      SkipNewlines();
-
-      if (CurTok == ')')
-        break;
-
-      if (CurTok != ',')
-        return LogError("Expected ')' or ',' in argument list");
-      getNextToken();
-      SkipNewlines();
-    }
-  }
-
-  // Eat the ')'.
-  getNextToken();
+  if (!ParseArgumentList(Args))
+    return nullptr;
 
   return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
@@ -1056,6 +1205,11 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       // Create (@ptr).member
       auto Deref = std::make_unique<UnaryExprAST>("@", std::move(LHS), true);
       LHS = std::make_unique<MemberAccessExprAST>(std::move(Deref), MemberName);
+    } else if (CurTok == '(') {
+      std::vector<std::unique_ptr<ExprAST>> Args;
+      if (!ParseArgumentList(Args))
+        return nullptr;
+      LHS = std::make_unique<CallExprAST>(std::move(LHS), std::move(Args));
     } else {
       break;
     }
@@ -2178,7 +2332,7 @@ bool ParseTypeIdentifier(bool isRef) {
   SkipNewlines();
 
   // Handle constructor call (struct name followed directly by '(')
-  if (CurTok == '(' && StructNames.contains(Type)) {
+  if (CurTok == '(' && (StructNames.contains(Type) || ClassNames.contains(Type))) {
     getNextToken(); // eat '('
     SkipNewlines();
 
@@ -2377,43 +2531,77 @@ bool ParseTypeIdentifier(bool isRef) {
   }
 }
 
-/// structdef ::= 'struct' identifier '{' (field | method)* '}'
-std::unique_ptr<StructAST> ParseStructDefinition() {
-  getNextToken(); // eat 'struct'
-  
-  // Skip newlines after 'struct'
+/// structdef ::= ('struct' | 'class') identifier '{' (member)* '}'
+std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
+  getNextToken(); // eat 'struct' or 'class'
+
   while (CurTok == tok_newline)
     getNextToken();
-  
-  // Parse struct name
+
   if (CurTok != tok_identifier) {
-    LogError("Expected struct name after 'struct'");
-    return nullptr;
-  }
-  
-  std::string StructName = IdentifierStr;
-  getNextToken(); // eat struct name
-  
-  // Skip newlines before '{'
-  while (CurTok == tok_newline)
-    getNextToken();
-  
-  if (CurTok != '{') {
-    LogError("Expected '{' after struct name");
+    LogError(kind == AggregateKind::Struct ? "Expected struct name after 'struct'"
+                                           : "Expected class name after 'class'");
     return nullptr;
   }
 
-  struct ScopedStructMarker {
+  std::string compositeName = IdentifierStr;
+  getNextToken();
+
+  if (StructNames.contains(compositeName) || ClassNames.contains(compositeName)) {
+    reportCompilerError("Type '" + compositeName + "' is already defined");
+    return nullptr;
+  }
+
+  while (CurTok == tok_newline)
+    getNextToken();
+
+  std::vector<std::string> baseTypes;
+  if (kind == AggregateKind::Class && CurTok == ':') {
+    getNextToken();
+    SkipNewlines();
+
+    while (true) {
+      if (CurTok != tok_identifier) {
+        LogError("Expected base type name after ':' in class declaration");
+        return nullptr;
+      }
+
+      baseTypes.push_back(IdentifierStr);
+      getNextToken();
+      SkipNewlines();
+
+      if (CurTok != ',')
+        break;
+
+      getNextToken();
+      SkipNewlines();
+    }
+
+    if (!baseTypes.empty()) {
+      reportCompilerWarning("Inheritance is not implemented yet",
+                            "Base types will be recorded but ignored during compilation");
+    }
+  }
+
+  if (CurTok != '{') {
+    LogError("Expected '{' after type name");
+    return nullptr;
+  }
+
+  auto &definitionStack =
+      (kind == AggregateKind::Struct) ? StructDefinitionStack : ClassDefinitionStack;
+
+  struct ScopedCompositeMarker {
     std::vector<std::string> &stack;
-    ScopedStructMarker(std::vector<std::string> &s, const std::string &name)
+    ScopedCompositeMarker(std::vector<std::string> &s, const std::string &name)
         : stack(s) {
       stack.push_back(name);
     }
-    ~ScopedStructMarker() {
+    ~ScopedCompositeMarker() {
       if (!stack.empty())
         stack.pop_back();
     }
-  } structScope(currentParser().structDefinitionStack, StructName);
+  } scope(definitionStack, compositeName);
 
   getNextToken(); // eat '{'
 
@@ -2421,9 +2609,10 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
     getNextToken();
 
   std::vector<std::unique_ptr<FieldAST>> Fields;
-  std::vector<std::unique_ptr<FunctionAST>> Methods;
+  std::vector<MethodDefinition> Methods;
+  bool seenThisOverride = false;
 
-  auto parseConstructor = [&]() -> bool {
+  auto parseConstructor = [&](MemberModifiers modifiers) -> bool {
     getNextToken(); // eat '('
     SkipNewlines();
 
@@ -2447,7 +2636,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       }
 
       std::string ParamName = IdentifierStr;
-      getNextToken(); // eat name
+      getNextToken();
 
       Parameter param;
       param.Type = ParamType;
@@ -2465,7 +2654,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
         LogError("Expected ')' or ',' in parameter list");
         return false;
       }
-      getNextToken(); // eat ','
+      getNextToken();
       SkipNewlines();
     }
 
@@ -2473,7 +2662,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       LogError("Expected ')' after parameters");
       return false;
     }
-    getNextToken(); // eat ')'
+    getNextToken();
 
     while (CurTok == tok_newline)
       getNextToken();
@@ -2488,14 +2677,16 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       return false;
 
     TypeInfo ctorReturn = buildDeclaredTypeInfo("void", false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(ctorReturn), StructName, std::move(Args));
+    auto Proto = std::make_unique<PrototypeAST>(std::move(ctorReturn), compositeName, std::move(Args));
     auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-    Methods.push_back(std::move(Constructor));
+    Methods.emplace_back(std::move(Constructor), modifiers, MethodKind::Constructor, compositeName);
     return true;
   };
 
-  auto parseStructMethod = [&](const std::string &ReturnType,
-                               const std::string &MethodName) -> bool {
+  auto parseCompositeMethod = [&](const std::string &ReturnType,
+                                  const std::string &MethodName,
+                                  MemberModifiers modifiers,
+                                  MethodKind methodKind) -> bool {
     getNextToken(); // eat '('
 
     std::vector<Parameter> Args;
@@ -2506,10 +2697,6 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       }
 
       std::string ParamType = ParseCompleteType();
-      if (ParamType.empty()) {
-        LogError("Failed to parse parameter type");
-        return false;
-      }
 
       if (CurTok != tok_identifier) {
         LogError("Expected parameter name");
@@ -2517,7 +2704,7 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       }
 
       std::string ParamName = IdentifierStr;
-      getNextToken(); // eat name
+      getNextToken();
 
       Parameter param;
       param.Type = ParamType;
@@ -2533,14 +2720,14 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
         LogError("Expected ')' or ',' in parameter list");
         return false;
       }
-      getNextToken(); // eat ','
+      getNextToken();
     }
 
     if (CurTok != ')') {
       LogError("Expected ')' after parameters");
       return false;
     }
-    getNextToken(); // eat ')'
+    getNextToken();
 
     while (CurTok == tok_newline)
       getNextToken();
@@ -2554,43 +2741,57 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
     if (!Body)
       return false;
 
+    std::string QualifiedName = compositeName + "." + MethodName;
     TypeInfo methodReturn = buildDeclaredTypeInfo(ReturnType, false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), MethodName, std::move(Args));
+    auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), QualifiedName, std::move(Args));
     auto Method = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-    Methods.push_back(std::move(Method));
+    Methods.emplace_back(std::move(Method), modifiers, methodKind, MethodName);
     return true;
   };
 
   while (CurTok != '}' && CurTok != tok_eof) {
     SkipNewlines();
-
     if (CurTok == '}')
       break;
 
+    PendingMemberModifiers pendingMods;
+    if (!ParsePendingMemberModifiers(pendingMods))
+      return nullptr;
+
     std::string Type;
 
-    if (CurTok == tok_identifier && IdentifierStr == StructName) {
-      getNextToken(); // eat struct name
+    if (CurTok == tok_identifier && IdentifierStr == compositeName) {
+      getNextToken();
       SkipNewlines();
 
       if (CurTok == '(') {
-        if (!parseConstructor())
+        MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+        if ((modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+          reportCompilerError("Constructors cannot be static");
+          return nullptr;
+        }
+        if ((modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+          reportCompilerError("Constructors cannot be const");
+          return nullptr;
+        }
+
+        if (!parseConstructor(modifiers))
           return nullptr;
         continue;
       }
 
-      Type = StructName;
+      Type = compositeName;
       bool pointerSeen = false;
       if (!AppendTypeSuffix(Type, pointerSeen))
         return nullptr;
     } else if (IsValidType()) {
       Type = ParseCompleteType();
       if (Type.empty()) {
-        LogError("Failed to parse field type");
+        LogError("Failed to parse member type");
         return nullptr;
       }
     } else {
-      LogError("Expected field or method declaration in struct");
+      LogError("Expected field or method declaration inside type definition");
       return nullptr;
     }
 
@@ -2599,34 +2800,71 @@ std::unique_ptr<StructAST> ParseStructDefinition() {
       return nullptr;
     }
 
-    std::string Name = IdentifierStr;
-    getNextToken(); // eat identifier
+    std::string MemberName = IdentifierStr;
+    getNextToken();
 
     while (CurTok == tok_newline)
       getNextToken();
 
     if (CurTok == '(') {
-      if (!parseStructMethod(Type, Name))
+      MethodKind methodKind = MethodKind::Regular;
+      if (MemberName == "this") {
+        if (kind != AggregateKind::Class) {
+          reportCompilerError("Only classes may define a this() formatter");
+          return nullptr;
+        }
+        if (seenThisOverride) {
+          reportCompilerError("Duplicate this() override",
+                              "Only one this() method may be defined per class");
+          return nullptr;
+        }
+        seenThisOverride = true;
+        methodKind = MethodKind::ThisOverride;
+      }
+
+      MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+      if ((modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+        reportCompilerError("Methods cannot be declared const yet",
+                            "Use readonly state or immutable patterns instead");
+        return nullptr;
+      }
+
+      if (methodKind == MethodKind::ThisOverride &&
+          (modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+        reportCompilerError("this() override cannot be static");
+        return nullptr;
+      }
+
+      if (kind == AggregateKind::Class && methodKind == MethodKind::Regular &&
+          !isPascalCase(MemberName)) {
+        reportCompilerWarning("Class methods should use PascalCase names",
+                              "Rename '" + MemberName + "' to PascalCase for consistency");
+      }
+
+      if (!parseCompositeMethod(Type, MemberName, modifiers, methodKind))
         return nullptr;
     } else {
-      auto Field = std::make_unique<FieldAST>(Type, Name);
+      MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+      auto Field = std::make_unique<FieldAST>(Type, MemberName, modifiers);
       Fields.push_back(std::move(Field));
     }
   }
-  
+
   if (CurTok != '}') {
-    LogError("Expected '}' at end of struct definition");
+    LogError("Expected '}' at end of type definition");
     return nullptr;
   }
-  
-  getNextToken(); // eat '}'
-  
-  // Add struct name to the set of valid types
-  StructNames.insert(StructName);
 
-  return std::make_unique<StructAST>(StructName, std::move(Fields), std::move(Methods));
+  getNextToken();
+
+  if (kind == AggregateKind::Struct)
+    StructNames.insert(compositeName);
+  else
+    ClassNames.insert(compositeName);
+
+  return std::make_unique<StructAST>(kind, compositeName, std::move(Fields),
+                                     std::move(Methods), std::move(baseTypes));
 }
-
 // Evaluate constant expressions at compile time
 bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
   if (!expr) return false;
@@ -2814,5 +3052,8 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
 #undef UnsafeContextLevel
 #undef LoopNestingDepth
 #undef StructNames
+#undef ClassNames
+#undef StructDefinitionStack
+#undef ClassDefinitionStack
 #undef BinopPrecedence
 #undef CurTok

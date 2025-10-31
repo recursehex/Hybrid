@@ -452,6 +452,8 @@ int gettok() {
       return tok_skip;
     if (lex.identifierStr == "struct")
       return tok_struct;
+    if (lex.identifierStr == "class")
+      return tok_class;
     if (lex.identifierStr == "this")
       return tok_this;
     if (lex.identifierStr == "switch")
@@ -466,6 +468,16 @@ int gettok() {
       return tok_unsafe;
     if (lex.identifierStr == "ref")
       return tok_ref;
+    if (lex.identifierStr == "public")
+      return tok_public;
+    if (lex.identifierStr == "private")
+      return tok_private;
+    if (lex.identifierStr == "protected")
+      return tok_protected;
+    if (lex.identifierStr == "static")
+      return tok_static;
+    if (lex.identifierStr == "const")
+      return tok_const;
     return tok_identifier;
   }
 

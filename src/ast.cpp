@@ -6065,9 +6065,11 @@ llvm::Function *FunctionAST::codegen() {
 
 // Generate code for struct definitions
 llvm::Type *StructAST::codegen() {
+  const AggregateKind kind = Kind;
   // Check if this struct type already exists
   if (StructTypes.contains(Name)) {
-    reportCompilerError("Struct type already defined: " + Name);
+    reportCompilerError(std::string(kind == AggregateKind::Struct ? "Struct" : "Class") +
+                        " type already defined: " + Name);
     return nullptr;
   }
   
@@ -6089,6 +6091,10 @@ llvm::Type *StructAST::codegen() {
   std::vector<std::pair<std::string, unsigned>> FieldIndices;
   FieldIndices.reserve(Fields.size());
   std::map<std::string, std::string> FieldTypeMap;
+  CompositeTypeInfo compositeInfo;
+  compositeInfo.kind = kind;
+  compositeInfo.baseTypes = BaseTypes;
+  compositeInfo.genericParameters = GenericParameters;
 
   unsigned FieldIndex = 0;
   for (const auto &Field : Fields) {
@@ -6114,16 +6120,22 @@ llvm::Type *StructAST::codegen() {
     FieldTypes.push_back(FieldType);
     FieldIndices.emplace_back(Field->getName(), FieldIndex++);
     FieldTypeMap[Field->getName()] = FieldTypeName;
+    compositeInfo.fieldModifiers[Field->getName()] = Field->getModifiers();
   }
 
   StructType->setBody(FieldTypes);
   StructFieldIndices[Name] = FieldIndices;
   StructFieldTypes[Name] = FieldTypeMap;
+  compositeInfo.fieldTypes = FieldTypeMap;
   
   // Generate constructor and other methods
-  for (const auto &Method : Methods) {
+  for (auto &MethodDef : Methods) {
+    FunctionAST *Method = MethodDef.get();
+    if (!Method)
+      continue;
+
     // For constructors, need to handle them specially
-    if (Method->getProto()->getName() == Name) {
+    if (MethodDef.getKind() == MethodKind::Constructor) {
       // This is a constructor, generate it as a static method that materializes a new instance
       std::string ConstructorName = Name + "_new";
 
@@ -6213,6 +6225,10 @@ llvm::Type *StructAST::codegen() {
       NonNullFacts.clear();
     } else {
       // Regular method - generate as-is but with implicit 'this' parameter
+      if (MethodDef.getKind() == MethodKind::ThisOverride)
+        compositeInfo.thisOverride = Method->getProto()->getName();
+      compositeInfo.methodInfo[MethodDef.getDisplayName()] =
+          {MethodDef.getModifiers(), Method->getProto()->getName()};
       Method->codegen();
     }
   }
@@ -6225,6 +6241,8 @@ llvm::Type *StructAST::codegen() {
     // Clear the insertion point so next top-level code creates its own context
     Builder->ClearInsertionPoint();
   }
+
+  CG.compositeMetadata[Name] = std::move(compositeInfo);
   
   return StructType;
 }

@@ -75,6 +75,8 @@ struct ParserContext {
   std::map<std::string, int> binopPrecedence;
   std::set<std::string> structNames;
   std::vector<std::string> structDefinitionStack;
+  std::set<std::string> classNames;
+  std::vector<std::string> classDefinitionStack;
   int loopNestingDepth = 0;
   int unsafeContextLevel = 0;
   bool hadError = false;
@@ -119,5 +121,6 @@ CodegenContext &currentCodegen();
 
 std::string describeTokenForDiagnostics(int token);
 void reportCompilerError(const std::string &message, std::string_view hint = {});
+void reportCompilerWarning(const std::string &message, std::string_view hint = {});
 
 #endif // HYBRID_COMPILER_SESSION_H
