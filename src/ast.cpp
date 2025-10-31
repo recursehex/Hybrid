@@ -526,6 +526,161 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
   return desc;
 }
 
+enum class AccessIntent : uint8_t { Read, Write, Call };
+
+static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
+  auto it = CG.compositeMetadata.find(name);
+  if (it == CG.compositeMetadata.end())
+    return nullptr;
+  return &it->second;
+}
+
+static const ActiveCompositeContext *currentCompositeContext() {
+  if (CG.compositeContextStack.empty())
+    return nullptr;
+  return &CG.compositeContextStack.back();
+}
+
+static std::string baseCompositeName(const std::string &typeName) {
+  if (typeName.empty())
+    return {};
+  ParsedTypeDescriptor desc = parseTypeString(typeName);
+  std::string base = desc.sanitized;
+  size_t atPos = base.find('@');
+  if (atPos != std::string::npos)
+    base.erase(atPos);
+  size_t bracketPos = base.find('[');
+  if (bracketPos != std::string::npos)
+    base.erase(bracketPos);
+  return base;
+}
+
+static std::string resolveCompositeName(const ExprAST *expr) {
+  if (!expr)
+    return {};
+  return baseCompositeName(expr->getTypeName());
+}
+
+static bool hasAccessFlag(MemberAccess access, AccessFlag flag) {
+  return static_cast<uint8_t>(access.flags & flag) != 0;
+}
+
+static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
+                                      AccessIntent intent,
+                                      const std::string &ownerName,
+                                      const std::string &memberName) {
+  const ActiveCompositeContext *ctx = currentCompositeContext();
+  const bool sameType = ctx && ctx->name == ownerName;
+  const auto *info = lookupCompositeInfo(ownerName);
+  const std::string ownerKind =
+      info ? (info->kind == AggregateKind::Class ? "class" : "struct")
+           : "type";
+
+  const MemberAccess access = modifiers.access;
+  if (intent == AccessIntent::Write &&
+      static_cast<uint8_t>(modifiers.storage & StorageFlag::Const) != 0) {
+    bool allowedInCtor =
+        sameType && ctx && ctx->kind == MethodKind::Constructor;
+    if (!allowedInCtor) {
+      reportCompilerError("Cannot write to const member '" + memberName +
+                          "' of " + ownerKind + " '" + ownerName + "'");
+      return false;
+    }
+  }
+
+  auto allowRead = [&] {
+    if (hasAccessFlag(access, AccessFlag::ReadPublic))
+      return true;
+    if (sameType &&
+        (hasAccessFlag(access, AccessFlag::ReadPrivate) ||
+         hasAccessFlag(access, AccessFlag::ReadProtected)))
+      return true;
+    return false;
+  };
+  auto allowWrite = [&] {
+    if (hasAccessFlag(access, AccessFlag::WritePublic))
+      return true;
+    if (sameType &&
+        (hasAccessFlag(access, AccessFlag::WritePrivate) ||
+         hasAccessFlag(access, AccessFlag::WriteProtected)))
+      return true;
+    return false;
+  };
+
+  bool permitted = false;
+  switch (intent) {
+  case AccessIntent::Read:
+  case AccessIntent::Call:
+    permitted = allowRead();
+    break;
+  case AccessIntent::Write:
+    permitted = allowWrite();
+    break;
+  }
+
+  if (permitted)
+    return true;
+
+  std::string action;
+  switch (intent) {
+  case AccessIntent::Read:
+    action = "read";
+    break;
+  case AccessIntent::Write:
+    action = "write to";
+    break;
+  case AccessIntent::Call:
+    action = "call";
+    break;
+  }
+
+  std::string message;
+  if (!sameType) {
+    if (hasAccessFlag(access, AccessFlag::ReadPrivate) ||
+        hasAccessFlag(access, AccessFlag::WritePrivate)) {
+      message = "Cannot " + action + " private member '" + memberName +
+                "' of " + ownerKind + " '" + ownerName + "'";
+    } else if (hasAccessFlag(access, AccessFlag::ReadProtected) ||
+               hasAccessFlag(access, AccessFlag::WriteProtected)) {
+      message = "Cannot " + action + " protected member '" + memberName +
+                "' of " + ownerKind + " '" + ownerName +
+                "' without inheritance support";
+    } else if (intent == AccessIntent::Write &&
+               hasAccessFlag(access, AccessFlag::WritePrivate)) {
+      message = "Member '" + memberName + "' of " + ownerKind + " '" +
+                ownerName + "' is read-only outside its definition";
+    } else {
+      message = "Access to member '" + memberName + "' of " + ownerKind +
+                " '" + ownerName + "' is not permitted";
+    }
+  } else {
+    message = "Cannot " + action + " member '" + memberName + "' of " +
+              ownerKind + " '" + ownerName + "'";
+  }
+
+  reportCompilerError(message);
+  return false;
+}
+
+class ScopedCompositeContext {
+  CodegenContext &Ctx;
+  bool Active = false;
+
+public:
+  ScopedCompositeContext(const std::string &name, MethodKind kind,
+                         bool isStatic)
+      : Ctx(currentCodegen()) {
+    Ctx.compositeContextStack.push_back(
+        ActiveCompositeContext{name, kind, isStatic});
+    Active = true;
+  }
+
+  ~ScopedCompositeContext() {
+    if (Active)
+      Ctx.compositeContextStack.pop_back();
+  }
+};
+
 static bool exprIsNullLiteral(const ExprAST *expr) {
   return dynamic_cast<const NullExprAST*>(expr) != nullptr;
 }
@@ -822,6 +977,24 @@ void InitializeModule() {
   printOverload.isExtern = true;
   printOverload.function = PrintFunc;
   CG.functionOverloads["print"].push_back(std::move(printOverload));
+
+  std::vector<llvm::Type *> PrintStringArgs = {getTypeFromString("string")};
+  llvm::FunctionType *PrintStringType =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext),
+                               PrintStringArgs, false);
+  llvm::Function *PrintStringFunc = llvm::Function::Create(
+      PrintStringType, llvm::Function::ExternalLinkage, "print_string",
+      TheModule.get());
+
+  FunctionOverload printStringOverload;
+  printStringOverload.mangledName = "print_string";
+  printStringOverload.returnType = makeTypeInfo("void");
+  printStringOverload.returnsByRef = false;
+  printStringOverload.parameterTypes.push_back(makeTypeInfo("string"));
+  printStringOverload.parameterIsRef.push_back(false);
+  printStringOverload.isExtern = true;
+  printStringOverload.function = PrintStringFunc;
+  CG.functionOverloads["print"].push_back(std::move(printStringOverload));
 }
 
 // Get the LLVM module for printing
@@ -2208,6 +2381,7 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   llvm::Value *V = NamedValues[getName()];
   if (V) {
     if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
+      setTypeName(typeNameFromInfo(*info));
       if (info->isAlias()) {
         llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
         return Builder->CreateLoad(Alloca->getAllocatedType(), V, (getName() + "_ptr").c_str());
@@ -2220,6 +2394,7 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   llvm::Value *G = GlobalValues[getName()];
   if (G) {
     if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
+      setTypeName(typeNameFromInfo(*info));
       if (info->isAlias()) {
         llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(G);
         return Builder->CreateLoad(GV->getValueType(), G, (getName() + "_ptr").c_str());
@@ -4378,46 +4553,45 @@ llvm::Value *RefExprAST::codegen() {
 
 // Generate code for function calls, including struct constructors
 llvm::Value *CallExprAST::codegen() {
-  // Check if this is a struct constructor call
+  if (hasCalleeExpr()) {
+    if (auto *member = dynamic_cast<MemberAccessExprAST *>(getCalleeExpr()))
+      return codegenMemberCall(*member);
+    return LogErrorV("Unsupported call target expression");
+  }
+
   if (StructTypes.contains(getCallee())) {
-    // This is a struct constructor call
     std::string ConstructorName = getCallee() + "_new";
     llvm::Function *ConstructorF = TheModule->getFunction(ConstructorName);
     if (!ConstructorF)
       return LogErrorV(("Unknown struct constructor: " + getCallee()).c_str());
-    
-    // Set the type name for this expression
+
     setTypeName(getCallee());
-    
-    // Call the constructor
+
     if (ConstructorF->arg_size() != getArgs().size())
       return LogErrorV("Incorrect # arguments passed to constructor");
-    
+
     std::vector<llvm::Value *> ArgsV;
     unsigned i = 0;
     for (auto &Arg : ConstructorF->args()) {
       llvm::Value *ArgVal = getArgs()[i]->codegen();
       if (!ArgVal)
         return nullptr;
-      
-      // Cast the argument to the expected parameter type
+
       ArgVal = castToType(ArgVal, Arg.getType());
       ArgsV.push_back(ArgVal);
       ++i;
     }
-    llvm::Value *ConstructedValue = Builder->CreateCall(ConstructorF, ArgsV, "structtmp");
+
+    llvm::Value *ConstructedValue =
+        Builder->CreateCall(ConstructorF, ArgsV, "structtmp");
 
     llvm::StructType *StructType = StructTypes[getCallee()];
-    llvm::AllocaInst *StructAlloca = Builder->CreateAlloca(
-        StructType, nullptr, getCallee() + "_inst");
+    llvm::AllocaInst *StructAlloca =
+        Builder->CreateAlloca(StructType, nullptr, getCallee() + "_inst");
     Builder->CreateStore(ConstructedValue, StructAlloca);
 
     return StructAlloca;
   }
-  
-  auto overloadIt = CG.functionOverloads.find(getCallee());
-  if (overloadIt == CG.functionOverloads.end())
-    return LogErrorV(("Unknown function referenced: " + getCallee()).c_str());
 
   std::vector<bool> ArgIsRef;
   ArgIsRef.reserve(getArgs().size());
@@ -4425,6 +4599,49 @@ llvm::Value *CallExprAST::codegen() {
   ArgValues.reserve(getArgs().size());
 
   for (const auto &ArgExpr : getArgs()) {
+    bool handled = false;
+
+    if (getCallee() == "print") {
+      std::string candidateName = baseCompositeName(ArgExpr->getTypeName());
+      if (!candidateName.empty()) {
+        auto metaIt = CG.compositeMetadata.find(candidateName);
+        if (metaIt != CG.compositeMetadata.end() &&
+            metaIt->second.thisOverride) {
+          llvm::Value *instancePtr = ArgExpr->codegen_ptr();
+          if (!instancePtr) {
+            llvm::Value *instanceValue = ArgExpr->codegen();
+            if (!instanceValue)
+              return nullptr;
+            if (instanceValue->getType()->isPointerTy()) {
+              instancePtr = instanceValue;
+            } else {
+              llvm::AllocaInst *Tmp = Builder->CreateAlloca(
+                  instanceValue->getType(), nullptr, "print.recv");
+              Builder->CreateStore(instanceValue, Tmp);
+              instancePtr = Tmp;
+            }
+          }
+
+          std::vector<llvm::Value *> thisArgs;
+          thisArgs.push_back(instancePtr);
+          std::vector<bool> thisIsRef{true};
+
+          llvm::Value *stringValue =
+              emitResolvedCall(*metaIt->second.thisOverride,
+                               std::move(thisArgs), thisIsRef);
+          if (!stringValue)
+            return nullptr;
+
+          ArgIsRef.push_back(false);
+          ArgValues.push_back(stringValue);
+          handled = true;
+        }
+      }
+    }
+
+    if (handled)
+      continue;
+
     bool isRef = dynamic_cast<RefExprAST *>(ArgExpr.get()) != nullptr;
     ArgIsRef.push_back(isRef);
     llvm::Value *Value = ArgExpr->codegen();
@@ -4432,6 +4649,16 @@ llvm::Value *CallExprAST::codegen() {
       return nullptr;
     ArgValues.push_back(Value);
   }
+
+  return emitResolvedCall(getCallee(), std::move(ArgValues), ArgIsRef);
+}
+
+llvm::Value *CallExprAST::emitResolvedCall(
+    const std::string &callee, std::vector<llvm::Value *> ArgValues,
+    const std::vector<bool> &ArgIsRef) {
+  auto overloadIt = CG.functionOverloads.find(callee);
+  if (overloadIt == CG.functionOverloads.end())
+    return LogErrorV(("Unknown function referenced: " + callee).c_str());
 
   struct CandidateResult {
     FunctionOverload *overload = nullptr;
@@ -4461,7 +4688,8 @@ llvm::Value *CallExprAST::codegen() {
         break;
       }
 
-      llvm::Type *ExpectedType = CandidateFunc->getFunctionType()->getParamType(idx);
+      llvm::Type *ExpectedType =
+          CandidateFunc->getFunctionType()->getParamType(idx);
       llvm::Type *ActualType = ArgValues[idx]->getType();
 
       if (ActualType == ExpectedType)
@@ -4481,7 +4709,7 @@ llvm::Value *CallExprAST::codegen() {
   }
 
   if (viable.empty())
-    return LogErrorV(("No matching overload found for call to '" + getCallee() + "'").c_str());
+    return LogErrorV(("No matching overload found for call to '" + callee + "'").c_str());
 
   auto bestIt = std::min_element(
       viable.begin(), viable.end(),
@@ -4497,21 +4725,24 @@ llvm::Value *CallExprAST::codegen() {
       }));
 
   if (bestCount > 1)
-    return LogErrorV(("Ambiguous call to '" + getCallee() + "'").c_str());
+    return LogErrorV(("Ambiguous call to '" + callee + "'").c_str());
 
   FunctionOverload *chosen = bestIt->overload;
   llvm::Function *CalleeF = chosen->function;
   if (!CalleeF)
-    return LogErrorV(("Internal error: overload for '" + getCallee() + "' lacks function definition").c_str());
+    return LogErrorV(("Internal error: overload for '" + callee +
+                      "' lacks function definition").c_str());
 
   std::vector<llvm::Value *> CallArgs;
   CallArgs.reserve(ArgValues.size());
 
   for (size_t idx = 0; idx < ArgValues.size(); ++idx) {
     llvm::Value *ArgVal = ArgValues[idx];
-    llvm::Type *ExpectedType = CalleeF->getFunctionType()->getParamType(idx);
+    llvm::Type *ExpectedType =
+        CalleeF->getFunctionType()->getParamType(idx);
     if (!chosen->parameterIsRef[idx]) {
-      const std::string targetTypeName = typeNameFromInfo(chosen->parameterTypes[idx]);
+      const std::string targetTypeName =
+          typeNameFromInfo(chosen->parameterTypes[idx]);
       ArgVal = castToType(ArgVal, ExpectedType, targetTypeName);
     }
     CallArgs.push_back(ArgVal);
@@ -4527,6 +4758,91 @@ llvm::Value *CallExprAST::codegen() {
   }
 
   return CallValue;
+}
+
+llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
+  llvm::Value *instancePtr = nullptr;
+  llvm::Value *instanceValue = nullptr;
+
+  std::string ownerName = baseCompositeName(member.getObject()->getTypeName());
+
+  if (ownerName.empty()) {
+    instancePtr = member.getObject()->codegen_ptr();
+    if (!instancePtr) {
+      instanceValue = member.getObject()->codegen();
+      if (!instanceValue)
+        return nullptr;
+      if (instanceValue->getType()->isPointerTy()) {
+        instancePtr = instanceValue;
+      } else {
+        llvm::AllocaInst *Tmp =
+            Builder->CreateAlloca(instanceValue->getType(), nullptr,
+                                  "method.recv");
+        Builder->CreateStore(instanceValue, Tmp);
+        instancePtr = Tmp;
+      }
+    }
+    ownerName = resolveCompositeName(member.getObject());
+  }
+
+  if (ownerName.empty())
+    return LogErrorV("Unable to determine composite type for method call");
+
+  const CompositeTypeInfo *info = lookupCompositeInfo(ownerName);
+  if (!info)
+    return LogErrorV(("Type '" + ownerName + "' has no metadata for methods").c_str());
+
+  auto methodIt = info->methodInfo.find(member.getMemberName());
+  if (methodIt == info->methodInfo.end())
+    return LogErrorV(("Member '" + member.getMemberName() + "' of type '" +
+                      ownerName + "' is not a method").c_str());
+
+  if (!ensureMemberAccessAllowed(methodIt->second.modifiers,
+                                 AccessIntent::Call, ownerName,
+                                 member.getMemberName()))
+    return nullptr;
+
+  bool isStaticMethod =
+      static_cast<uint8_t>(methodIt->second.modifiers.storage &
+                           StorageFlag::Static) != 0;
+
+  std::vector<bool> ArgIsRef;
+  std::vector<llvm::Value *> ArgValues;
+
+  if (!isStaticMethod) {
+    if (!instancePtr) {
+      instancePtr = member.getObject()->codegen_ptr();
+      if (!instancePtr) {
+        instanceValue = member.getObject()->codegen();
+        if (!instanceValue)
+          return nullptr;
+        if (instanceValue->getType()->isPointerTy()) {
+          instancePtr = instanceValue;
+        } else {
+          llvm::AllocaInst *Tmp =
+              Builder->CreateAlloca(instanceValue->getType(), nullptr,
+                                    "method.recv");
+          Builder->CreateStore(instanceValue, Tmp);
+          instancePtr = Tmp;
+        }
+      }
+    }
+
+    ArgIsRef.push_back(true);
+    ArgValues.push_back(instancePtr);
+  }
+
+  for (const auto &ArgExpr : getArgs()) {
+    bool isRef = dynamic_cast<RefExprAST *>(ArgExpr.get()) != nullptr;
+    ArgIsRef.push_back(isRef);
+    llvm::Value *Value = ArgExpr->codegen();
+    if (!Value)
+      return nullptr;
+    ArgValues.push_back(Value);
+  }
+
+  return emitResolvedCall(methodIt->second.signature, std::move(ArgValues),
+                          ArgIsRef);
 }
 
 //===----------------------------------------------------------------------===//
@@ -5837,6 +6153,11 @@ llvm::Value *UnsafeBlockStmtAST::codegen() {
 
 //===----------------------------------------------------------------------===//
 // Function and Prototype Code Generation
+void PrototypeAST::prependImplicitParameter(Parameter Param) {
+  Args.insert(Args.begin(), std::move(Param));
+  MangledName.clear();
+}
+
 //===----------------------------------------------------------------------===//
 
 const std::string &PrototypeAST::getMangledName() const {
@@ -6013,6 +6334,24 @@ llvm::Function *FunctionAST::codegen() {
     ++i;
   }
 
+  if (const ActiveCompositeContext *ctx = currentCompositeContext()) {
+    if (!ctx->isStatic) {
+      auto ThisIt = NamedValues.find("__hybrid_this");
+      if (ThisIt != NamedValues.end()) {
+        if (auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(ThisIt->second)) {
+          llvm::Value *ThisPtr =
+              Builder->CreateLoad(Alloca->getAllocatedType(), Alloca, "this");
+          NamedValues["this"] = ThisPtr;
+          TypeInfo thisInfo = makeTypeInfo(ctx->name);
+          thisInfo.refStorage = RefStorageClass::RefAlias;
+          thisInfo.declaredRef = true;
+          rememberLocalType("this", std::move(thisInfo));
+          markKnownNonNull("this");
+        }
+      }
+    }
+  }
+
   static bool InitializedGlobalsEmitted = false;
   if (!InitializedGlobalsEmitted && isSourceMain) {
     if (auto *InitFunc = TheModule->getFunction("__anon_var_decl")) {
@@ -6134,44 +6473,38 @@ llvm::Type *StructAST::codegen() {
     if (!Method)
       continue;
 
-    // For constructors, need to handle them specially
     if (MethodDef.getKind() == MethodKind::Constructor) {
-      // This is a constructor, generate it as a static method that materializes a new instance
       std::string ConstructorName = Name + "_new";
-
-      // Build parameter list matching the constructor prototype
       const auto &CtorArgs = Method->getProto()->getArgs();
-      std::vector<llvm::Type*> ParamTypes;
+
+      std::vector<llvm::Type *> ParamTypes;
       ParamTypes.reserve(CtorArgs.size());
       for (const auto &Param : CtorArgs) {
         llvm::Type *ParamType = getTypeFromString(Param.DeclaredType.typeName);
         if (!ParamType)
           return nullptr;
-
         if (Param.IsRef)
           ParamType = llvm::PointerType::get(*TheContext, 0);
-
         ParamTypes.push_back(ParamType);
       }
 
-      llvm::FunctionType *CtorFnType = llvm::FunctionType::get(StructType, ParamTypes, false);
-
+      llvm::FunctionType *CtorFnType =
+          llvm::FunctionType::get(StructType, ParamTypes, false);
       llvm::Function *ConstructorFunc = llvm::Function::Create(
-          CtorFnType, llvm::Function::ExternalLinkage, ConstructorName, TheModule.get());
+          CtorFnType, llvm::Function::ExternalLinkage, ConstructorName,
+          TheModule.get());
 
-      // Name parameters for easier IR inspection and debugging
       unsigned argIndex = 0;
       for (auto &Arg : ConstructorFunc->args())
         Arg.setName(CtorArgs[argIndex++].Name);
 
-      // Create a basic block to start insertion into
-      llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", ConstructorFunc);
+      llvm::BasicBlock *BB =
+          llvm::BasicBlock::Create(*TheContext, "entry", ConstructorFunc);
       Builder->SetInsertPoint(BB);
 
-      // Allocate stack storage for the struct instance we are building
-      llvm::AllocaInst *StructPtr = Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
+      llvm::AllocaInst *StructPtr =
+          Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
 
-      // 'this' refers to the stack allocation we just created
       NamedValues.clear();
       LocalTypes.clear();
       NonNullFacts.clear();
@@ -6179,14 +6512,15 @@ llvm::Type *StructAST::codegen() {
       NamedValues["this"] = StructPtr;
       rememberLocalType("this", makeTypeInfo(Name));
 
-      // Spill parameters to the stack just like regular functions
+      ScopedCompositeContext methodScope(Name, MethodKind::Constructor, false);
+
       argIndex = 0;
       for (auto &Arg : ConstructorFunc->args()) {
         const auto &Param = CtorArgs[argIndex];
         std::string ArgName = Param.Name;
 
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(
-            Arg.getType(), nullptr, ArgName);
+        llvm::AllocaInst *Alloca =
+            Builder->CreateAlloca(Arg.getType(), nullptr, ArgName);
         Builder->CreateStore(&Arg, Alloca);
 
         NamedValues[ArgName] = Alloca;
@@ -6201,11 +6535,10 @@ llvm::Type *StructAST::codegen() {
         ++argIndex;
       }
 
-      // Generate the constructor body
       if (Method->getBody()->codegen()) {
         if (!Builder->GetInsertBlock()->getTerminator()) {
-          llvm::Value *StructValue = Builder->CreateLoad(
-              StructType, StructPtr, "struct_value");
+          llvm::Value *StructValue =
+              Builder->CreateLoad(StructType, StructPtr, "struct_value");
           Builder->CreateRet(StructValue);
         }
 
@@ -6219,18 +6552,34 @@ llvm::Type *StructAST::codegen() {
         return nullptr;
       }
 
-      // Clear local values now that the constructor is done
       NamedValues.clear();
       LocalTypes.clear();
       NonNullFacts.clear();
-    } else {
-      // Regular method - generate as-is but with implicit 'this' parameter
-      if (MethodDef.getKind() == MethodKind::ThisOverride)
-        compositeInfo.thisOverride = Method->getProto()->getName();
-      compositeInfo.methodInfo[MethodDef.getDisplayName()] =
-          {MethodDef.getModifiers(), Method->getProto()->getName()};
-      Method->codegen();
+      continue;
     }
+
+    if (MethodDef.needsInstanceThis() && !MethodDef.hasImplicitThis()) {
+      Parameter thisParam;
+      thisParam.Type = Name;
+      thisParam.Name = "__hybrid_this";
+      thisParam.IsRef = true;
+      TypeInfo thisInfo = makeTypeInfo(Name);
+      thisInfo.refStorage = RefStorageClass::RefAlias;
+      thisInfo.declaredRef = true;
+      thisParam.DeclaredType = thisInfo;
+      Method->getProto()->prependImplicitParameter(std::move(thisParam));
+      MethodDef.markImplicitThisInjected();
+    }
+
+    if (MethodDef.getKind() == MethodKind::ThisOverride)
+      compositeInfo.thisOverride = Method->getProto()->getName();
+
+    compositeInfo.methodInfo[MethodDef.getDisplayName()] =
+        {MethodDef.getModifiers(), Method->getProto()->getName()};
+
+    ScopedCompositeContext methodScope(Name, MethodDef.getKind(),
+                                       MethodDef.isStatic());
+    Method->codegen();
   }
   
   // Restore the insertion point if had one, otherwise clear it
@@ -6302,6 +6651,18 @@ llvm::Value *MemberAccessExprAST::codegen() {
     return LogErrorV(("Field not found in struct: " + MemberName).c_str());
   }
   
+  const MemberModifiers *modifiers = nullptr;
+  if (const auto *info = lookupCompositeInfo(StructLookupName)) {
+    auto modIt = info->fieldModifiers.find(MemberName);
+    if (modIt != info->fieldModifiers.end())
+      modifiers = &modIt->second;
+  }
+
+  if (modifiers &&
+      !ensureMemberAccessAllowed(*modifiers, AccessIntent::Read, StructLookupName,
+                                 MemberName))
+    return nullptr;
+
   // Generate GEP to access the field
   std::vector<llvm::Value*> Indices = {
     llvm::ConstantInt::get(*TheContext, llvm::APInt(32, 0)),
@@ -6357,6 +6718,18 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
     return LogErrorV("Internal error: struct field indices not found");
   }
   
+  const MemberModifiers *modifiers = nullptr;
+  if (const auto *info = lookupCompositeInfo(StructLookupName)) {
+    auto modIt = info->fieldModifiers.find(MemberName);
+    if (modIt != info->fieldModifiers.end())
+      modifiers = &modIt->second;
+  }
+
+  if (modifiers &&
+      !ensureMemberAccessAllowed(*modifiers, AccessIntent::Write, StructLookupName,
+                                 MemberName))
+    return nullptr;
+
   // Find the specific field
   unsigned FieldIndex = 0;
   bool FieldFound = false;

@@ -682,6 +682,8 @@ public:
   ExprAST *getOperand() const { return Operand.get(); }
 };
 
+class MemberAccessExprAST;
+
 /// CallExprAST - Expression class for function calls.
 class CallExprAST : public ExprAST {
   std::string Callee;
@@ -702,6 +704,12 @@ public:
   ExprAST *getCalleeExpr() const { return CalleeExpr.get(); }
   bool hasCalleeExpr() const { return static_cast<bool>(CalleeExpr); }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+
+private:
+  llvm::Value *emitResolvedCall(const std::string &callee,
+                                std::vector<llvm::Value *> ArgValues,
+                                const std::vector<bool> &ArgIsRef);
+  llvm::Value *codegenMemberCall(MemberAccessExprAST &member);
 };
 
 /// Parameter - Represents a function parameter with type and name
@@ -736,6 +744,7 @@ public:
   bool returnsByRef() const { return ReturnsByRef; }
   bool isExtern() const { return IsExtern; }
   void markAsExtern() { IsExtern = true; }
+  void prependImplicitParameter(Parameter Param);
 
   const std::string &getMangledName() const;
 
@@ -823,6 +832,7 @@ struct MethodDefinition {
   MemberModifiers Modifiers;
   MethodKind Kind = MethodKind::Regular;
   std::string DisplayName;
+  bool HasImplicitThis = false;
 
   MethodDefinition(std::unique_ptr<FunctionAST> Function,
                    MemberModifiers Modifiers,
@@ -836,6 +846,14 @@ struct MethodDefinition {
   const MemberModifiers &getModifiers() const { return Modifiers; }
   MethodKind getKind() const { return Kind; }
   const std::string &getDisplayName() const { return DisplayName; }
+  void markImplicitThisInjected() { HasImplicitThis = true; }
+  bool hasImplicitThis() const { return HasImplicitThis; }
+  bool isStatic() const {
+    return static_cast<uint8_t>(Modifiers.storage & StorageFlag::Static) != 0;
+  }
+  bool needsInstanceThis() const {
+    return !isStatic() && Kind != MethodKind::Constructor;
+  }
 };
 
 /// StructAST - Represents a struct definition.

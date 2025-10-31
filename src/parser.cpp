@@ -1172,12 +1172,17 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
     } else if (CurTok == tok_dot) {
       // Member access
       getNextToken(); // eat '.'
-      if (CurTok != tok_identifier) {
+      std::string MemberName;
+      if (CurTok == tok_identifier) {
+        MemberName = IdentifierStr;
+        getNextToken();
+      } else if (CurTok == tok_this) {
+        MemberName = "this";
+        getNextToken();
+      } else {
         LogError("Expected member name after '.'");
         return nullptr;
       }
-      std::string MemberName = IdentifierStr;
-      getNextToken(); // eat member name
       LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName);
     } else if (CurTok == tok_null_safe_access) {
       // Null-safe member access
@@ -2795,13 +2800,17 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
       return nullptr;
     }
 
-    if (CurTok != tok_identifier) {
+    std::string MemberName;
+    if (CurTok == tok_identifier) {
+      MemberName = IdentifierStr;
+      getNextToken();
+    } else if (CurTok == tok_this) {
+      MemberName = "this";
+      getNextToken();
+    } else {
       LogError("Expected identifier after type");
       return nullptr;
     }
-
-    std::string MemberName = IdentifierStr;
-    getNextToken();
 
     while (CurTok == tok_newline)
       getNextToken();
@@ -2844,6 +2853,10 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
       if (!parseCompositeMethod(Type, MemberName, modifiers, methodKind))
         return nullptr;
     } else {
+      if (MemberName == "this") {
+        reportCompilerError("'this' can only be used as a formatter method name");
+        return nullptr;
+      }
       MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
       auto Field = std::make_unique<FieldAST>(Type, MemberName, modifiers);
       Fields.push_back(std::move(Field));
@@ -2857,10 +2870,12 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
 
   getNextToken();
 
-  if (kind == AggregateKind::Struct)
+  if (kind == AggregateKind::Struct) {
     StructNames.insert(compositeName);
-  else
+  } else {
     ClassNames.insert(compositeName);
+    StructNames.insert(compositeName);
+  }
 
   return std::make_unique<StructAST>(kind, compositeName, std::move(Fields),
                                      std::move(Methods), std::move(baseTypes));

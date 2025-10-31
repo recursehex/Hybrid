@@ -47,6 +47,12 @@ struct CompositeTypeInfo {
   std::optional<std::string> thisOverride;
 };
 
+struct ActiveCompositeContext {
+  std::string name;
+  MethodKind kind = MethodKind::Regular;
+  bool isStatic = false;
+};
+
 /// CodegenContext stores all mutable IR-generation state for a compiler
 /// session. It replaces the previous collection of global variables used by
 /// ast.cpp.
@@ -70,8 +76,7 @@ struct CodegenContext {
   std::vector<llvm::BasicBlock *> loopExitBlocks;
   std::vector<llvm::BasicBlock *> loopContinueBlocks;
   std::vector<std::set<std::string>> nonNullFactsStack;
-  std::vector<std::string> compositeContextStack;
-  std::vector<MethodKind> methodContextStack;
+  std::vector<ActiveCompositeContext> compositeContextStack;
 
   void reset();
 };
@@ -94,7 +99,6 @@ inline void CodegenContext::reset() {
   loopContinueBlocks.clear();
   nonNullFactsStack.clear();
   compositeContextStack.clear();
-  methodContextStack.clear();
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H
