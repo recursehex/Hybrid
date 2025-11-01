@@ -44,6 +44,8 @@ struct CompositeTypeInfo {
   std::map<std::string, std::string> staticFieldTypes;
   std::map<std::string, MemberModifiers> staticFieldModifiers;
   std::map<std::string, std::string> staticFieldGlobals;
+  std::set<std::string> fieldDeclarationInitializers;
+  std::set<std::string> staticDeclarationInitializers;
   std::vector<std::string> constructorMangledNames;
   std::map<std::string, CompositeMemberInfo> methodInfo;
   std::vector<std::string> baseTypes;
@@ -55,6 +57,7 @@ struct ActiveCompositeContext {
   std::string name;
   MethodKind kind = MethodKind::Regular;
   bool isStatic = false;
+  std::set<std::string> initializedInstanceFields;
 };
 
 /// CodegenContext stores all mutable IR-generation state for a compiler
@@ -74,6 +77,7 @@ struct CodegenContext {
   std::map<std::string, std::vector<std::pair<std::string, unsigned>>> structFieldIndices;
   std::map<std::string, std::map<std::string, std::string>> structFieldTypes;
   std::map<std::string, CompositeTypeInfo> compositeMetadata;
+  std::set<std::string> initializedStaticFields;
 
   std::map<std::string, std::vector<FunctionOverload>> functionOverloads;
 
@@ -98,6 +102,7 @@ inline void CodegenContext::reset() {
   structFieldIndices.clear();
   structFieldTypes.clear();
   compositeMetadata.clear();
+  initializedStaticFields.clear();
   functionOverloads.clear();
   loopExitBlocks.clear();
   loopContinueBlocks.clear();

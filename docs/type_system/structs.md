@@ -2,7 +2,7 @@
 
 ## Overview
 
-Structs in Hybrid are user-defined composite types that group related data and methods together. They provide a way to create custom data structures with fields and constructor methods, similar to C structs but with constructor support.
+Structs in Hybrid are user-defined composite types that group related data together. Structs cannot define methods, unlike classes. This design keeps structs as simple data containers, similar to C structs but with constructor support. If you need methods, access modifiers, or full object-oriented programming capabilities, use classes instead.
 
 ## Struct Declaration
 
@@ -253,7 +253,7 @@ rect.bottomRight.y = 200
 
 Structs can be passed as function parameters:
 
-```c
+```cs
 struct Point {
     int x
     int y
@@ -275,7 +275,7 @@ int dist = distance(a, b)  // Returns 25
 
 Functions can return struct instances:
 
-```c
+```cs
 Point createOrigin() {
     return Point(0, 0)
 }
@@ -285,29 +285,13 @@ Point translatePoint(Point p, int dx, int dy) {
 }
 ```
 
-### Struct Methods (Planned)
-
-Future versions will support methods defined within structs:
-
-```c
-// Future syntax (not yet implemented)
-struct Vector {
-    float x
-    float y
-    
-    float length() {
-        return sqrt(this.x * this.x + this.y * this.y)
-    }
-}
-```
-
 ## Memory Management
 
 ### Stack Allocation
 
 Structs are currently allocated on the stack:
 
-```c
+```cs
 Point p = Point(10, 20)  // Stack allocated
 // Memory automatically freed when out of scope
 ```
@@ -316,7 +300,7 @@ Point p = Point(10, 20)  // Stack allocated
 
 Future versions will support heap allocation with `new`:
 
-```c
+```cs
 // Future syntax (not yet implemented)
 Point@ p = new Point(10, 20)  // Heap allocated
 // Will require manual memory management or ARC
@@ -328,7 +312,7 @@ Point@ p = new Point(10, 20)  // Heap allocated
 
 Structs are strongly typed and checked at compile time:
 
-```c
+```cs
 struct Cat {
     string name
 }
@@ -348,7 +332,7 @@ Dog d = Dog("Buddy")
 
 Field types are properly propagated through member access:
 
-```c
+```cs
 struct Data {
     int count
     float average
@@ -414,7 +398,7 @@ entry:
 ### Constructor Design
 
 1. **Initialize All Fields**: Always initialize all fields in constructors
-   ```c
+   ```cs
    struct Account {
        string owner
        int balance
@@ -427,7 +411,7 @@ entry:
    ```
 
 2. **Parameter Naming**: Use clear parameter names
-   ```c
+   ```cs
    struct Rectangle {
        int width
        int height
@@ -443,32 +427,32 @@ entry:
 
 ### Current Limitations
 
-1. **No Inheritance**: Structs don't support inheritance
-2. **No Methods**: Only constructors are supported, not general methods
-3. **No Private Fields**: All fields are public
+1. **No Methods**: Structs are restricted to fields and constructors only. Use classes for methods.
+2. **No Inheritance**: Structs don't support inheritance
+3. **No Access Modifiers**: All fields are public (classes support `public`, `private`, `protected`)
 4. **Single Constructor**: Only one constructor per struct
-5. **No Destructors**: No cleanup methods
-6. **Stack Only**: No heap allocation support
+5. **No Static Members**: No static fields or methods (classes support these)
+6. **No Destructors**: No cleanup methods
+7. **Stack Only**: No heap allocation support
 
 ### Future Enhancements
 
 Planned features for structs:
 
-- Instance methods and static methods
-- Method overloading
-- Private/protected fields
-- Inheritance and interfaces
-- Destructors for cleanup
 - Heap allocation with `new`
 - Generic structs with type parameters
 - Struct literals for initialization
-- Copy constructors and operators
+- Copy constructors
+- Multiple constructors
+- Destructors for cleanup
+
+**Note**: Methods, access modifiers, static members, and inheritance are deliberately not planned for structs. These features are available in classes to maintain a clear separation between simple data containers (structs) and full object-oriented types (classes).
 
 ## Examples
 
 ### Complex Number
 
-```c
+```cs
 struct Complex {
     float real
     float imag
@@ -491,7 +475,7 @@ Complex sum = addComplex(c1, c2)  // (4.0, 6.0)
 
 ### Linked List Node
 
-```c
+```cs
 struct Node {
     int value
     int next_index  // Index to next node (simplified)
@@ -510,7 +494,7 @@ Node n3 = Node(30, -1)  // -1 indicates end
 
 ### Game Entity
 
-```c
+```cs
 struct Position {
     float x
     float y

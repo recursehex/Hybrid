@@ -772,14 +772,24 @@ class FieldAST {
   std::string Type;
   std::string Name;
   MemberModifiers Modifiers;
+  std::unique_ptr<ExprAST> Initializer;
 
 public:
-  FieldAST(std::string Type, std::string Name, MemberModifiers Modifiers)
-      : Type(std::move(Type)), Name(std::move(Name)), Modifiers(Modifiers) {}
+  FieldAST(std::string Type,
+           std::string Name,
+           MemberModifiers Modifiers,
+           std::unique_ptr<ExprAST> Initializer = nullptr)
+      : Type(std::move(Type)),
+        Name(std::move(Name)),
+        Modifiers(Modifiers),
+        Initializer(std::move(Initializer)) {}
   
   const std::string &getType() const { return Type; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const MemberModifiers &getModifiers() const { return Modifiers; }
+  bool hasInitializer() const { return static_cast<bool>(Initializer); }
+  ExprAST *getInitializer() const { return Initializer.get(); }
+  std::unique_ptr<ExprAST> takeInitializer() { return std::move(Initializer); }
 };
 
 /// MemberAccessExprAST - Expression class for struct member access (e.g. point.x).

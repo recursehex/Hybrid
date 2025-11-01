@@ -752,7 +752,6 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   std::string IdName = IdentifierStr;
 
   getNextToken(); // eat identifier.
-
   if (CurTok == '[') {
     // Array indexing
     auto ArrayVar = std::make_unique<VariableExprAST>(IdName);
@@ -1413,15 +1412,24 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
 
 /// variabledecl ::= ['ref'] type identifier '=' expression
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef) {
+  ParserContext parserBackup = currentParser();
+  LexerContext lexerBackup = currentLexer();
+
   if (!IsValidType())
     return nullptr;
 
   std::string Type = ParseCompleteType();
-  if (Type.empty())
+  if (Type.empty()) {
+    currentParser() = parserBackup;
+    currentLexer() = lexerBackup;
     return nullptr;
+  }
 
-  if (CurTok != tok_identifier)
+  if (CurTok != tok_identifier) {
+    currentParser() = parserBackup;
+    currentLexer() = lexerBackup;
     return nullptr;
+  }
 
   std::string Name = IdentifierStr;
   getNextToken(); // eat identifier
@@ -2259,8 +2267,11 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return nullptr;
   default:
     // Check for valid types (built-in and struct) for variable declarations
-    if (IsValidType())
-      return ParseVariableDeclaration();
+    if (IsValidType()) {
+      if (currentLexer().lastChar != '.')
+        if (auto Decl = ParseVariableDeclaration())
+          return Decl;
+    }
     // Try to parse as an expression statement
     auto Expr = ParseExpression();
     if (!Expr)
@@ -2857,8 +2868,22 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
         reportCompilerError("'this' can only be used as a formatter method name");
         return nullptr;
       }
+      std::unique_ptr<ExprAST> MemberInitializer;
+      if (CurTok == '=') {
+        getNextToken(); // eat '='
+        SkipNewlines();
+        MemberInitializer = ParseExpression();
+        if (!MemberInitializer)
+          return nullptr;
+      }
       MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
-      auto Field = std::make_unique<FieldAST>(Type, MemberName, modifiers);
+      if (MemberInitializer &&
+          (modifiers.storage & StorageFlag::Static) == StorageFlag::None) {
+        reportCompilerError("Only static members may specify declaration initializers",
+                            "Assign non-static members inside constructors instead");
+        return nullptr;
+      }
+      auto Field = std::make_unique<FieldAST>(Type, MemberName, modifiers, std::move(MemberInitializer));
       Fields.push_back(std::move(Field));
     }
   }

@@ -535,10 +535,14 @@ static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
   return &it->second;
 }
 
-static const ActiveCompositeContext *currentCompositeContext() {
+static ActiveCompositeContext *currentCompositeContextMutable() {
   if (CG.compositeContextStack.empty())
     return nullptr;
   return &CG.compositeContextStack.back();
+}
+
+static const ActiveCompositeContext *currentCompositeContext() {
+  return currentCompositeContextMutable();
 }
 
 static std::string baseCompositeName(const std::string &typeName) {
@@ -559,6 +563,164 @@ static std::string resolveCompositeName(const ExprAST *expr) {
   if (!expr)
     return {};
   return baseCompositeName(expr->getTypeName());
+}
+
+static std::string makeMemberKey(const std::string &owner, const std::string &member) {
+  return owner + "." + member;
+}
+
+static void markStaticFieldInitialized(const std::string &owner, const std::string &member) {
+  currentCodegen().initializedStaticFields.insert(makeMemberKey(owner, member));
+}
+
+static void noteMemberAssignment(const std::string &ownerName,
+                                 const std::string &memberName,
+                                 bool isStatic) {
+  if (isStatic) {
+    markStaticFieldInitialized(ownerName, memberName);
+    return;
+  }
+
+  if (auto *ctx = currentCompositeContextMutable();
+      ctx && ctx->name == ownerName && ctx->kind == MethodKind::Constructor) {
+    ctx->initializedInstanceFields.insert(memberName);
+  }
+}
+
+static bool memberHasDeclarationInitializer(const CompositeTypeInfo &info,
+                                            bool isStatic,
+                                            const std::string &memberName) {
+  if (isStatic) {
+    return info.staticDeclarationInitializers.count(memberName) != 0;
+  }
+  return info.fieldDeclarationInitializers.count(memberName) != 0;
+}
+
+static bool ensureMemberInitializedForMutation(MemberAccessExprAST &member) {
+  std::string ownerName = resolveCompositeName(member.getObject());
+  if (ownerName.empty()) {
+    if (auto *var = dynamic_cast<VariableExprAST*>(member.getObject())) {
+      if (lookupCompositeInfo(var->getName()))
+        ownerName = var->getName();
+    }
+  }
+  if (ownerName.empty())
+    return true;
+
+  const CompositeTypeInfo *info = lookupCompositeInfo(ownerName);
+  if (!info)
+    return true;
+
+  const std::string &memberName = member.getMemberName();
+  bool isStatic = false;
+  if (info->staticFieldModifiers.count(memberName) != 0) {
+    isStatic = true;
+  } else if (info->fieldModifiers.count(memberName) == 0) {
+    return true;
+  }
+
+  if (memberHasDeclarationInitializer(*info, isStatic, memberName))
+    return true;
+
+  const std::string ownerKind =
+      info->kind == AggregateKind::Class ? "class" : "struct";
+
+  if (isStatic) {
+    auto key = makeMemberKey(ownerName, memberName);
+    if (currentCodegen().initializedStaticFields.count(key) != 0)
+      return true;
+
+    reportCompilerError(
+        "Cannot increment or otherwise modify uninitialized member '" +
+            memberName + "' of " + ownerKind + " '" + ownerName + "'",
+        "Initialize it at its declaration or assign it before modifying it.");
+    return false;
+  }
+
+  const ActiveCompositeContext *ctx = currentCompositeContext();
+  if (!ctx || ctx->name != ownerName)
+    return true;
+  if (ctx->kind != MethodKind::Constructor)
+    return true;
+  if (ctx->initializedInstanceFields.count(memberName) != 0)
+    return true;
+
+  reportCompilerError(
+      "Cannot increment or otherwise modify uninitialized member '" +
+          memberName + "' of " + ownerKind + " '" + ownerName + "'",
+      "Initialize it at its declaration or assign it in every constructor before modifying it.");
+  return false;
+}
+
+static llvm::Constant *constantValueToLLVM(const ConstantValue &value,
+                                           llvm::Type *targetType,
+                                           const std::string &typeName) {
+  if (targetType->isIntegerTy()) {
+    unsigned bits = targetType->getIntegerBitWidth();
+    if (bits == 1) {
+      if (value.type != ConstantValue::BOOLEAN) {
+        reportCompilerError("Static field initializer for type '" + typeName +
+                            "' must be a boolean literal");
+        return nullptr;
+      }
+      return llvm::ConstantInt::get(targetType, value.boolVal ? 1 : 0);
+    }
+
+    if (value.type == ConstantValue::FLOAT) {
+      reportCompilerError("Static field initializer for type '" + typeName +
+                          "' cannot use a floating-point literal");
+      return nullptr;
+    }
+
+    if (value.type == ConstantValue::BOOLEAN) {
+      reportCompilerError("Static field initializer for type '" + typeName +
+                          "' cannot use a boolean literal");
+      return nullptr;
+    }
+
+    if (value.type == ConstantValue::INTEGER) {
+      llvm::APInt ap(bits, static_cast<uint64_t>(value.intVal), true);
+      if (bits < 64 && ap.getSExtValue() != value.intVal) {
+        reportCompilerError("Static field initializer value does not fit in type '" + typeName + "'");
+        return nullptr;
+      }
+      return llvm::ConstantInt::get(targetType, ap);
+    }
+
+    if (value.type == ConstantValue::UNSIGNED_INTEGER) {
+      llvm::APInt ap(bits, value.uintVal, false);
+      if (bits < 64 && ap.getZExtValue() != value.uintVal) {
+        reportCompilerError("Static field initializer value does not fit in type '" + typeName + "'");
+        return nullptr;
+      }
+      return llvm::ConstantInt::get(targetType, ap);
+    }
+
+    reportCompilerError("Unsupported static field initializer for type '" + typeName + "'");
+    return nullptr;
+  }
+
+  if (targetType->isFloatingPointTy()) {
+    double numeric = 0.0;
+    switch (value.type) {
+    case ConstantValue::INTEGER:
+      numeric = static_cast<double>(value.intVal);
+      break;
+    case ConstantValue::UNSIGNED_INTEGER:
+      numeric = static_cast<double>(value.uintVal);
+      break;
+    case ConstantValue::FLOAT:
+      numeric = value.floatVal;
+      break;
+    case ConstantValue::BOOLEAN:
+      numeric = value.boolVal ? 1.0 : 0.0;
+      break;
+    }
+    return llvm::ConstantFP::get(targetType, numeric);
+  }
+
+  reportCompilerError("Static field initializer is not supported for type '" + typeName + "'");
+  return nullptr;
 }
 
 static bool hasAccessFlag(MemberAccess access, AccessFlag flag) {
@@ -670,8 +832,11 @@ public:
   ScopedCompositeContext(const std::string &name, MethodKind kind,
                          bool isStatic)
       : Ctx(currentCodegen()) {
-    Ctx.compositeContextStack.push_back(
-        ActiveCompositeContext{name, kind, isStatic});
+    ActiveCompositeContext context;
+    context.name = name;
+    context.kind = kind;
+    context.isStatic = isStatic;
+    Ctx.compositeContextStack.push_back(std::move(context));
     Active = true;
   }
 
@@ -3827,6 +3992,7 @@ llvm::Value *BinaryExprAST::codegen() {
           R = castToType(R, FieldType);
 
         Builder->CreateStore(R, FieldPtr);
+        noteMemberAssignment(structName, LHSMA->getMemberName(), fieldIsStatic);
         // Return a void value to indicate this is a statement, not an expression
         setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -4334,6 +4500,11 @@ llvm::Value *UnaryExprAST::codegen() {
     llvm::Value *Ptr = Operand->codegen_ptr();
     if (!Ptr) {
         return LogErrorV("operand of ++/-- must be a variable");
+    }
+
+    if (auto *Member = dynamic_cast<MemberAccessExprAST*>(Operand.get())) {
+      if (!ensureMemberInitializedForMutation(*Member))
+        return nullptr;
     }
 
     llvm::Value *Val = Operand->codegen();
@@ -6489,9 +6660,25 @@ llvm::Type *StructAST::codegen() {
 
     const bool isStatic =
         static_cast<uint8_t>(Field->getModifiers().storage & StorageFlag::Static) != 0;
-
+    const bool hasInitializer = Field->hasInitializer();
     if (isStatic) {
       llvm::Constant *Init = llvm::Constant::getNullValue(FieldType);
+      if (hasInitializer) {
+        ConstantValue constVal(0LL);
+        if (!EvaluateConstantExpression(Field->getInitializer(), constVal)) {
+          reportCompilerError("Static field initializer for '" + Field->getName() +
+                                  "' must be a compile-time constant expression");
+          abandonStructDefinition();
+          return nullptr;
+        }
+
+        Init = constantValueToLLVM(constVal, FieldType, FieldTypeName);
+        if (!Init) {
+          abandonStructDefinition();
+          return nullptr;
+        }
+      }
+
       std::string GlobalName = Name + "." + Field->getName();
 
       auto *GV = new llvm::GlobalVariable(
@@ -6505,6 +6692,10 @@ llvm::Type *StructAST::codegen() {
       compositeInfo.staticFieldTypes[Field->getName()] = FieldTypeName;
       compositeInfo.staticFieldModifiers[Field->getName()] = Field->getModifiers();
       compositeInfo.staticFieldGlobals[Field->getName()] = GlobalName;
+      if (hasInitializer) {
+        compositeInfo.staticDeclarationInitializers.insert(Field->getName());
+        markStaticFieldInitialized(Name, Field->getName());
+      }
       continue;
     }
 
@@ -6512,6 +6703,8 @@ llvm::Type *StructAST::codegen() {
     FieldIndices.emplace_back(Field->getName(), FieldIndex++);
     FieldTypeMap[Field->getName()] = FieldTypeName;
     compositeInfo.fieldModifiers[Field->getName()] = Field->getModifiers();
+    if (hasInitializer)
+      compositeInfo.fieldDeclarationInitializers.insert(Field->getName());
   }
 
   StructType->setBody(FieldTypes);
@@ -6656,52 +6849,74 @@ llvm::Type *StructAST::codegen() {
 
 // Generate code for member access expressions
 llvm::Value *MemberAccessExprAST::codegen() {
-  // Get the type name of the object BEFORE codegen (might be empty for nested access)
-  std::string ObjectTypeNameBefore = Object->getTypeName();
-  
-  // Generate code for the object
-  llvm::Value *ObjectPtr = Object->codegen();
-  if (!ObjectPtr) {
-    return nullptr;
-  }
-  
-  // Get the type name of the object AFTER codegen (should be set now)
-  std::string ObjectTypeName = Object->getTypeName();
-  ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
-  if (ObjectTypeDesc.isNullable) {
-    return LogErrorV(("Cannot access nullable type '" + ObjectTypeName + "' without null-safe operator").c_str());
-  }
-  std::string StructLookupName = ObjectTypeDesc.sanitized;
-
-  const CompositeTypeInfo *info = lookupCompositeInfo(StructLookupName);
+  const CompositeTypeInfo *info = nullptr;
   const MemberModifiers *modifiers = nullptr;
   bool isStaticField = false;
   std::string staticFieldType;
   std::string staticGlobalName;
   MemberModifiers defaultStaticModifiers;
+  std::string StructLookupName;
+  std::string ObjectTypeName;
 
-  if (info) {
-    (void)info;
-  }
-
-  if (info) {
-    if (auto modIt = info->fieldModifiers.find(MemberName);
-        modIt != info->fieldModifiers.end()) {
-      modifiers = &modIt->second;
-    } else if (auto staticIt = info->staticFieldModifiers.find(MemberName);
-               staticIt != info->staticFieldModifiers.end()) {
-      modifiers = &staticIt->second;
-      isStaticField = true;
-      if (auto typeIt = info->staticFieldTypes.find(MemberName);
-          typeIt != info->staticFieldTypes.end())
-        staticFieldType = typeIt->second;
-      if (auto globIt = info->staticFieldGlobals.find(MemberName);
-          globIt != info->staticFieldGlobals.end())
-        staticGlobalName = globIt->second;
+  if (auto *VarObj = dynamic_cast<VariableExprAST *>(Object.get())) {
+    StructLookupName = VarObj->getName();
+    info = lookupCompositeInfo(StructLookupName);
+    if (info) {
+      if (auto staticIt = info->staticFieldModifiers.find(MemberName);
+          staticIt != info->staticFieldModifiers.end()) {
+        modifiers = &staticIt->second;
+        isStaticField = true;
+        if (auto typeIt = info->staticFieldTypes.find(MemberName);
+            typeIt != info->staticFieldTypes.end())
+          staticFieldType = typeIt->second;
+        if (auto globIt = info->staticFieldGlobals.find(MemberName);
+            globIt != info->staticFieldGlobals.end())
+          staticGlobalName = globIt->second;
+      }
+    } else {
+      StructLookupName.clear();
     }
   }
 
+  llvm::Value *ObjectPtr = nullptr;
   if (!isStaticField) {
+    ObjectPtr = Object->codegen();
+    if (!ObjectPtr)
+      return nullptr;
+
+    ObjectTypeName = Object->getTypeName();
+    ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+    if (ObjectTypeDesc.isNullable) {
+      return LogErrorV(
+          ("Cannot access nullable type '" + ObjectTypeName +
+           "' without null-safe operator")
+              .c_str());
+    }
+    StructLookupName = ObjectTypeDesc.sanitized;
+
+    info = lookupCompositeInfo(StructLookupName);
+    if (info) {
+      if (auto modIt = info->fieldModifiers.find(MemberName);
+          modIt != info->fieldModifiers.end()) {
+        modifiers = &modIt->second;
+      } else if (auto staticIt = info->staticFieldModifiers.find(MemberName);
+                 staticIt != info->staticFieldModifiers.end()) {
+        modifiers = &staticIt->second;
+        isStaticField = true;
+        if (auto typeIt = info->staticFieldTypes.find(MemberName);
+            typeIt != info->staticFieldTypes.end())
+          staticFieldType = typeIt->second;
+        if (auto globIt = info->staticFieldGlobals.find(MemberName);
+            globIt != info->staticFieldGlobals.end())
+          staticGlobalName = globIt->second;
+      }
+    }
+  }
+
+  if (StructLookupName.empty())
+    StructLookupName = resolveCompositeName(Object.get());
+
+  if (!isStaticField && !StructLookupName.empty()) {
     staticGlobalName = StructLookupName + "." + MemberName;
     auto globalFallback = CG.globalValues.find(staticGlobalName);
     if (globalFallback != CG.globalValues.end()) {
@@ -6725,6 +6940,9 @@ llvm::Value *MemberAccessExprAST::codegen() {
                                    StructLookupName, MemberName))
       return nullptr;
 
+    if (staticGlobalName.empty())
+      staticGlobalName = StructLookupName + "." + MemberName;
+
     auto globalIt = CG.globalValues.find(staticGlobalName);
     if (globalIt == CG.globalValues.end())
       return LogErrorV(("Static field storage not found for '" + MemberName +
@@ -6741,6 +6959,18 @@ llvm::Value *MemberAccessExprAST::codegen() {
       !ensureMemberAccessAllowed(*modifiers, AccessIntent::Read,
                                  StructLookupName, MemberName))
     return nullptr;
+
+  if (!ObjectPtr) {
+    ObjectPtr = Object->codegen();
+    if (!ObjectPtr)
+      return nullptr;
+    ObjectTypeName = Object->getTypeName();
+  }
+
+  if (StructLookupName.empty()) {
+    ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+    StructLookupName = ObjectTypeDesc.sanitized;
+  }
 
   // If ObjectTypeName is empty but have a valid pointer, it might be a nested struct access
   // In that case, the ObjectPtr is already a pointer to a struct
@@ -6806,45 +7036,67 @@ llvm::Value *MemberAccessExprAST::codegen() {
 }
 
 llvm::Value *MemberAccessExprAST::codegen_ptr() {
-  // Generate code for the object
-  llvm::Value *ObjectPtr = Object->codegen();
-  if (!ObjectPtr) {
-    return nullptr;
-  }
-  
-  // Get the type name of the object
-  std::string ObjectTypeName = Object->getTypeName();
-  ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
-  if (ObjectTypeDesc.isNullable) {
-    return LogErrorV(("Cannot access nullable type '" + ObjectTypeName + "' without null-safe operator").c_str());
-  }
-  std::string StructLookupName = ObjectTypeDesc.sanitized;
-
-  const CompositeTypeInfo *info = lookupCompositeInfo(StructLookupName);
+  const CompositeTypeInfo *info = nullptr;
   const MemberModifiers *modifiers = nullptr;
   bool isStaticField = false;
   std::string staticGlobalName;
   MemberModifiers defaultStaticModifiers;
+  std::string StructLookupName;
+  std::string ObjectTypeName;
 
-  if (info) {
-    (void)info;
-  }
-
-  if (info) {
-    if (auto modIt = info->fieldModifiers.find(MemberName);
-        modIt != info->fieldModifiers.end()) {
-      modifiers = &modIt->second;
-    } else if (auto staticIt = info->staticFieldModifiers.find(MemberName);
-               staticIt != info->staticFieldModifiers.end()) {
-      modifiers = &staticIt->second;
-      isStaticField = true;
-      if (auto globIt = info->staticFieldGlobals.find(MemberName);
-          globIt != info->staticFieldGlobals.end())
-        staticGlobalName = globIt->second;
+  if (auto *VarObj = dynamic_cast<VariableExprAST *>(Object.get())) {
+    StructLookupName = VarObj->getName();
+    info = lookupCompositeInfo(StructLookupName);
+    if (info) {
+      if (auto staticIt = info->staticFieldModifiers.find(MemberName);
+          staticIt != info->staticFieldModifiers.end()) {
+        modifiers = &staticIt->second;
+        isStaticField = true;
+        if (auto globIt = info->staticFieldGlobals.find(MemberName);
+            globIt != info->staticFieldGlobals.end())
+          staticGlobalName = globIt->second;
+      }
+    } else {
+      StructLookupName.clear();
     }
   }
 
+  llvm::Value *ObjectPtr = nullptr;
   if (!isStaticField) {
+    ObjectPtr = Object->codegen();
+    if (!ObjectPtr)
+      return nullptr;
+
+    ObjectTypeName = Object->getTypeName();
+    ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+    if (ObjectTypeDesc.isNullable) {
+      return LogErrorV(
+          ("Cannot access nullable type '" + ObjectTypeName +
+           "' without null-safe operator")
+              .c_str());
+    }
+    StructLookupName = ObjectTypeDesc.sanitized;
+
+    info = lookupCompositeInfo(StructLookupName);
+    if (info) {
+      if (auto modIt = info->fieldModifiers.find(MemberName);
+          modIt != info->fieldModifiers.end()) {
+        modifiers = &modIt->second;
+      } else if (auto staticIt = info->staticFieldModifiers.find(MemberName);
+                 staticIt != info->staticFieldModifiers.end()) {
+        modifiers = &staticIt->second;
+        isStaticField = true;
+        if (auto globIt = info->staticFieldGlobals.find(MemberName);
+            globIt != info->staticFieldGlobals.end())
+          staticGlobalName = globIt->second;
+      }
+    }
+  }
+
+  if (StructLookupName.empty())
+    StructLookupName = resolveCompositeName(Object.get());
+
+  if (!isStaticField && !StructLookupName.empty()) {
     staticGlobalName = StructLookupName + "." + MemberName;
     auto globalFallback = CG.globalValues.find(staticGlobalName);
     if (globalFallback != CG.globalValues.end()) {
@@ -6865,6 +7117,9 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
                                    StructLookupName, MemberName))
       return nullptr;
 
+    if (staticGlobalName.empty())
+      staticGlobalName = StructLookupName + "." + MemberName;
+
     auto globalIt = CG.globalValues.find(staticGlobalName);
     if (globalIt == CG.globalValues.end())
       return LogErrorV(("Static field storage not found for '" + MemberName +
@@ -6878,6 +7133,18 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
       !ensureMemberAccessAllowed(*modifiers, AccessIntent::Write,
                                  StructLookupName, MemberName))
     return nullptr;
+
+  if (!ObjectPtr) {
+    ObjectPtr = Object->codegen();
+    if (!ObjectPtr)
+      return nullptr;
+    ObjectTypeName = Object->getTypeName();
+  }
+
+  if (StructLookupName.empty()) {
+    ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+    StructLookupName = ObjectTypeDesc.sanitized;
+  }
 
   // Find the struct type
   auto StructIt = StructTypes.find(StructLookupName);
