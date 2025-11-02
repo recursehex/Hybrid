@@ -2,20 +2,22 @@
 
 ## Overview
 
-Structs in Hybrid are user-defined composite types that group related data together. Structs cannot define methods, unlike classes. This design keeps structs as simple data containers, similar to C structs but with constructor support. If you need methods, access modifiers, or full object-oriented programming capabilities, use classes instead.
+Structs in Hybrid are user-defined composite types that group related data together. Structs cannot define methods, unlike classes. This design keeps structs as simple data containers, similar to C structs but with constructor support. Because fields do not receive implicit default values, every struct must declare at least one constructor so instances can initialize their storage. Structs may declare multiple constructors, provided each one initializes all instance fields before returning. If you need methods, access modifiers, or full object-oriented programming capabilities, use classes instead.
 
 ## Struct Declaration
 
 ### Basic Syntax
 
-```c
-struct StructName {
+```cs
+struct StructName
+{
     type1 field1
     type2 field2
     // ... more fields
     
-    // Constructor method (optional)
-    StructName(parameters) {
+    // Constructor
+    StructName(parameters)
+    {
         // initialization code
     }
 }
@@ -23,31 +25,35 @@ struct StructName {
 
 ### Example Declarations
 
-```c
-// Simple struct with fields only
-struct Point {
+```cs
+// Simple struct with constructor overloads
+struct Point
+{
     int x
     int y
-}
 
-// Struct with constructor
-struct Rectangle {
-    int width
-    int height
-    
-    Rectangle(int w, int h) {
-        this.width = w
-        this.height = h
+    Point()
+    {
+        this.x = 0
+        this.y = 0
+    }
+
+    Point(int x, int y)
+    {
+        this.x = x
+        this.y = y
     }
 }
 
 // Struct with multiple types
-struct Person {
+struct Person
+{
     string name
     int age
     float height
     
-    Person(string n, int a, float h) {
+    Person(string n, int a, float h)
+    {
         this.name = n
         this.age = a
         this.height = h
@@ -61,12 +67,21 @@ struct Person {
 
 Fields are declared with their type followed by the field name:
 
-```c
-struct Student {
+```cs
+struct Student
+{
     string name      // String field
     int id           // Integer field
     float gpa        // Float field
     bool active      // Boolean field
+
+    Student(string name, int id, float gpa, bool active)
+    {
+        this.name = name
+        this.id = id
+        this.gpa = gpa
+        this.active = active
+    }
 }
 ```
 
@@ -87,10 +102,18 @@ Fields can be of any supported type:
 Append `?` to a field's type when the value is optional:
 
 ```cs
-struct User {
+struct User
+{
     string name
     Address? address
     string? alias
+
+    User(string name, Address? address, string? alias)
+    {
+        this.name = name
+        this.address = address
+        this.alias = alias
+    }
 }
 ```
 
@@ -102,17 +125,26 @@ struct User {
 
 Structs can contain fields of other struct types:
 
-```c
-struct Point {
+```cs
+struct Point
+{
     int x
     int y
+
+    Point(int x, int y)
+    {
+        this.x = x
+        this.y = y
+    }
 }
 
-struct Circle {
+struct Circle
+{
     Point center    // Nested struct field
     int radius
     
-    Circle(Point p, int r) {
+    Circle(Point p, int r)
+    {
         this.center = p
         this.radius = r
     }
@@ -125,14 +157,16 @@ struct Circle {
 
 Constructors are special methods with the same name as the struct:
 
-```c
-struct Vector3 {
+```cs
+struct Vector3
+{
     float x
     float y
     float z
     
     // Constructor with parameters
-    Vector3(float x, float y, float z) {
+    Vector3(float x, float y, float z)
+    {
         this.x = x
         this.y = y
         this.z = z
@@ -144,19 +178,23 @@ struct Vector3 {
 
 Inside constructor methods, `this` refers to the current struct instance:
 
-```c
-struct Counter {
+```cs
+struct Counter
+{
     int value
     
-    Counter(int initial) {
-        this.value = initial  // 'this.value' refers to the field
+    Counter(int value)
+    {
+        this.value = value  // 'this.value' refers to the member variable
     }
 }
 ```
 
+You may provide more than one constructor when you need different parameter sets. Regardless of the overload, ensure each constructor assigns every instance field before it exits.
+
 ### Constructor Overloading
 
-Currently, Hybrid supports only one constructor per struct. Multiple constructors are planned for future versions.
+Hybrid supports multiple constructors per struct, and at least one constructor must be present. Overloads let you provide alternative initialization logic while still guaranteeing that all fields become initialized.
 
 ## Struct Instantiation
 
@@ -164,7 +202,7 @@ Currently, Hybrid supports only one constructor per struct. Multiple constructor
 
 Create a struct instance and assign it to a variable:
 
-```c
+```cs
 // Using constructor
 Point p1 = Point(10, 20)
 
@@ -175,7 +213,7 @@ int yCoord = p1.y  // 20
 
 For longer argument lists, break the constructor call across multiple lines. The call follows the same multiline rules as function invocations:
 
-```c
+```cs
 Rectangle positioned = Rectangle(
     originX,
     originY + offset
@@ -200,8 +238,9 @@ processPoint(Point(50, 60))
 
 Access struct fields using the dot (`.`) operator:
 
-```c
-struct Book {
+```cs
+struct Book
+{
     string title
     string author
     int year
@@ -217,7 +256,7 @@ int pubYear = b.year           // 1949
 
 Struct fields can be modified after creation:
 
-```c
+```cs
 Point p = Point(0, 0)
 p.x = 100  // Modify x field
 p.y = 200  // Modify y field
@@ -227,13 +266,15 @@ p.y = 200  // Modify y field
 
 Access nested struct fields by chaining dot operators:
 
-```c
-struct Point {
+```cs
+struct Point
+{
     int x
     int y
 }
 
-struct Rectangle {
+struct Rectangle
+{
     Point topLeft
     Point bottomRight
 }
@@ -254,12 +295,14 @@ rect.bottomRight.y = 200
 Structs can be passed as function parameters:
 
 ```cs
-struct Point {
+struct Point
+{
     int x
     int y
 }
 
-int distance(Point p1, Point p2) {
+int distance(Point p1, Point p2)
+{
     int dx = p2.x - p1.x
     int dy = p2.y - p1.y
     return dx * dx + dy * dy  // Squared distance
@@ -276,11 +319,13 @@ int dist = distance(a, b)  // Returns 25
 Functions can return struct instances:
 
 ```cs
-Point createOrigin() {
+Point createOrigin()
+{
     return Point(0, 0)
 }
 
-Point translatePoint(Point p, int dx, int dy) {
+Point translatePoint(Point p, int dx, int dy)
+{
     return Point(p.x + dx, p.y + dy)
 }
 ```
@@ -302,7 +347,8 @@ Future versions will support heap allocation with `new`:
 
 ```cs
 // Future syntax (not yet implemented)
-Point@ p = new Point(10, 20)  // Heap allocated
+Point@ p = new Point(10, 20)    // Heap allocated
+Point@ p = new(10, 20)          // Compact syntax
 // Will require manual memory management or ARC
 ```
 
@@ -313,11 +359,13 @@ Point@ p = new Point(10, 20)  // Heap allocated
 Structs are strongly typed and checked at compile time:
 
 ```cs
-struct Cat {
+struct Cat
+{
     string name
 }
 
-struct Dog {
+struct Dog
+{
     string name
 }
 
@@ -333,7 +381,8 @@ Dog d = Dog("Buddy")
 Field types are properly propagated through member access:
 
 ```cs
-struct Data {
+struct Data
+{
     int count
     float average
 }
@@ -382,14 +431,15 @@ entry:
 ### Naming Conventions
 
 1. **Struct Names**: Use PascalCase for struct names
-   ```c
+   ```cs
    struct CustomerOrder { }  // Good
    struct customer_order { }  // Avoid
    ```
 
 2. **Field Names**: Use camelCase for field names
-   ```c
-   struct Person {
+   ```cs
+   struct Person
+   {
        string firstName  // Good
        int ageInYears    // Good
    }
@@ -399,24 +449,28 @@ entry:
 
 1. **Initialize All Fields**: Always initialize all fields in constructors
    ```cs
-   struct Account {
+   struct Account
+   {
        string owner
        int balance
        
-       Account(string o, int b) {
+       Account(string o, int b)
+       {
            this.owner = o
-           this.balance = b  // Don't forget any field
+           this.balance = b
        }
    }
    ```
 
 2. **Parameter Naming**: Use clear parameter names
    ```cs
-   struct Rectangle {
+   struct Rectangle
+   {
        int width
        int height
        
-       Rectangle(int width, int height) {  // Clear names
+       Rectangle(int width, int height)
+       {  // Clear names
            this.width = width
            this.height = height
        }
@@ -430,10 +484,9 @@ entry:
 1. **No Methods**: Structs are restricted to fields and constructors only. Use classes for methods.
 2. **No Inheritance**: Structs don't support inheritance
 3. **No Access Modifiers**: All fields are public (classes support `public`, `private`, `protected`)
-4. **Single Constructor**: Only one constructor per struct
-5. **No Static Members**: No static fields or methods (classes support these)
-6. **No Destructors**: No cleanup methods
-7. **Stack Only**: No heap allocation support
+4. **No Static Members**: No static fields or methods (classes support these)
+5. **No Destructors**: No cleanup methods
+6. **Stack Only**: No heap allocation support
 
 ### Future Enhancements
 
@@ -453,17 +506,20 @@ Planned features for structs:
 ### Complex Number
 
 ```cs
-struct Complex {
+struct Complex
+{
     float real
     float imag
     
-    Complex(float r, float i) {
+    Complex(float r, float i)
+    {
         this.real = r
         this.imag = i
     }
 }
 
-Complex addComplex(Complex a, Complex b) {
+Complex addComplex(Complex a, Complex b)
+{
     return Complex(a.real + b.real, a.imag + b.imag)
 }
 
@@ -476,11 +532,13 @@ Complex sum = addComplex(c1, c2)  // (4.0, 6.0)
 ### Linked List Node
 
 ```cs
-struct Node {
+struct Node
+{
     int value
     int next_index  // Index to next node (simplified)
     
-    Node(int val, int next) {
+    Node(int val, int next)
+    {
         this.value = val
         this.next_index = next
     }
@@ -495,18 +553,21 @@ Node n3 = Node(30, -1)  // -1 indicates end
 ### Game Entity
 
 ```cs
-struct Position {
+struct Position
+{
     float x
     float y
 }
 
-struct Entity {
+struct Entity
+{
     string name
     Position pos
     int health
     int damage
     
-    Entity(string n, Position p, int h, int d) {
+    Entity(string n, Position p, int h, int d)
+    {
         this.name = n
         this.pos = p
         this.health = h

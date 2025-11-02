@@ -2627,6 +2627,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
   std::vector<std::unique_ptr<FieldAST>> Fields;
   std::vector<MethodDefinition> Methods;
   bool seenThisOverride = false;
+  bool hasConstructor = false;
 
   auto parseConstructor = [&](MemberModifiers modifiers) -> bool {
     getNextToken(); // eat '('
@@ -2696,6 +2697,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
     auto Proto = std::make_unique<PrototypeAST>(std::move(ctorReturn), compositeName, std::move(Args));
     auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     Methods.emplace_back(std::move(Constructor), modifiers, MethodKind::Constructor, compositeName);
+    hasConstructor = true;
     return true;
   };
 
@@ -2886,6 +2888,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
       auto Field = std::make_unique<FieldAST>(Type, MemberName, modifiers, std::move(MemberInitializer));
       Fields.push_back(std::move(Field));
     }
+  }
+
+  if (!hasConstructor) {
+    const char *kindDescription =
+        (kind == AggregateKind::Struct) ? "Struct" : "Class";
+    reportCompilerError(std::string(kindDescription) + " '" + compositeName +
+                            "' must declare at least one constructor",
+                        "Provide at least one constructor so that all members can be initialized explicitly.");
+    return nullptr;
   }
 
   if (CurTok != '}') {

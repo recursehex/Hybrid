@@ -841,8 +841,55 @@ public:
   }
 
   ~ScopedCompositeContext() {
-    if (Active)
-      Ctx.compositeContextStack.pop_back();
+    if (!Active)
+      return;
+
+    ActiveCompositeContext context = std::move(Ctx.compositeContextStack.back());
+    Ctx.compositeContextStack.pop_back();
+
+    if (context.kind != MethodKind::Constructor || context.isStatic)
+      return;
+
+    const CompositeTypeInfo *info = lookupCompositeInfo(context.name);
+    if (!info)
+      return;
+
+    std::vector<std::string> missingMembers;
+    missingMembers.reserve(info->fieldTypes.size());
+    for (const auto &fieldEntry : info->fieldTypes) {
+      const std::string &fieldName = fieldEntry.first;
+      if (info->fieldDeclarationInitializers.count(fieldName) != 0)
+        continue;
+      if (context.initializedInstanceFields.count(fieldName) != 0)
+        continue;
+      missingMembers.push_back(fieldName);
+    }
+
+    if (missingMembers.empty())
+      return;
+
+    std::string ownerKind =
+        info->kind == AggregateKind::Class ? "class" : "struct";
+    std::string missingList;
+    missingList.reserve(missingMembers.size() * 12);
+    for (size_t i = 0; i < missingMembers.size(); ++i) {
+      if (i != 0)
+        missingList += "', '";
+      missingList += missingMembers[i];
+    }
+
+    std::string message;
+    if (missingMembers.size() == 1) {
+      message = "Constructor for " + ownerKind + " '" + context.name +
+                "' must initialize member '" + missingList + "'";
+    } else {
+      message = "Constructor for " + ownerKind + " '" + context.name +
+                "' must initialize members '" + missingList + "'";
+    }
+
+    reportCompilerError(
+        std::move(message),
+        "Assign every instance field in each constructor before it returns.");
   }
 };
 

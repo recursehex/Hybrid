@@ -2,7 +2,7 @@
 
 Hybrid supports classes that extend the struct model with member functions (methods), access modifiers, and formatter support for full object-oriented programming. Unlike structs, which are restricted to only member variables and constructors, classes allow you to define instance methods, static methods, and properties to create rich, encapsulated types. Classes continue to use value semantics by default, but add rules around initialization and visibility that mirror familiar behaviour while enforcing safer guarantees.
 
-**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities.
+**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities. Because member variables do not receive implicit default values, every class must include at least one constructor (empty or otherwise) so instances can initialize their state. Classes may define multiple constructors, but each one must leave every instance field initialized before returning.
 
 ## Quick Example
 
@@ -36,8 +36,8 @@ class Door
 ## Value Semantics and Construction
 
 - Class instances follow the same value semantics as structs. `Door d = Door(2)` allocates storage in the surrounding scope.
-- Classes may omit an empty constructor, in which case `Door()` is a compile-time error.
-- All non-`static` members must be assigned in *every* constructor before they are read or mutated. The compiler tracks constructor assignments so it can emit diagnostics when a member is skipped.
+- Classes must declare at least one constructor. If you want default construction, explicitly declare an empty constructor; omitting constructors entirely is a compile-time error because members have no default values.
+- All non-`static` members must be assigned in *every* constructor before the constructor returns. The compiler tracks constructor assignments so it can emit diagnostics when a member is skipped.
 
 ## Member Initialization Rules
 
