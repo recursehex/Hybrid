@@ -1675,6 +1675,36 @@ llvm::Value *NullExprAST::codegen() {
   return llvm::ConstantPointerNull::get(OpaquePtr);
 }
 
+llvm::Value *ParenExprAST::codegen() {
+  if (IsTupleExpr) {
+    reportCompilerError(
+        "Tuple expressions are not supported in this context",
+        "Use constructor call syntax like Type(arg1, arg2) instead of relying on bare tuples.");
+    return nullptr;
+  }
+
+  if (Elements.empty()) {
+    reportCompilerError(
+        "Empty parenthesized expression is not allowed here",
+        "Provide an expression inside parentheses or remove them.");
+    return nullptr;
+  }
+
+  ExprAST *inner = Elements.front().get();
+  llvm::Value *value = inner->codegen();
+  if (!value)
+    return nullptr;
+
+  setTypeName(inner->getTypeName());
+  return value;
+}
+
+llvm::Value *ParenExprAST::codegen_ptr() {
+  if (IsTupleExpr || Elements.empty())
+    return nullptr;
+  return Elements.front()->codegen_ptr();
+}
+
 static llvm::Value *emitUTF16StringLiteral(const std::string &value) {
   static std::map<std::string, llvm::GlobalVariable*> StringLiteralCache;
 

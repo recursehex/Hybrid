@@ -646,6 +646,39 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
   return true;
 }
 
+static bool ConvertParenInitializerToConstructor(std::unique_ptr<ExprAST> &Initializer,
+                                                 const TypeInfo &declInfo) {
+  if (declInfo.pointerDepth > 0 || declInfo.isArray)
+    return false;
+  if (declInfo.typeName.empty())
+    return false;
+
+  auto *paren = dynamic_cast<ParenExprAST *>(Initializer.get());
+  if (!paren)
+    return false;
+
+  const std::string &compositeName = declInfo.typeName;
+  bool knownComposite =
+      StructNames.contains(compositeName) ||
+      ClassNames.contains(compositeName) ||
+      IsActiveStructName(compositeName) ||
+      IsActiveClassName(compositeName);
+  if (!knownComposite)
+    return false;
+
+  std::vector<std::unique_ptr<ExprAST>> args;
+  if (paren->isTuple()) {
+    args = paren->takeElements();
+  } else {
+    auto single = paren->takeSingleElement();
+    if (single)
+      args.push_back(std::move(single));
+  }
+
+  Initializer = std::make_unique<CallExprAST>(compositeName, std::move(args));
+  return true;
+}
+
 /// InferExprType - Infer the type of an expression at parse time
 /// Returns empty string if type cannot be determined
 static std::string InferExprType(const ExprAST* expr)
@@ -729,15 +762,39 @@ std::unique_ptr<ExprAST> ParseNumberExpr() {
 
 /// parenexpr ::= '(' expression ')'
 std::unique_ptr<ExprAST> ParseParenExpr() {
-  getNextToken(); // eat (.
-  auto V = ParseExpression();
-  if (!V)
-    return nullptr;
+  getNextToken(); // eat '('
+  SkipNewlines();
+
+  std::vector<std::unique_ptr<ExprAST>> Elements;
+  bool sawComma = false;
+
+  if (CurTok != ')') {
+    while (true) {
+      auto Element = ParseExpression();
+      if (!Element)
+        return nullptr;
+      Elements.push_back(std::move(Element));
+
+      SkipNewlines();
+
+      if (CurTok == ')')
+        break;
+
+      if (CurTok != ',')
+        return LogError("Expected ')' or ',' in parenthesized expression");
+
+      sawComma = true;
+      getNextToken(); // eat ','
+      SkipNewlines();
+    }
+  }
 
   if (CurTok != ')')
     return LogError("expected ')'");
-  getNextToken(); // eat ).
-  return V;
+  getNextToken(); // eat ')'
+
+  bool isTuple = sawComma || Elements.size() != 1;
+  return std::make_unique<ParenExprAST>(std::move(Elements), isTuple);
 }
 
 // Forward declaration
@@ -1434,6 +1491,8 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   std::string Name = IdentifierStr;
   getNextToken(); // eat identifier
 
+  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+
   if (CurTok != '=') {
     LogError("Expected '=' after variable name (all variables must be initialized)");
     return nullptr;
@@ -1448,16 +1507,18 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
     getNextToken(); // eat 'ref'
   }
 
-  std::unique_ptr<ExprAST> Initializer = ParseExpression();
+  auto Initializer = ParseExpression();
   if (!Initializer)
     return nullptr;
+
+  if (!initializerIsRef)
+    ConvertParenInitializerToConstructor(Initializer, declInfo);
 
   // If initializer has ref, wrap it in RefExprAST
   if (initializerIsRef) {
     Initializer = std::make_unique<RefExprAST>(std::move(Initializer));
   }
 
-  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
   return std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 }
 
@@ -2496,6 +2557,8 @@ bool ParseTypeIdentifier(bool isRef) {
     getNextToken(); // eat '='
     SkipNewlines();
 
+    TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+
     // Check if the initializer has 'ref' keyword (for linking two variables)
     bool initializerIsRef = false;
     if (CurTok == tok_ref) {
@@ -2510,6 +2573,9 @@ bool ParseTypeIdentifier(bool isRef) {
       return false;
     }
 
+    if (!initializerIsRef)
+      ConvertParenInitializerToConstructor(Initializer, declInfo);
+
     // If initializer has ref, wrap it in RefExprAST
     if (initializerIsRef) {
       Initializer = std::make_unique<RefExprAST>(std::move(Initializer));
@@ -2517,7 +2583,6 @@ bool ParseTypeIdentifier(bool isRef) {
 
     // Create the variable declaration AST but don't generate code here
     // Code generation will be handled by HandleVariableDeclaration in toplevel.cpp
-    TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
     auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 
     // Need to wrap it in a function for top-level variable declarations
@@ -2953,6 +3018,12 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
   if (auto boolExpr = dynamic_cast<const BoolExprAST*>(expr)) {
     result = ConstantValue(boolExpr->getValue());
     return true;
+  }
+
+  if (auto parenExpr = dynamic_cast<const ParenExprAST*>(expr)) {
+    if (parenExpr->isTuple() || parenExpr->size() != 1)
+      return false;
+    return EvaluateConstantExpression(parenExpr->getElement(0), result);
   }
 
   if (auto binExpr = dynamic_cast<const BinaryExprAST*>(expr)) {

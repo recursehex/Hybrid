@@ -220,6 +220,13 @@ Rectangle positioned = Rectangle(
 )
 ```
 
+When the declared type is already known, you can omit the type name before the argument list:
+
+```cs
+Point origin = (0, 0)       // calls Point(int, int)
+Rectangle banner = (3, 7)   // calls Rectangle(int, int)
+```
+
 ### Without Assignment
 
 Structs can be instantiated without assignment (standalone constructor calls):

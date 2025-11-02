@@ -38,6 +38,12 @@ class Door
 - Class instances follow the same value semantics as structs. `Door d = Door(2)` allocates storage in the surrounding scope.
 - Classes must declare at least one constructor. If you want default construction, explicitly declare an empty constructor; omitting constructors entirely is a compile-time error because members have no default values.
 - All non-`static` members must be assigned in *every* constructor before the constructor returns. The compiler tracks constructor assignments so it can emit diagnostics when a member is skipped.
+- You may omit the type name when calling a constructor in a variable initializer: writing `Door front = (2)` is equivalent to `Door front = Door(2)` and uses the matching class constructor.
+
+```cs
+Door front = (2)    // shorthand for Door front = Door(2)
+Door copy = (front) // invokes the copy constructor when available
+```
 
 ## Member Initialization Rules
 

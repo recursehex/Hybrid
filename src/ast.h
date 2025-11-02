@@ -472,6 +472,35 @@ public:
   llvm::Value *codegen() override;
 };
 
+/// ParenExprAST - Expression class for parenthesized expressions and tuples.
+class ParenExprAST : public ExprAST {
+  std::vector<std::unique_ptr<ExprAST>> Elements;
+  bool IsTupleExpr = false;
+
+public:
+  ParenExprAST(std::vector<std::unique_ptr<ExprAST>> Elements, bool IsTuple)
+      : Elements(std::move(Elements)), IsTupleExpr(IsTuple) {}
+
+  llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
+
+  bool isTuple() const { return IsTupleExpr; }
+  size_t size() const { return Elements.size(); }
+  ExprAST *getElement(size_t index) const { return Elements[index].get(); }
+
+  std::vector<std::unique_ptr<ExprAST>> takeElements() {
+    return std::move(Elements);
+  }
+
+  std::unique_ptr<ExprAST> takeSingleElement() {
+    if (Elements.empty())
+      return nullptr;
+    auto Result = std::move(Elements.front());
+    Elements.clear();
+    return Result;
+  }
+};
+
 /// StringExprAST - Expression class for string literals like "hello".
 class StringExprAST : public ExprAST {
   std::string Val;

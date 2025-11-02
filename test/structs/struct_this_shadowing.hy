@@ -14,7 +14,7 @@ struct Shadow
     }
 }
 
-Shadow s = Shadow(3)
+Shadow s = (3)
 
 assert s.value == 3
 assert s.total == 6
