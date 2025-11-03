@@ -2741,7 +2741,14 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   if (V) {
     if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
       setTypeName(typeNameFromInfo(*info));
-      if (info->isAlias()) {
+      bool needsLoad = info->isAlias();
+      if (!needsLoad) {
+        if (const CompositeTypeInfo *comp =
+                lookupCompositeInfo(info->typeName)) {
+          needsLoad = comp->kind == AggregateKind::Class;
+        }
+      }
+      if (needsLoad) {
         llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
         return Builder->CreateLoad(Alloca->getAllocatedType(), V, (getName() + "_ptr").c_str());
       }
@@ -2754,7 +2761,14 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   if (G) {
     if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
       setTypeName(typeNameFromInfo(*info));
-      if (info->isAlias()) {
+      bool needsLoad = info->isAlias();
+      if (!needsLoad) {
+        if (const CompositeTypeInfo *comp =
+                lookupCompositeInfo(info->typeName)) {
+          needsLoad = comp->kind == AggregateKind::Class;
+        }
+      }
+      if (needsLoad) {
         llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(G);
         return Builder->CreateLoad(GV->getValueType(), G, (getName() + "_ptr").c_str());
       }
@@ -5590,32 +5604,60 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
             nullptr, getName());
 
         // Generate the initializer
-        if (getInitializer()) {
-          // For globals, need constant initializers
-          // For now, create a zero initializer and store the actual value
-          llvm::Constant *ZeroInit = llvm::Constant::getNullValue(VarType);
-          GV->setInitializer(ZeroInit);
+      if (getInitializer()) {
+        // For globals, need constant initializers
+        // For now, create a zero initializer and store the actual value
+        llvm::Constant *ZeroInit = llvm::Constant::getNullValue(VarType);
+        GV->setInitializer(ZeroInit);
 
-          // Generate code to store the actual initial value
-          llvm::Value *InitVal = generateInitializerValue(getInitializer());
-          if (!InitVal)
-            return nullptr;
+        // Generate code to store the actual initial value
+        llvm::Value *InitVal = generateInitializerValue(getInitializer());
+        if (!InitVal)
+          return nullptr;
 
-          if (shouldCheckNullability && !validateNullableAssignment(declaredInfo, NullableCheckExpr, targetDescription))
-            return nullptr;
+        if (const CompositeTypeInfo *composite =
+                lookupCompositeInfo(declaredInfo.typeName)) {
+          if (composite->kind == AggregateKind::Class &&
+              InitVal->getType()->isPointerTy()) {
+            auto structIt = StructTypes.find(declaredInfo.typeName);
+            if (structIt == StructTypes.end()) {
+              reportCompilerError("Unknown class type '" + declaredInfo.typeName +
+                                  "' during global initialization");
+              return nullptr;
+            }
 
-          // Cast the initializer to the variable type if needed
-          if (diagnoseDisallowedImplicitIntegerConversion(getInitializer(), InitVal, VarType, getType(), "initializer for '" + getName() + "'"))
-            return nullptr;
-          InitVal = castToType(InitVal, VarType, getType());
+            llvm::StructType *StructTy = structIt->second;
+            std::string instanceGlobalName = getName() + ".instance";
+            auto *InstanceGV = new llvm::GlobalVariable(
+                *TheModule, StructTy, false, llvm::GlobalValue::InternalLinkage,
+                llvm::ConstantAggregateZero::get(StructTy), instanceGlobalName);
 
-          // Store the initial value
-          Builder->CreateStore(InitVal, GV);
-        } else {
-          // Zero initialize
-          llvm::Constant *ZeroInit = llvm::Constant::getNullValue(VarType);
-          GV->setInitializer(ZeroInit);
+            llvm::Value *LoadedValue =
+                Builder->CreateLoad(StructTy, InitVal, instanceGlobalName + ".value");
+            Builder->CreateStore(LoadedValue, InstanceGV);
+            InitVal = InstanceGV;
+          }
         }
+
+        if (shouldCheckNullability &&
+            !validateNullableAssignment(declaredInfo, NullableCheckExpr, targetDescription)) {
+          return nullptr;
+        }
+
+        // Cast the initializer to the variable type if needed
+        if (diagnoseDisallowedImplicitIntegerConversion(getInitializer(), InitVal, VarType, getType(), "initializer for '" + getName() + "'")) {
+          return nullptr;
+        }
+
+        InitVal = castToType(InitVal, VarType, getType());
+
+        // Store the initial value
+        Builder->CreateStore(InitVal, GV);
+      } else {
+        // Zero initialize
+        llvm::Constant *ZeroInit = llvm::Constant::getNullValue(VarType);
+        GV->setInitializer(ZeroInit);
+      }
 
         // Remember this global binding
         GlobalValues[getName()] = GV;
