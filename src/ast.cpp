@@ -652,6 +652,16 @@ static bool ensureMemberInitializedForMutation(MemberAccessExprAST &member) {
   return false;
 }
 
+struct MemberFieldAssignmentInfo {
+  llvm::Value *fieldPtr = nullptr;
+  llvm::Type *fieldType = nullptr;
+  std::string structName;
+  std::string rawFieldTypeName;
+  std::string sanitizedFieldTypeName;
+  bool allowsNull = false;
+  bool isStatic = false;
+};
+
 static llvm::Constant *constantValueToLLVM(const ConstantValue &value,
                                            llvm::Type *targetType,
                                            const std::string &typeName) {
@@ -1268,6 +1278,113 @@ static std::optional<bool> unsignedHintFromTypeName(const std::string &typeName)
     return false;
 
   return std::nullopt;
+}
+
+static std::optional<MemberFieldAssignmentInfo>
+collectMemberFieldAssignmentInfo(MemberAccessExprAST &member) {
+  MemberFieldAssignmentInfo info;
+
+  info.fieldPtr = member.codegen_ptr();
+  if (!info.fieldPtr)
+    return std::nullopt;
+
+  std::string objectTypeName;
+  if (auto *obj = member.getObject())
+    objectTypeName = obj->getTypeName();
+  ParsedTypeDescriptor objectDesc = parseTypeString(objectTypeName);
+  info.structName = objectDesc.sanitized;
+  if (info.structName.empty())
+    info.structName = resolveCompositeName(member.getObject());
+
+  std::string fieldTypeName;
+  std::string cleanFieldTypeName;
+  bool fieldIsStatic = false;
+  std::string staticGlobalName;
+  bool fieldAllowsNull = false;
+
+  if (!info.structName.empty()) {
+    if (const CompositeTypeInfo *comp = lookupCompositeInfo(info.structName)) {
+      if (auto typeIt = comp->staticFieldTypes.find(member.getMemberName());
+          typeIt != comp->staticFieldTypes.end()) {
+        fieldTypeName = typeIt->second;
+        ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
+        fieldAllowsNull = typeAllowsNull(fieldDesc);
+        cleanFieldTypeName = fieldDesc.sanitized;
+        fieldIsStatic = true;
+        if (auto globalIt = comp->staticFieldGlobals.find(member.getMemberName());
+            globalIt != comp->staticFieldGlobals.end())
+          staticGlobalName = globalIt->second;
+      }
+    }
+  }
+
+  if (fieldTypeName.empty() && !info.structName.empty()) {
+    if (auto fieldTypesIt = StructFieldTypes.find(info.structName);
+        fieldTypesIt != StructFieldTypes.end()) {
+      if (auto typeIt = fieldTypesIt->second.find(member.getMemberName());
+          typeIt != fieldTypesIt->second.end()) {
+        fieldTypeName = typeIt->second;
+        ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
+        fieldAllowsNull = typeAllowsNull(fieldDesc);
+        cleanFieldTypeName = fieldDesc.sanitized;
+      }
+    }
+  }
+
+  if (staticGlobalName.empty() && !info.structName.empty())
+    staticGlobalName = info.structName + "." + member.getMemberName();
+
+  llvm::Type *fieldType = nullptr;
+  if (!fieldIsStatic && !info.structName.empty()) {
+    if (auto structIt = StructTypes.find(info.structName);
+        structIt != StructTypes.end()) {
+      if (auto fieldIndicesIt = StructFieldIndices.find(info.structName);
+          fieldIndicesIt != StructFieldIndices.end()) {
+        for (const auto &entry : fieldIndicesIt->second) {
+          if (entry.first == member.getMemberName()) {
+            fieldType = structIt->second->getElementType(entry.second);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!fieldType && fieldIsStatic) {
+    if (auto globalIt = CG.globalValues.find(staticGlobalName);
+        globalIt != CG.globalValues.end()) {
+      fieldType = globalIt->second->getValueType();
+    }
+  }
+
+  if (!fieldType) {
+    if (auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(info.fieldPtr))
+      fieldType = GV->getValueType();
+  }
+
+  if (!fieldType) {
+    LogErrorV(("Internal error: missing type info for field '" + member.getMemberName() + "'").c_str());
+    return std::nullopt;
+  }
+
+  if (cleanFieldTypeName.empty() && !fieldTypeName.empty()) {
+    ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
+    cleanFieldTypeName = fieldDesc.sanitized;
+  }
+
+  if (cleanFieldTypeName.empty())
+    cleanFieldTypeName = sanitizeBaseTypeName(member.getTypeName());
+
+  if (fieldTypeName.empty())
+    fieldTypeName = member.getTypeName();
+
+  info.fieldType = fieldType;
+  info.rawFieldTypeName = fieldTypeName;
+  info.sanitizedFieldTypeName = cleanFieldTypeName;
+  info.allowsNull = fieldAllowsNull;
+  info.isStatic = fieldIsStatic;
+
+  return info;
 }
 
 static bool isPointerTypeDescriptor(const ParsedTypeDescriptor &desc) {
@@ -3716,9 +3833,110 @@ llvm::Value *BinaryExprAST::codegen() {
       // Return a void value to indicate this is a statement, not an expression
       setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
-      
+    } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
+      if (!ensureMemberInitializedForMutation(*LHSMA))
+        return nullptr;
+
+      auto fieldInfoOpt = collectMemberFieldAssignmentInfo(*LHSMA);
+      if (!fieldInfoOpt)
+        return nullptr;
+      auto &fieldInfo = *fieldInfoOpt;
+
+      llvm::Value *CurrentVal =
+          Builder->CreateLoad(fieldInfo.fieldType, fieldInfo.fieldPtr, "memberload");
+
+      if (CurrentVal->getType()->isPointerTy()) {
+        if (Op != "+=" && Op != "-=")
+          return LogErrorV("Pointer compound assignment only supports '+=' and '-='");
+
+        std::string pointerTypeName =
+            !fieldInfo.rawFieldTypeName.empty() ? fieldInfo.rawFieldTypeName
+                                                : LHSMA->getTypeName();
+        llvm::Value *NewPtr =
+            emitPointerOffset(CurrentVal, R, pointerTypeName, getRHS()->getTypeName(),
+                              Op == "-=", "ptrarith");
+        if (!NewPtr)
+          return nullptr;
+
+        Builder->CreateStore(NewPtr, fieldInfo.fieldPtr);
+        noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(), fieldInfo.isStatic);
+        setTypeName("void");
+        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      }
+
+      std::string lhsPromoteType = fieldInfo.sanitizedFieldTypeName.empty()
+                                       ? sanitizeBaseTypeName(LHSMA->getTypeName())
+                                       : fieldInfo.sanitizedFieldTypeName;
+      std::string rhsPromoteType = getRHS()->getTypeName();
+
+      auto [PromotedCurrent, PromotedR] =
+          promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+      bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+      auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
+      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+      bool compoundUnsigned = lhsUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+      if (!compoundUnsigned) {
+        compoundUnsigned =
+            unsignedHintFromTypeName(sanitizeBaseTypeName(LHSMA->getTypeName())).value_or(false);
+      }
+
+      llvm::Value *Result;
+      char baseOp = Op[0];
+
+      switch (baseOp) {
+        case '+':
+          if (isFloat)
+            Result = Builder->CreateFAdd(PromotedCurrent, PromotedR, "addtmp");
+          else
+            Result = Builder->CreateAdd(PromotedCurrent, PromotedR, "addtmp");
+          break;
+        case '-':
+          if (isFloat)
+            Result = Builder->CreateFSub(PromotedCurrent, PromotedR, "subtmp");
+          else
+            Result = Builder->CreateSub(PromotedCurrent, PromotedR, "subtmp");
+          break;
+        case '*':
+          if (isFloat)
+            Result = Builder->CreateFMul(PromotedCurrent, PromotedR, "multmp");
+          else
+            Result = Builder->CreateMul(PromotedCurrent, PromotedR, "multmp");
+          break;
+        case '/':
+          if (isFloat)
+            Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateUDiv(PromotedCurrent, PromotedR, "divtmp");
+          else
+            Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
+          break;
+        case '%':
+          if (isFloat)
+            Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+          else if (compoundUnsigned)
+            Result = Builder->CreateURem(PromotedCurrent, PromotedR, "modtmp");
+          else
+            Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
+          break;
+        default:
+          return LogErrorV("Unknown compound assignment operator");
+      }
+
+      llvm::Value *ResultToStore = Result;
+      if (ResultToStore->getType() != fieldInfo.fieldType) {
+        std::string castTargetName =
+            !lhsPromoteType.empty() ? lhsPromoteType : LHSMA->getTypeName();
+        ResultToStore = castToType(ResultToStore, fieldInfo.fieldType, castTargetName);
+        if (!ResultToStore)
+          return nullptr;
+      }
+
+      Builder->CreateStore(ResultToStore, fieldInfo.fieldPtr);
+      noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(), fieldInfo.isStatic);
+      setTypeName("void");
+      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
     } else {
-      return LogErrorV("destination of compound assignment must be a variable or array element");
+      return LogErrorV("destination of compound assignment must be a variable, array element, or public struct/class member");
     }
   }
 
@@ -3972,104 +4190,28 @@ llvm::Value *BinaryExprAST::codegen() {
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
         // Member access assignment (e.g. this.x = value)
-        llvm::Value *FieldPtr = LHSMA->codegen_ptr();
-        if (!FieldPtr)
+        auto fieldInfoOpt = collectMemberFieldAssignmentInfo(*LHSMA);
+        if (!fieldInfoOpt)
           return nullptr;
+        auto &fieldInfo = *fieldInfoOpt;
 
-        std::string objectTypeName = LHSMA->getObject()->getTypeName();
-        ParsedTypeDescriptor objectDesc = parseTypeString(objectTypeName);
-        std::string structName = objectDesc.sanitized;
-
-        bool fieldAllowsNull = false;
-        std::string fieldTypeName;
-        std::string cleanFieldTypeName;
-        bool fieldIsStatic = false;
-        std::string staticGlobalName;
-
-        if (const CompositeTypeInfo *info = lookupCompositeInfo(structName)) {
-          if (auto TypeIt = info->staticFieldTypes.find(LHSMA->getMemberName());
-              TypeIt != info->staticFieldTypes.end()) {
-            fieldTypeName = TypeIt->second;
-            ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
-            fieldAllowsNull = typeAllowsNull(fieldDesc);
-            cleanFieldTypeName = fieldDesc.sanitized;
-            fieldIsStatic = true;
-            if (auto GlobIt = info->staticFieldGlobals.find(LHSMA->getMemberName());
-                GlobIt != info->staticFieldGlobals.end())
-              staticGlobalName = GlobIt->second;
-          }
-        }
-
-        if (fieldTypeName.empty()) {
-          if (auto FieldTypesIt = StructFieldTypes.find(structName); FieldTypesIt != StructFieldTypes.end()) {
-            if (auto TypeIt = FieldTypesIt->second.find(LHSMA->getMemberName());
-                TypeIt != FieldTypesIt->second.end()) {
-              fieldTypeName = TypeIt->second;
-              ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
-              fieldAllowsNull = typeAllowsNull(fieldDesc);
-              cleanFieldTypeName = fieldDesc.sanitized;
-            }
-          }
-        }
-
-        if (staticGlobalName.empty())
-          staticGlobalName = structName + "." + LHSMA->getMemberName();
-
-        if (rhsIsNullable && !fieldAllowsNull) {
+        if (rhsIsNullable && !fieldInfo.allowsNull) {
           return LogErrorV(("Cannot assign nullable value to non-nullable field '" + LHSMA->getMemberName() + "'").c_str());
         }
 
-        llvm::Type *FieldType = nullptr;
-        if (!fieldIsStatic) {
-          if (auto StructIt = StructTypes.find(structName); StructIt != StructTypes.end()) {
-            auto FieldIndicesIt = StructFieldIndices.find(structName);
-            if (FieldIndicesIt != StructFieldIndices.end()) {
-              for (const auto &FieldEntry : FieldIndicesIt->second) {
-                if (FieldEntry.first == LHSMA->getMemberName()) {
-                  FieldType = StructIt->second->getElementType(FieldEntry.second);
-                  break;
-                }
-              }
-            }
-          }
-        }
-
-        if (!FieldType && fieldIsStatic) {
-          if (auto GlobalIt = CG.globalValues.find(staticGlobalName);
-              GlobalIt != CG.globalValues.end()) {
-            FieldType = GlobalIt->second->getValueType();
-          }
-        }
-
-        if (!FieldType) {
-          if (auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(FieldPtr))
-            FieldType = GV->getValueType();
-        }
-
-        if (!FieldType)
-          return LogErrorV(("Internal error: missing type info for field '" + LHSMA->getMemberName() + "'").c_str());
-
-        if (cleanFieldTypeName.empty() && !fieldTypeName.empty()) {
-          ParsedTypeDescriptor fieldDesc = parseTypeString(fieldTypeName);
-          cleanFieldTypeName = fieldDesc.sanitized;
-        }
-
-        if (cleanFieldTypeName.empty())
-          cleanFieldTypeName = sanitizeBaseTypeName(LHSMA->getTypeName());
-
-        std::string diagFieldTypeName = cleanFieldTypeName;
+        std::string diagFieldTypeName = fieldInfo.sanitizedFieldTypeName;
 
         std::string contextDescription = "assignment to field '" + LHSMA->getMemberName() + "'";
-        if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, FieldType, diagFieldTypeName, contextDescription))
+        if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, fieldInfo.fieldType, diagFieldTypeName, contextDescription))
           return nullptr;
 
         if (!diagFieldTypeName.empty())
-          R = castToType(R, FieldType, diagFieldTypeName);
+          R = castToType(R, fieldInfo.fieldType, diagFieldTypeName);
         else
-          R = castToType(R, FieldType);
+          R = castToType(R, fieldInfo.fieldType);
 
-        Builder->CreateStore(R, FieldPtr);
-        noteMemberAssignment(structName, LHSMA->getMemberName(), fieldIsStatic);
+        Builder->CreateStore(R, fieldInfo.fieldPtr);
+        noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(), fieldInfo.isStatic);
         // Return a void value to indicate this is a statement, not an expression
         setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -4380,7 +4522,7 @@ llvm::Value *BinaryExprAST::codegen() {
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       
     } else {
-      return LogErrorV("destination of compound assignment must be a variable or array element");
+      return LogErrorV("destination of compound assignment must be a variable, array element, or public struct/class member");
     }
   } else if (Op == "&&") {
     // Check that both operands are boolean types
