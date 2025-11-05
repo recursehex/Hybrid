@@ -2,6 +2,7 @@
 #define HYBRID_CODEGEN_CONTEXT_H
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -35,10 +36,14 @@ struct FunctionOverload {
 struct CompositeMemberInfo {
   MemberModifiers modifiers;
   std::string signature;
+  std::string mangledName;
+  std::string dispatchKey;
+  std::string overridesSignature;
   TypeInfo returnType;
   std::vector<TypeInfo> parameterTypes;
   std::vector<bool> parameterIsRef;
   bool returnsByRef = false;
+  unsigned vtableSlot = std::numeric_limits<unsigned>::max();
 };
 
 struct CompositeTypeInfo {
@@ -58,6 +63,15 @@ struct CompositeTypeInfo {
   std::vector<std::string> interfaces;
   bool isAbstract = false;
   bool isInterface = false;
+  std::vector<std::string> vtableOrder;
+  std::vector<std::string> vtableImplementations;
+  std::vector<bool> vtableIsAbstract;
+  std::map<std::string, unsigned> vtableSlotMap;
+  std::string vtableGlobalName;
+  std::string descriptorGlobalName;
+  std::map<std::string, std::string> interfaceTableGlobals;
+  std::vector<std::string> interfaceMethodOrder;
+  std::map<std::string, unsigned> interfaceMethodSlotMap;
   std::optional<std::string> thisOverride;
 };
 

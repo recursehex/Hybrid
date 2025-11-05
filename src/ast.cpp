@@ -34,6 +34,7 @@
 #include <cctype>
 #include <set>
 #include <functional>
+#include <limits>
 
 #include "llvm/Support/ConvertUTF.h"
 
@@ -104,6 +105,12 @@ static bool convertUTF8LiteralToUTF16(const std::string &input,
 #define NonNullFacts (CG.nonNullFactsStack)
 
 static void ensureBaseNonNullScope();
+
+static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name);
+static void collectInterfaceAncestors(const std::string &interfaceName,
+                                      std::set<std::string> &out);
+llvm::Value *castToType(llvm::Value *value, llvm::Type *targetType,
+                        const std::string &targetTypeName);
 
 llvm::Value *LogErrorV(const char *Str, std::string_view hint = {});
 llvm::Value *LogErrorV(const std::string &Str, std::string_view hint = {});
@@ -343,6 +350,618 @@ static std::string sanitizeForMangle(const std::string &input) {
   return result;
 }
 
+static std::string makeRuntimeSymbolName(const std::string &prefix,
+                                         const std::string &typeName) {
+  return prefix + sanitizeForMangle(typeName);
+}
+
+static llvm::StructType *getInterfaceEntryType() {
+  if (auto *existing = llvm::StructType::getTypeByName(*TheContext,
+                                                       "__HybridInterfaceEntry"))
+    return existing;
+
+  auto *typeDescTy =
+      llvm::StructType::create(*TheContext, "__HybridTypeDescriptor");
+  auto *interfaceEntryTy =
+      llvm::StructType::create(*TheContext, "__HybridInterfaceEntry");
+
+  auto *typeDescPtrTy = llvm::PointerType::get(typeDescTy, 0);
+  auto *opaquePtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  auto *opaquePtrPtrTy = llvm::PointerType::get(opaquePtrTy, 0);
+
+  interfaceEntryTy->setBody({typeDescPtrTy, opaquePtrPtrTy});
+  typeDescTy->setBody({opaquePtrTy,
+                       typeDescPtrTy,
+                       opaquePtrPtrTy,
+                       llvm::Type::getInt32Ty(*TheContext),
+                       llvm::PointerType::get(interfaceEntryTy, 0),
+                       llvm::Type::getInt32Ty(*TheContext)});
+  return interfaceEntryTy;
+}
+
+static llvm::StructType *getTypeDescriptorType() {
+  if (auto *existing =
+          llvm::StructType::getTypeByName(*TheContext,
+                                          "__HybridTypeDescriptor"))
+    return existing;
+  getInterfaceEntryType();
+  return llvm::StructType::getTypeByName(*TheContext,
+                                         "__HybridTypeDescriptor");
+}
+
+static llvm::StructType *getClassHeaderType() {
+  if (auto *existing = llvm::StructType::getTypeByName(*TheContext,
+                                                       "__HybridClassHeader"))
+    return existing;
+
+  auto *headerTy = llvm::StructType::create(*TheContext, "__HybridClassHeader");
+  auto *typeDescPtrTy = llvm::PointerType::get(getTypeDescriptorType(), 0);
+  headerTy->setBody({llvm::Type::getInt32Ty(*TheContext),
+                     llvm::Type::getInt32Ty(*TheContext),
+                     typeDescPtrTy});
+  return headerTy;
+}
+
+static llvm::Constant *getOrCreateTypeNameConstant(const std::string &typeName) {
+  std::string symbol = makeRuntimeSymbolName("__hybrid_type_name$", typeName);
+  if (auto *existing = TheModule->getNamedGlobal(symbol))
+    return llvm::ConstantExpr::getPointerCast(
+        existing, llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0));
+
+  auto *literal =
+      llvm::ConstantDataArray::getString(*TheContext, typeName, true);
+  auto *global = new llvm::GlobalVariable(
+      *TheModule, literal->getType(), true, llvm::GlobalValue::PrivateLinkage,
+      literal, symbol);
+  global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  global->setAlignment(llvm::MaybeAlign(1));
+  return llvm::ConstantExpr::getPointerCast(
+      global, llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0));
+}
+
+static void computeInterfaceMethodLayout(const std::string &typeName,
+                                         const std::vector<MethodDefinition> &methods,
+                                         CompositeTypeInfo &metadata) {
+  if (metadata.kind != AggregateKind::Interface)
+    return;
+
+  std::vector<std::string> order;
+  std::map<std::string, unsigned> slotMap;
+  std::set<std::string> seen;
+
+  auto appendFromInterface = [&](const CompositeTypeInfo &ifaceInfo) {
+    for (const std::string &key : ifaceInfo.interfaceMethodOrder) {
+      if (seen.insert(key).second) {
+        slotMap[key] = static_cast<unsigned>(order.size());
+        order.push_back(key);
+      }
+    }
+  };
+
+  if (metadata.baseClass) {
+    if (const CompositeTypeInfo *baseInfo =
+            lookupCompositeInfo(*metadata.baseClass)) {
+      appendFromInterface(*baseInfo);
+    }
+  }
+
+  for (const std::string &ifaceName : metadata.interfaces) {
+    if (const CompositeTypeInfo *ifaceInfo = lookupCompositeInfo(ifaceName))
+      appendFromInterface(*ifaceInfo);
+  }
+
+  for (const auto &MethodDef : methods) {
+    if (MethodDef.getKind() != MethodKind::Regular)
+      continue;
+    if (MethodDef.isStatic())
+      continue;
+    auto it = metadata.methodInfo.find(MethodDef.getDisplayName());
+    if (it == metadata.methodInfo.end())
+      continue;
+    const CompositeMemberInfo &member = it->second;
+    if (member.dispatchKey.empty())
+      continue;
+    if (seen.insert(member.dispatchKey).second) {
+      slotMap[member.dispatchKey] = static_cast<unsigned>(order.size());
+      order.push_back(member.dispatchKey);
+    }
+  }
+
+  metadata.interfaceMethodOrder = std::move(order);
+  metadata.interfaceMethodSlotMap = std::move(slotMap);
+}
+
+static bool computeVirtualDispatchLayout(const std::string &typeName,
+                                         CompositeTypeInfo &metadata) {
+  if (metadata.kind != AggregateKind::Class)
+    return true;
+
+  std::vector<std::string> order;
+  std::vector<std::string> impls;
+  std::vector<bool> isAbstract;
+  std::map<std::string, unsigned> slotMap;
+
+  if (metadata.baseClass) {
+    const CompositeTypeInfo *baseInfo =
+        lookupCompositeInfo(*metadata.baseClass);
+    if (!baseInfo) {
+      reportCompilerError("Base class '" + *metadata.baseClass +
+                          "' metadata unavailable while building vtable for '" +
+                          typeName + "'");
+      return false;
+    }
+    order = baseInfo->vtableOrder;
+    impls = baseInfo->vtableImplementations;
+    isAbstract = baseInfo->vtableIsAbstract;
+    slotMap = baseInfo->vtableSlotMap;
+  }
+
+  impls.resize(order.size());
+  isAbstract.resize(order.size());
+
+  for (auto &entry : metadata.methodInfo) {
+    CompositeMemberInfo &member = entry.second;
+    bool participates = member.modifiers.isVirtual ||
+                        member.modifiers.isOverride ||
+                        member.modifiers.isAbstract;
+    if (!participates)
+      continue;
+
+    unsigned slot = std::numeric_limits<unsigned>::max();
+
+    if (member.modifiers.isOverride) {
+      std::string baseSignature =
+          member.overridesSignature.empty() ? member.signature
+                                            : member.overridesSignature;
+      auto it = slotMap.find(baseSignature);
+      if (it == slotMap.end()) {
+        reportCompilerError("Override '" + member.signature + "' of class '" +
+                            typeName + "' does not map to a base vtable slot");
+        return false;
+      }
+      slot = it->second;
+      if (!member.mangledName.empty())
+        impls[slot] = member.mangledName;
+      isAbstract[slot] = member.modifiers.isAbstract;
+      slotMap[member.signature] = slot;
+      if (!baseSignature.empty())
+        slotMap[baseSignature] = slot;
+    } else {
+      auto existing = slotMap.find(member.signature);
+      if (existing != slotMap.end()) {
+        slot = existing->second;
+        if (!member.mangledName.empty())
+          impls[slot] = member.mangledName;
+        isAbstract[slot] = member.modifiers.isAbstract;
+      } else {
+        slot = static_cast<unsigned>(order.size());
+        order.push_back(member.signature);
+        impls.push_back(member.mangledName);
+        isAbstract.push_back(member.modifiers.isAbstract);
+        slotMap[member.signature] = slot;
+      }
+    }
+
+    member.vtableSlot = slot;
+  }
+
+  metadata.vtableOrder = std::move(order);
+  metadata.vtableImplementations = std::move(impls);
+  metadata.vtableIsAbstract = std::move(isAbstract);
+  metadata.vtableSlotMap = std::move(slotMap);
+  return true;
+}
+
+static const CompositeMemberInfo *
+findMethodInHierarchyByKey(const std::string &typeName,
+                           const std::string &dispatchKey,
+                           const CompositeTypeInfo **ownerInfo = nullptr) {
+  std::string current = typeName;
+  std::set<std::string> visited;
+
+  while (visited.insert(current).second) {
+    const CompositeTypeInfo *info = lookupCompositeInfo(current);
+    if (!info)
+      break;
+
+    for (const auto &entry : info->methodInfo) {
+      if (entry.second.dispatchKey == dispatchKey) {
+        if (ownerInfo)
+          *ownerInfo = info;
+        return &entry.second;
+      }
+    }
+
+    if (!info->baseClass)
+      break;
+    current = *info->baseClass;
+  }
+
+  return nullptr;
+}
+
+static bool emitInterfaceDescriptor(const std::string &typeName,
+                                    CompositeTypeInfo &metadata) {
+  llvm::StructType *typeDescTy = getTypeDescriptorType();
+  llvm::StructType *ifaceEntryTy = getInterfaceEntryType();
+  auto *charPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  auto *typeDescPtrTy = llvm::PointerType::get(typeDescTy, 0);
+  auto *voidPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+  auto *ifaceEntryPtrTy = llvm::PointerType::get(ifaceEntryTy, 0);
+
+  llvm::GlobalVariable *descriptorGV =
+      TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
+  if (!descriptorGV) {
+    reportCompilerError("Internal error: descriptor global '" +
+                        metadata.descriptorGlobalName +
+                        "' missing while building interface '" + typeName + "'");
+    return false;
+  }
+
+  llvm::Constant *typeNameConst = getOrCreateTypeNameConstant(typeName);
+  llvm::Constant *baseConst =
+      llvm::ConstantPointerNull::get(typeDescPtrTy);
+  llvm::Constant *vtableConst =
+      llvm::ConstantPointerNull::get(voidPtrPtrTy);
+  llvm::Constant *vtableSizeConst = llvm::ConstantInt::get(
+      llvm::Type::getInt32Ty(*TheContext),
+      static_cast<uint32_t>(metadata.interfaceMethodOrder.size()));
+  llvm::Constant *ifaceMapConst =
+      llvm::ConstantPointerNull::get(ifaceEntryPtrTy);
+  llvm::Constant *ifaceCountConst =
+      llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+
+  auto *descriptorConst = llvm::ConstantStruct::get(
+      typeDescTy,
+      {typeNameConst, baseConst, vtableConst, vtableSizeConst, ifaceMapConst,
+       ifaceCountConst});
+
+  descriptorGV->setInitializer(descriptorConst);
+  descriptorGV->setConstant(true);
+  return true;
+}
+
+static bool emitClassRuntimeStructures(const std::string &typeName,
+                                       llvm::StructType *structTy,
+                                       CompositeTypeInfo &metadata) {
+  llvm::StructType *typeDescTy = getTypeDescriptorType();
+  llvm::StructType *ifaceEntryTy = getInterfaceEntryType();
+  auto *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  auto *charPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  auto *voidPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+  auto *typeDescPtrTy = llvm::PointerType::get(typeDescTy, 0);
+  auto *ifaceEntryPtrTy = llvm::PointerType::get(ifaceEntryTy, 0);
+
+  llvm::GlobalVariable *descriptorGV =
+      TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
+  if (!descriptorGV) {
+    reportCompilerError("Internal error: descriptor global '" +
+                        metadata.descriptorGlobalName +
+                        "' missing while building class '" + typeName + "'");
+    return false;
+  }
+
+  std::string sanitizedType = sanitizeForMangle(typeName);
+
+  // Emit vtable if needed
+  llvm::Constant *vtablePtrConst =
+      llvm::ConstantPointerNull::get(voidPtrPtrTy);
+  if (!metadata.vtableOrder.empty()) {
+    std::string vtableName = "__hybrid_vtable$" + sanitizedType;
+    llvm::GlobalVariable *vtableGV =
+        TheModule->getGlobalVariable(vtableName, true);
+
+    std::vector<llvm::Constant *> entries;
+    entries.reserve(metadata.vtableOrder.size());
+
+    for (std::size_t i = 0; i < metadata.vtableOrder.size(); ++i) {
+      const std::string &implName = metadata.vtableImplementations[i];
+      if (implName.empty()) {
+        entries.push_back(llvm::ConstantPointerNull::get(voidPtrTy));
+        continue;
+      }
+
+      llvm::Function *fn = TheModule->getFunction(implName);
+      if (!fn) {
+        reportCompilerError("Internal error: function '" + implName +
+                            "' missing while building vtable for '" +
+                            typeName + "'");
+        return false;
+      }
+      entries.push_back(
+          llvm::ConstantExpr::getBitCast(fn, voidPtrTy));
+    }
+
+    auto *arrayTy =
+        llvm::ArrayType::get(voidPtrTy, entries.size());
+    auto *init = llvm::ConstantArray::get(arrayTy, entries);
+
+    if (!vtableGV) {
+      vtableGV = new llvm::GlobalVariable(
+          *TheModule, arrayTy, true, llvm::GlobalValue::InternalLinkage, init,
+          vtableName);
+      vtableGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    } else {
+      vtableGV->setInitializer(init);
+      vtableGV->setConstant(true);
+    }
+
+    llvm::Constant *zero = llvm::ConstantInt::get(int32Ty, 0);
+    llvm::Constant *vtableIndices[] = {zero, zero};
+    vtablePtrConst = llvm::ConstantExpr::getInBoundsGetElementPtr(
+        arrayTy, vtableGV, vtableIndices);
+    metadata.vtableGlobalName = vtableName;
+  }
+
+  // Emit interface dispatch tables
+  std::set<std::string> allInterfaces;
+  for (const std::string &iface : metadata.interfaces)
+    collectInterfaceAncestors(iface, allInterfaces);
+
+  if (metadata.baseClass) {
+    if (const CompositeTypeInfo *baseInfo =
+            lookupCompositeInfo(*metadata.baseClass)) {
+      for (const std::string &iface : baseInfo->interfaces)
+        collectInterfaceAncestors(iface, allInterfaces);
+    }
+  }
+
+  std::vector<llvm::Constant *> interfaceEntries;
+  interfaceEntries.reserve(allInterfaces.size());
+
+  for (const std::string &ifaceName : allInterfaces) {
+    const CompositeTypeInfo *ifaceInfo = lookupCompositeInfo(ifaceName);
+    if (!ifaceInfo) {
+      reportCompilerError("Interface '" + ifaceName +
+                          "' metadata missing while building class '" +
+                          typeName + "'");
+      return false;
+    }
+
+    llvm::GlobalVariable *ifaceDescriptorGV =
+        TheModule->getGlobalVariable(ifaceInfo->descriptorGlobalName, true);
+    if (!ifaceDescriptorGV) {
+      reportCompilerError("Interface descriptor '" +
+                          ifaceInfo->descriptorGlobalName +
+                          "' missing while building class '" + typeName + "'");
+      return false;
+    }
+
+    std::vector<llvm::Constant *> methodPtrs;
+    methodPtrs.reserve(ifaceInfo->interfaceMethodOrder.size());
+
+    for (const std::string &key : ifaceInfo->interfaceMethodOrder) {
+      const CompositeTypeInfo *declaringInfo = nullptr;
+      const CompositeMemberInfo *member =
+          findMethodInHierarchyByKey(typeName, key, &declaringInfo);
+      if (!member) {
+        reportCompilerError("Class '" + typeName +
+                            "' lacks implementation for interface member key '" +
+                            key + "'");
+        return false;
+      }
+
+      std::string signature = member->signature;
+      if (!metadata.vtableSlotMap.contains(signature) &&
+          !member->overridesSignature.empty())
+        signature = member->overridesSignature;
+
+      std::string implName;
+      if (auto slotIt = metadata.vtableSlotMap.find(signature);
+          slotIt != metadata.vtableSlotMap.end()) {
+        unsigned slot = slotIt->second;
+        if (slot < metadata.vtableImplementations.size())
+          implName = metadata.vtableImplementations[slot];
+      } else {
+        implName = member->mangledName;
+      }
+
+      if (implName.empty()) {
+        reportCompilerError("Class '" + typeName +
+                            "' provides no concrete implementation for '" +
+                            key + "' while building interface table");
+        return false;
+      }
+
+      llvm::Function *implFn = TheModule->getFunction(implName);
+      if (!implFn) {
+        reportCompilerError("Missing function '" + implName +
+                            "' while building interface table for '" +
+                            typeName + "'");
+        return false;
+      }
+
+      methodPtrs.push_back(
+          llvm::ConstantExpr::getBitCast(implFn, voidPtrTy));
+    }
+
+    auto *methodArrayTy =
+        llvm::ArrayType::get(voidPtrTy, methodPtrs.size());
+    auto *methodInit = llvm::ConstantArray::get(methodArrayTy, methodPtrs);
+
+    std::string tableName = "__hybrid_iface_table$" + sanitizedType + "$" +
+                            sanitizeForMangle(ifaceName);
+
+    llvm::GlobalVariable *methodTableGV =
+        TheModule->getGlobalVariable(tableName, true);
+    if (!methodTableGV) {
+      methodTableGV = new llvm::GlobalVariable(
+          *TheModule, methodArrayTy, true, llvm::GlobalValue::InternalLinkage,
+          methodInit, tableName);
+      methodTableGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    } else {
+      methodTableGV->setInitializer(methodInit);
+      methodTableGV->setConstant(true);
+    }
+
+    llvm::Constant *zero = llvm::ConstantInt::get(int32Ty, 0);
+    llvm::Constant *tableIndices[] = {zero, zero};
+    llvm::Constant *tablePtr =
+        llvm::ConstantExpr::getInBoundsGetElementPtr(
+            methodArrayTy, methodTableGV, tableIndices);
+
+    metadata.interfaceTableGlobals[ifaceName] = tableName;
+
+    llvm::Constant *ifaceDescriptorPtr =
+        llvm::ConstantExpr::getBitCast(ifaceDescriptorGV, typeDescPtrTy);
+    interfaceEntries.push_back(llvm::ConstantStruct::get(
+        ifaceEntryTy, {ifaceDescriptorPtr, tablePtr}));
+  }
+
+  llvm::Constant *ifaceMapConst =
+      llvm::ConstantPointerNull::get(ifaceEntryPtrTy);
+  llvm::Constant *ifaceCountConst =
+      llvm::ConstantInt::get(int32Ty, static_cast<uint32_t>(interfaceEntries.size()));
+
+  if (!interfaceEntries.empty()) {
+    auto *ifaceArrayTy =
+        llvm::ArrayType::get(ifaceEntryTy, interfaceEntries.size());
+    auto *ifaceArray =
+        llvm::ConstantArray::get(ifaceArrayTy, interfaceEntries);
+    std::string ifaceArrayName =
+        "__hybrid_iface_map$" + sanitizedType;
+    llvm::GlobalVariable *ifaceArrayGV =
+        TheModule->getGlobalVariable(ifaceArrayName, true);
+    if (!ifaceArrayGV) {
+      ifaceArrayGV = new llvm::GlobalVariable(
+          *TheModule, ifaceArrayTy, true, llvm::GlobalValue::InternalLinkage,
+          ifaceArray, ifaceArrayName);
+      ifaceArrayGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    } else {
+      ifaceArrayGV->setInitializer(ifaceArray);
+      ifaceArrayGV->setConstant(true);
+    }
+
+    llvm::Constant *zero = llvm::ConstantInt::get(int32Ty, 0);
+    llvm::Constant *ifaceIndices[] = {zero, zero};
+    ifaceMapConst = llvm::ConstantExpr::getInBoundsGetElementPtr(
+        ifaceArrayTy, ifaceArrayGV, ifaceIndices);
+  }
+
+  llvm::Constant *typeNameConst = getOrCreateTypeNameConstant(typeName);
+
+  llvm::Constant *baseConst =
+      llvm::ConstantPointerNull::get(typeDescPtrTy);
+  if (metadata.baseClass) {
+    if (const CompositeTypeInfo *baseInfo =
+            lookupCompositeInfo(*metadata.baseClass)) {
+      llvm::GlobalVariable *baseDescriptorGV =
+          TheModule->getGlobalVariable(baseInfo->descriptorGlobalName, true);
+      if (!baseDescriptorGV) {
+        reportCompilerError("Descriptor for base class '" +
+                            *metadata.baseClass +
+                            "' missing while building class '" + typeName + "'");
+        return false;
+      }
+      baseConst =
+          llvm::ConstantExpr::getBitCast(baseDescriptorGV, typeDescPtrTy);
+    }
+  }
+
+  llvm::Constant *vtableSizeConst = llvm::ConstantInt::get(
+      int32Ty, static_cast<uint32_t>(metadata.vtableOrder.size()));
+
+  auto *descriptorConst = llvm::ConstantStruct::get(
+      typeDescTy,
+      {typeNameConst, baseConst, vtablePtrConst, vtableSizeConst,
+       ifaceMapConst, ifaceCountConst});
+
+  descriptorGV->setInitializer(descriptorConst);
+  descriptorGV->setConstant(true);
+
+  (void)structTy; // structTy currently unused but kept for future ARC integration
+  return true;
+}
+
+static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
+                                            const CompositeMemberInfo &memberInfo,
+                                            llvm::Value *functionPointer,
+                                            std::vector<llvm::Value *> argValues,
+                                            const std::vector<bool> &argIsRef) {
+  std::vector<llvm::Type *> paramLLVMTypes;
+  paramLLVMTypes.reserve(memberInfo.parameterTypes.size());
+  for (std::size_t idx = 0; idx < memberInfo.parameterTypes.size(); ++idx) {
+    const std::string paramTypeName =
+        typeNameFromInfo(memberInfo.parameterTypes[idx]);
+    llvm::Type *paramType = getTypeFromString(paramTypeName);
+    if (!paramType)
+      return LogErrorV(("Internal error: unable to resolve parameter type '" +
+                        paramTypeName + "' for dynamic call")
+                           .c_str());
+    if (memberInfo.parameterIsRef[idx])
+      paramType = llvm::PointerType::get(*TheContext, 0);
+    paramLLVMTypes.push_back(paramType);
+  }
+
+  const std::string returnTypeName =
+      typeNameFromInfo(memberInfo.returnType);
+  llvm::Type *retType = getTypeFromString(returnTypeName);
+  if (!retType)
+    return LogErrorV(("Internal error: unable to resolve return type '" +
+                      returnTypeName + "' for dynamic call")
+                         .c_str());
+  if (memberInfo.returnsByRef)
+    retType = llvm::PointerType::get(*TheContext, 0);
+
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(retType, paramLLVMTypes, false);
+  std::vector<llvm::Value *> callArgs;
+  callArgs.reserve(argValues.size());
+
+  for (std::size_t idx = 0; idx < argValues.size(); ++idx) {
+    llvm::Value *arg = argValues[idx];
+    if (memberInfo.parameterIsRef[idx]) {
+      callArgs.push_back(arg);
+      continue;
+    }
+
+    llvm::Type *expected = fnType->getParamType(idx);
+    if (arg->getType() != expected) {
+      const std::string targetTypeName =
+          typeNameFromInfo(memberInfo.parameterTypes[idx]);
+      arg = castToType(arg, expected, targetTypeName);
+      if (!arg)
+        return nullptr;
+    }
+    callArgs.push_back(arg);
+  }
+
+  llvm::Value *typedFnPtr =
+      Builder->CreateBitCast(functionPointer, fnType->getPointerTo(),
+                             "hybrid.dispatch.fn");
+
+  if (fnType->getReturnType()->isVoidTy()) {
+    llvm::Value *callVal = Builder->CreateCall(fnType, typedFnPtr, callArgs);
+    callExpr.setTypeName("void");
+    return callVal;
+  }
+
+  llvm::Value *callVal =
+      Builder->CreateCall(fnType, typedFnPtr, callArgs, "calltmp");
+  callExpr.setTypeName(typeNameFromInfo(memberInfo.returnType));
+  return callVal;
+}
+
+static llvm::Function *getInterfaceLookupFunction() {
+  llvm::Function *fn =
+      TheModule->getFunction("hybrid_lookup_interface_table");
+  if (fn)
+    return fn;
+
+  auto *typeDescPtrTy = llvm::PointerType::get(getTypeDescriptorType(), 0);
+  auto *voidPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+  auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+
+  llvm::FunctionType *fnTy =
+      llvm::FunctionType::get(voidPtrPtrTy, {typeDescPtrTy, typeDescPtrTy}, false);
+  fn = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage,
+                              "hybrid_lookup_interface_table", TheModule.get());
+  fn->setDoesNotThrow();
+  return fn;
+}
+
 static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
   return lhs.typeName == rhs.typeName &&
          lhs.pointerDepth == rhs.pointerDepth &&
@@ -359,8 +978,6 @@ static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
 
 static std::vector<TypeInfo> gatherParamTypes(const std::vector<Parameter> &params);
 static std::vector<bool> gatherParamRefFlags(const std::vector<Parameter> &params);
-static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name);
-
 static std::string makeMethodSignatureKey(const std::string &methodName,
                                           const std::vector<TypeInfo> &paramTypes,
                                           const std::vector<bool> &paramIsRef,
@@ -5559,7 +6176,138 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
     ArgValues.push_back(Value);
   }
 
-  return emitResolvedCall(methodIt->second.signature, std::move(ArgValues),
+  const CompositeMemberInfo &memberInfo = methodIt->second;
+
+  if (!isStaticMethod && info->kind == AggregateKind::Interface) {
+    if (!instancePtr)
+      return LogErrorV("Interface member call requires an instance");
+
+    auto slotIt =
+        info->interfaceMethodSlotMap.find(memberInfo.dispatchKey);
+    if (slotIt == info->interfaceMethodSlotMap.end())
+      return LogErrorV(("Internal error: interface slot unresolved for '" +
+                        memberInfo.dispatchKey + "'")
+                           .c_str());
+
+    auto *voidPtrTy =
+        llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+    auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+    auto *typeDescPtrTy =
+        llvm::PointerType::get(getTypeDescriptorType(), 0);
+
+    llvm::StructType *headerTy = getClassHeaderType();
+    llvm::Value *headerPtr = Builder->CreateBitCast(
+        instancePtr, headerTy->getPointerTo(), "hybrid.header.iface");
+    llvm::Value *descAddr = Builder->CreateStructGEP(
+        headerTy, headerPtr, 2, "hybrid.header.descptr");
+    llvm::Value *descriptorValue = Builder->CreateLoad(
+        typeDescPtrTy, descAddr, "hybrid.header.desc");
+
+    llvm::GlobalVariable *ifaceDescriptorGV =
+        TheModule->getGlobalVariable(info->descriptorGlobalName, true);
+    if (!ifaceDescriptorGV)
+      return LogErrorV(("Internal error: interface descriptor '" +
+                        info->descriptorGlobalName +
+                        "' missing during dispatch")
+                           .c_str());
+    llvm::Value *ifaceDescriptorConst =
+        llvm::ConstantExpr::getBitCast(ifaceDescriptorGV, typeDescPtrTy);
+
+    llvm::Function *lookupFn = getInterfaceLookupFunction();
+    llvm::Value *methodTablePtr =
+        Builder->CreateCall(lookupFn,
+                            {descriptorValue, ifaceDescriptorConst},
+                            "hybrid.iface.table");
+
+    llvm::Value *isNull = Builder->CreateICmpEQ(
+        methodTablePtr, llvm::ConstantPointerNull::get(voidPtrPtrTy),
+        "hybrid.iface.table.null");
+
+    llvm::Function *parentFunc = Builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock *failBB =
+        llvm::BasicBlock::Create(*TheContext, "iface.lookup.fail", parentFunc);
+    llvm::BasicBlock *contBB =
+        llvm::BasicBlock::Create(*TheContext, "iface.lookup.cont", parentFunc);
+    Builder->CreateCondBr(isNull, failBB, contBB);
+
+    Builder->SetInsertPoint(failBB);
+    llvm::Function *abortFn = TheModule->getFunction("abort");
+    if (!abortFn) {
+      llvm::FunctionType *abortTy =
+          llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+      abortFn = llvm::Function::Create(abortTy,
+                                       llvm::Function::ExternalLinkage, "abort",
+                                       TheModule.get());
+    }
+    Builder->CreateCall(abortFn);
+    Builder->CreateUnreachable();
+
+    Builder->SetInsertPoint(contBB);
+
+    llvm::Value *slotIndex = llvm::ConstantInt::get(
+        llvm::Type::getInt32Ty(*TheContext), slotIt->second);
+    llvm::Value *fnPtrAddr = Builder->CreateInBoundsGEP(
+        voidPtrTy, methodTablePtr, slotIndex, "hybrid.iface.fnptr");
+    llvm::Value *fnPtrRaw =
+        Builder->CreateLoad(voidPtrTy, fnPtrAddr, "hybrid.iface.fn");
+
+    return emitDynamicFunctionCall(*this, memberInfo, fnPtrRaw, ArgValues,
+                                   ArgIsRef);
+  }
+
+  bool isBaseQualifier =
+      dynamic_cast<BaseExprAST *>(member.getObject()) != nullptr;
+  bool canVirtual = !isStaticMethod &&
+                    info->kind == AggregateKind::Class &&
+                    memberInfo.vtableSlot !=
+                        std::numeric_limits<unsigned>::max() &&
+                    !isBaseQualifier;
+
+  if (canVirtual) {
+    auto structIt = StructTypes.find(ownerName);
+    if (structIt == StructTypes.end())
+      return LogErrorV(("Internal error: struct type for '" + ownerName +
+                        "' unavailable during dispatch")
+                           .c_str());
+
+    llvm::StructType *ownerStructTy = structIt->second;
+    llvm::Value *typedInstancePtr = instancePtr;
+    if (typedInstancePtr->getType() != ownerStructTy->getPointerTo()) {
+      typedInstancePtr = Builder->CreateBitCast(
+          typedInstancePtr, ownerStructTy->getPointerTo(),
+          "hybrid.method.recv");
+    }
+
+    llvm::StructType *headerTy = getClassHeaderType();
+    llvm::Value *headerPtr = Builder->CreateStructGEP(
+        ownerStructTy, typedInstancePtr, 0, "hybrid.header.ptr");
+    auto *typeDescPtrTy =
+        llvm::PointerType::get(getTypeDescriptorType(), 0);
+    llvm::Value *descAddr = Builder->CreateStructGEP(
+        headerTy, headerPtr, 2, "hybrid.header.descptr");
+    llvm::Value *descriptorValue = Builder->CreateLoad(
+        typeDescPtrTy, descAddr, "hybrid.header.desc");
+
+    auto *voidPtrTy =
+        llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
+    auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+    llvm::Value *vtableAddr = Builder->CreateStructGEP(
+        getTypeDescriptorType(), descriptorValue, 2, "hybrid.vtable.ptr");
+    llvm::Value *vtablePtr =
+        Builder->CreateLoad(voidPtrPtrTy, vtableAddr, "hybrid.vtable");
+
+    llvm::Value *slotIndex = llvm::ConstantInt::get(
+        llvm::Type::getInt32Ty(*TheContext), memberInfo.vtableSlot);
+    llvm::Value *fnPtrAddr = Builder->CreateInBoundsGEP(
+        voidPtrTy, vtablePtr, slotIndex, "hybrid.vtable.fnptr");
+    llvm::Value *fnPtrRaw =
+        Builder->CreateLoad(voidPtrTy, fnPtrAddr, "hybrid.vtable.fn");
+
+    return emitDynamicFunctionCall(*this, memberInfo, fnPtrRaw, ArgValues,
+                                   ArgIsRef);
+  }
+
+  return emitResolvedCall(memberInfo.signature, std::move(ArgValues),
                           ArgIsRef);
 }
 
@@ -7172,9 +7920,7 @@ llvm::Type *StructAST::codegen() {
   };
 
   std::vector<llvm::Type *> FieldTypes;
-  FieldTypes.reserve(Fields.size());
   std::vector<std::pair<std::string, unsigned>> FieldIndices;
-  FieldIndices.reserve(Fields.size());
   std::map<std::string, std::string> FieldTypeMap;
   CompositeTypeInfo compositeInfo;
   compositeInfo.kind = kind;
@@ -7185,7 +7931,64 @@ llvm::Type *StructAST::codegen() {
   compositeInfo.isAbstract = IsAbstract;
   compositeInfo.isInterface = (kind == AggregateKind::Interface);
 
+  if (kind == AggregateKind::Class || kind == AggregateKind::Interface) {
+    llvm::StructType *TypeDescTy = getTypeDescriptorType();
+    std::string descriptorName =
+        makeRuntimeSymbolName("__hybrid_type_descriptor$", Name);
+    llvm::GlobalVariable *descriptorGV =
+        TheModule->getGlobalVariable(descriptorName, true);
+    if (!descriptorGV) {
+      descriptorGV = new llvm::GlobalVariable(
+          *TheModule, TypeDescTy, false, llvm::GlobalValue::InternalLinkage,
+          llvm::Constant::getNullValue(TypeDescTy), descriptorName);
+    }
+    compositeInfo.descriptorGlobalName = descriptorName;
+  }
+
   unsigned FieldIndex = 0;
+  if (kind == AggregateKind::Class) {
+    if (BaseClass) {
+      auto baseStructIt = StructTypes.find(*BaseClass);
+      if (baseStructIt == StructTypes.end()) {
+        reportCompilerError("Base class '" + *BaseClass +
+                            "' must be defined before derived class '" + Name +
+                            "'");
+        abandonStructDefinition();
+        return nullptr;
+      }
+
+      llvm::StructType *BaseStruct = baseStructIt->second;
+      auto baseElements = BaseStruct->elements();
+      FieldTypes.reserve(baseElements.size() + Fields.size());
+      for (llvm::Type *Elem : baseElements)
+        FieldTypes.push_back(Elem);
+      FieldIndex = BaseStruct->getNumElements();
+
+      auto baseIndicesIt = StructFieldIndices.find(*BaseClass);
+      if (baseIndicesIt != StructFieldIndices.end())
+        FieldIndices = baseIndicesIt->second;
+
+      auto baseTypeMapIt = StructFieldTypes.find(*BaseClass);
+      if (baseTypeMapIt != StructFieldTypes.end())
+        FieldTypeMap = baseTypeMapIt->second;
+
+      if (const CompositeTypeInfo *baseInfo =
+              lookupCompositeInfo(*BaseClass)) {
+        compositeInfo.fieldModifiers = baseInfo->fieldModifiers;
+        compositeInfo.fieldDeclarationInitializers =
+            baseInfo->fieldDeclarationInitializers;
+      }
+    } else {
+      llvm::StructType *HeaderType = getClassHeaderType();
+      FieldTypes.reserve(Fields.size() + 1);
+      FieldTypes.push_back(HeaderType);
+      FieldIndex = 1;
+    }
+  } else {
+    FieldTypes.reserve(Fields.size());
+  }
+
+  FieldIndices.reserve(FieldIndices.size() + Fields.size());
   for (const auto &Field : Fields) {
     const std::string &FieldTypeName = Field->getType();
     ParsedTypeDescriptor FieldDesc = parseTypeString(FieldTypeName);
@@ -7318,6 +8121,37 @@ llvm::Type *StructAST::codegen() {
       llvm::AllocaInst *StructPtr =
           Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
 
+      llvm::Constant *DescriptorPtrConst = nullptr;
+      if (metadata.kind == AggregateKind::Class) {
+        llvm::GlobalVariable *descriptorGV =
+            TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
+        if (!descriptorGV) {
+          reportCompilerError("Internal error: descriptor for class '" + Name +
+                              "' missing during constructor emission");
+          ConstructorFunc->eraseFromParent();
+          NamedValues.clear();
+          LocalTypes.clear();
+          NonNullFacts.clear();
+          Builder->ClearInsertionPoint();
+          return nullptr;
+        }
+        llvm::StructType *headerTy = getClassHeaderType();
+        auto *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+        DescriptorPtrConst = llvm::ConstantExpr::getBitCast(
+            descriptorGV, llvm::PointerType::get(getTypeDescriptorType(), 0));
+        llvm::Value *headerPtr =
+            Builder->CreateStructGEP(StructType, StructPtr, 0, "hybrid.header");
+        llvm::Value *strongPtr =
+            Builder->CreateStructGEP(headerTy, headerPtr, 0, "hybrid.header.strong");
+        llvm::Value *weakPtr =
+            Builder->CreateStructGEP(headerTy, headerPtr, 1, "hybrid.header.weak");
+        llvm::Value *descPtr =
+            Builder->CreateStructGEP(headerTy, headerPtr, 2, "hybrid.header.desc");
+        Builder->CreateStore(llvm::ConstantInt::get(int32Ty, 1), strongPtr);
+        Builder->CreateStore(llvm::ConstantInt::get(int32Ty, 0), weakPtr);
+        Builder->CreateStore(DescriptorPtrConst, descPtr);
+      }
+
       NamedValues.clear();
       LocalTypes.clear();
       NonNullFacts.clear();
@@ -7350,6 +8184,14 @@ llvm::Type *StructAST::codegen() {
 
       if (Method->getBody()->codegen()) {
         if (!Builder->GetInsertBlock()->getTerminator()) {
+          if (DescriptorPtrConst) {
+            llvm::StructType *headerTy = getClassHeaderType();
+            llvm::Value *headerPtr =
+                Builder->CreateStructGEP(StructType, StructPtr, 0, "hybrid.header.final");
+            llvm::Value *descPtr =
+                Builder->CreateStructGEP(headerTy, headerPtr, 2, "hybrid.header.desc.final");
+            Builder->CreateStore(DescriptorPtrConst, descPtr);
+          }
           llvm::Value *StructValue =
               Builder->CreateLoad(StructType, StructPtr, "struct_value");
           Builder->CreateRet(StructValue);
@@ -7424,6 +8266,8 @@ llvm::Type *StructAST::codegen() {
       MethodDef.markImplicitThisInjected();
     }
 
+    std::string overrideSignature;
+
     const std::string methodKey =
         makeMethodSignatureKey(MethodDef.getDisplayName(), *Proto, true);
     if (!interfaceRequirements.empty())
@@ -7459,6 +8303,8 @@ llvm::Type *StructAST::codegen() {
                                 baseMatch->ownerType + "'");
         return nullptr;
       }
+
+      overrideSignature = baseMember.signature;
     }
 
     if (MethodDef.getKind() == MethodKind::ThisOverride)
@@ -7467,6 +8313,10 @@ llvm::Type *StructAST::codegen() {
     CompositeMemberInfo memberInfo;
     memberInfo.modifiers = MethodDef.getModifiers();
     memberInfo.signature = Proto->getName();
+    if (MethodDef.hasBody())
+      memberInfo.mangledName = Proto->getMangledName();
+    memberInfo.dispatchKey = methodKey;
+    memberInfo.overridesSignature = overrideSignature;
     memberInfo.returnType = Proto->getReturnTypeInfo();
     memberInfo.parameterTypes = gatherParamTypes(Proto->getArgs());
     memberInfo.parameterIsRef = gatherParamRefFlags(Proto->getArgs());
@@ -7483,6 +8333,15 @@ llvm::Type *StructAST::codegen() {
     ScopedCompositeContext methodScope(Name, MethodDef.getKind(),
                                        MethodDef.isStatic());
     Method->codegen();
+  }
+
+  if (metadata.kind == AggregateKind::Interface) {
+    computeInterfaceMethodLayout(Name, Methods, metadata);
+  } else if (metadata.kind == AggregateKind::Class) {
+    if (!computeVirtualDispatchLayout(Name, metadata)) {
+      abandonStructDefinition();
+      return nullptr;
+    }
   }
   
   // Restore the insertion point if had one, otherwise clear it
@@ -7517,6 +8376,18 @@ llvm::Type *StructAST::codegen() {
                           "' defined in '" + req.ownerType + "'");
     }
     return nullptr;
+  }
+
+  if (metadata.kind == AggregateKind::Interface) {
+    if (!emitInterfaceDescriptor(Name, metadata)) {
+      abandonStructDefinition();
+      return nullptr;
+    }
+  } else if (metadata.kind == AggregateKind::Class) {
+    if (!emitClassRuntimeStructures(Name, StructType, metadata)) {
+      abandonStructDefinition();
+      return nullptr;
+    }
   }
 
   return StructType;

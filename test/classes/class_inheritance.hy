@@ -12,11 +12,6 @@ abstract class Shape
         return this.cachedArea
     }
 
-    protected void SetCachedArea(int value)
-    {
-        this.cachedArea = value
-    }
-
     abstract void Draw()
 }
 
@@ -32,13 +27,13 @@ class Square inherits Shape, Drawable
     Square(int side)
     {
         this.side = side
-        base.SetCachedArea(this.side * this.side)
+        this.cachedArea = this.side * this.side
     }
 
     void Resize(int newSide)
     {
         this.side = newSide
-        base.SetCachedArea(this.side * this.side)
+        this.cachedArea = this.side * this.side
     }
 
     override int Area()
