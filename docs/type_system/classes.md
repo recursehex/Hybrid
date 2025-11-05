@@ -331,4 +331,16 @@ The compiler surfaces precise errors to keep hierarchies correct. Examples inclu
 - `Protected member 'Bar' ... without inheriting from it` – invalid access from outside the hierarchy.
 - `'base' may only be used inside instance methods` / `Type 'Foo' does not have a base class` – misuse of the `base` expression.
 
-Together these rules provide a predictable single-inheritance model with interface-based polymorphism, while keeping Hybrid’s value semantics and explicit construction guarantees intact.
+## Runtime Polymorphism
+
+Hybrid represents every class instance as a value that begins with a runtime header. Constructors initialise the header automatically; it links the instance to a static type descriptor that stores:
+
+- the class name and a pointer to its base type descriptor (if any)
+- a vtable pointer plus slot count for `virtual`/`override` dispatch
+- interface entries containing cached method tables for each implemented interface
+
+Because instances continue to use value semantics, assigning `Derived` into a `Base` variable copies the full value, including its descriptor link. Subsequent method calls dispatched through the base type still observe the derived overrides, and copying or passing the value by value preserves the descriptor without extra work.
+
+Virtual calls use the vtable slot recorded during semantic analysis. `base.Method()` and static members bypass the vtable and call the resolved implementation directly. Interface variables obtain their method table by calling a runtime helper (`hybrid_lookup_interface_table`) that walks the descriptor chain; if a class claims an interface but the table is missing, the helper traps so the program does not continue with undefined behaviour.
+
+These runtime mechanics make polymorphic calls predictable while keeping Hybrid’s value semantics and explicit construction guarantees intact.

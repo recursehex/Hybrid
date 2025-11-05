@@ -232,7 +232,22 @@ Hybrid/
     - `ushort` - 16 bit unsigned
     - `uint` - 32 bit unsigned
     - `ulong` - 64 bit unsigned
-- Structs with multi-level member access and constructors
+- Structures
+    - `struct` - supports fields and constructors
+    - `class` - supports methods and inheritance
+- Inheritance
+    - `inherits`
+    - `abstract`
+    - `interface`
+    - `base`
+    - `virtual`
+    - `override`
+- Access modifiers
+    - `public`
+    - `private`
+    - `protected`
+    - `static`
+    - `const`
 - Switch statements and expressions
     - Block-style switch statements: `switch num { case 1 { ... } default { ... } }`
     - Arrow-syntax switch expressions: `switch letter { 'a' => "Alpha" default => "Unknown" }`
@@ -263,22 +278,8 @@ Hybrid/
 
 **Planned Features**
 - Stuctures
-    - `class`
     - `enum`
     - `namespace`
-- OOP
-    - `inherits`
-    - `abstract`
-    - `interface`
-    - `base`
-    - `virtual`
-    - `override`
-- Access modifiers
-    - `public`
-    - `private`
-    - `protected`
-    - `static`
-    - `const`
 - Heap allocation keywords
     - `new`
     - `free`
