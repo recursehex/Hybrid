@@ -454,8 +454,12 @@ int gettok() {
       return tok_struct;
     if (lex.identifierStr == "class")
       return tok_class;
+    if (lex.identifierStr == "interface")
+      return tok_interface;
     if (lex.identifierStr == "this")
       return tok_this;
+    if (lex.identifierStr == "base")
+      return tok_base;
     if (lex.identifierStr == "switch")
       return tok_switch;
     if (lex.identifierStr == "case")
@@ -468,6 +472,10 @@ int gettok() {
       return tok_unsafe;
     if (lex.identifierStr == "ref")
       return tok_ref;
+    if (lex.identifierStr == "abstract")
+      return tok_abstract;
+    if (lex.identifierStr == "inherits")
+      return tok_inherits;
     if (lex.identifierStr == "public")
       return tok_public;
     if (lex.identifierStr == "private")
@@ -478,6 +486,10 @@ int gettok() {
       return tok_static;
     if (lex.identifierStr == "const")
       return tok_const;
+    if (lex.identifierStr == "virtual")
+      return tok_virtual;
+    if (lex.identifierStr == "override")
+      return tok_override;
     return tok_identifier;
   }
 

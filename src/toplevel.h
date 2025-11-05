@@ -7,7 +7,7 @@ void HandleExtern();
 void HandleTopLevelExpression();
 void HandleVariableDeclaration();
 void HandleStructDefinition();
-void HandleClassDefinition();
+void HandleClassDefinition(bool isAbstract = false);
 void HandleUnsafe();
 void HandleSwitchStatement();
 void HandleAssertStatement();

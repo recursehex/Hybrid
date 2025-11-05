@@ -130,8 +130,8 @@ void HandleStructDefinition() {
   }
 }
 
-void HandleClassDefinition() {
-  if (auto ClassAST = ParseStructDefinition(AggregateKind::Class)) {
+void HandleClassDefinition(bool isAbstract) {
+  if (auto ClassAST = ParseStructDefinition(AggregateKind::Class, isAbstract)) {
     if (auto ClassType = ClassAST->codegen()) {
       if (gInteractiveMode) fprintf(stderr, "Generated class type:\n");
       ClassType->print(llvm::errs());
@@ -139,6 +139,32 @@ void HandleClassDefinition() {
     }
   } else {
     getNextToken();
+  }
+}
+
+void HandleInterfaceDefinition(bool isAbstract = false) {
+  if (auto InterfaceAST = ParseStructDefinition(AggregateKind::Interface, isAbstract)) {
+    if (auto InterfaceType = InterfaceAST->codegen()) {
+      if (gInteractiveMode) fprintf(stderr, "Generated interface type:\n");
+      InterfaceType->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    }
+  } else {
+    getNextToken();
+  }
+}
+
+void HandleAbstractComposite() {
+  getNextToken(); // eat 'abstract'
+  while (CurTok == tok_newline)
+    getNextToken();
+
+  if (CurTok == tok_class) {
+    HandleClassDefinition(true);
+  } else if (CurTok == tok_interface) {
+    HandleInterfaceDefinition(true);
+  } else {
+    reportCompilerError("Expected 'class' or 'interface' after 'abstract'");
   }
 }
 
@@ -153,6 +179,10 @@ void HandleUnsafe() {
   } else if (CurTok == tok_class) {
     enterUnsafeContext();
     HandleClassDefinition();
+    exitUnsafeContext();
+  } else if (CurTok == tok_interface) {
+    enterUnsafeContext();
+    HandleInterfaceDefinition();
     exitUnsafeContext();
   } else {
     // Handle unsafe function definition
@@ -209,6 +239,12 @@ void MainLoop() {
       break;
     case tok_class:
       HandleClassDefinition();
+      break;
+    case tok_interface:
+      HandleInterfaceDefinition();
+      break;
+    case tok_abstract:
+      HandleAbstractComposite();
       break;
     case tok_switch:
       HandleSwitchStatement();

@@ -130,14 +130,14 @@ void testExternInControlFlow()
 
 void testExternWithComplexExpressions()
 {
-    int base = 10
+    int initial = 10
     int offset = 5
     
-    int first = abs(base - 20) + offset
-    int second = abs(-base) * 2
+    int first = abs(initial - 20) + offset
+    int second = abs(-initial) * 2
     
     string text = "Testing"
-    int third = hybrid_strlen(text) + base
+    int third = hybrid_strlen(text) + initial
     print(first)
     print(second)
     print(third)

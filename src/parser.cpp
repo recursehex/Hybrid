@@ -221,6 +221,9 @@ struct PendingMemberModifiers {
   bool hasExplicitAccess = false;
   bool isStatic = false;
   bool isConst = false;
+  bool isAbstract = false;
+  bool isVirtual = false;
+  bool isOverride = false;
 };
 
 static bool ParsePendingMemberModifiers(PendingMemberModifiers &out) {
@@ -277,6 +280,33 @@ static bool ParsePendingMemberModifiers(PendingMemberModifiers &out) {
       getNextToken();
       SkipNewlines();
       break;
+    case tok_abstract:
+      if (pending.isAbstract) {
+        reportCompilerError("Duplicate 'abstract' modifier");
+        return false;
+      }
+      pending.isAbstract = true;
+      getNextToken();
+      SkipNewlines();
+      break;
+    case tok_virtual:
+      if (pending.isVirtual) {
+        reportCompilerError("Duplicate 'virtual' modifier");
+        return false;
+      }
+      pending.isVirtual = true;
+      getNextToken();
+      SkipNewlines();
+      break;
+    case tok_override:
+      if (pending.isOverride) {
+        reportCompilerError("Duplicate 'override' modifier");
+        return false;
+      }
+      pending.isOverride = true;
+      getNextToken();
+      SkipNewlines();
+      break;
     default:
       parsing = false;
       break;
@@ -314,6 +344,11 @@ static MemberModifiers FinalizeMemberModifiers(const PendingMemberModifiers &pen
     modifiers.storage |= StorageFlag::Static;
   if (pending.isConst)
     modifiers.storage |= StorageFlag::Const;
+  modifiers.isAbstract = pending.isAbstract;
+  modifiers.isVirtual = pending.isVirtual;
+  modifiers.isOverride = pending.isOverride;
+  if (modifiers.isAbstract)
+    modifiers.isVirtual = true;
 
   return modifiers;
 }
@@ -1038,6 +1073,9 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case tok_this:
     getNextToken(); // consume 'this'
     return std::make_unique<ThisExprAST>();
+  case tok_base:
+    getNextToken(); // consume 'base'
+    return std::make_unique<BaseExprAST>();
   case tok_number:
     return ParseNumberExpr();
   case tok_true:
@@ -2612,16 +2650,27 @@ bool ParseTypeIdentifier(bool isRef) {
   }
 }
 
-/// structdef ::= ('struct' | 'class') identifier '{' (member)* '}'
-std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
-  getNextToken(); // eat 'struct' or 'class'
+/// structdef ::= ('struct' | 'class' | 'interface') identifier ('inherits' type (',' type)*)? '{' (member)* '}'
+std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbstract) {
+  getNextToken(); // eat 'struct', 'class', or 'interface'
 
   while (CurTok == tok_newline)
     getNextToken();
 
   if (CurTok != tok_identifier) {
-    LogError(kind == AggregateKind::Struct ? "Expected struct name after 'struct'"
-                                           : "Expected class name after 'class'");
+    std::string kindDescription;
+    switch (kind) {
+    case AggregateKind::Struct:
+      kindDescription = "struct";
+      break;
+    case AggregateKind::Class:
+      kindDescription = "class";
+      break;
+    case AggregateKind::Interface:
+      kindDescription = "interface";
+      break;
+    }
+    LogError("Expected " + kindDescription + " name after '" + kindDescription + "'");
     return nullptr;
   }
 
@@ -2636,20 +2685,34 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
   while (CurTok == tok_newline)
     getNextToken();
 
+  std::optional<std::string> baseClass;
+  std::vector<std::string> interfaceTypes;
   std::vector<std::string> baseTypes;
-  if (kind == AggregateKind::Class && CurTok == ':') {
-    getNextToken();
+
+  if ((kind == AggregateKind::Class || kind == AggregateKind::Interface) &&
+      CurTok == tok_inherits) {
+    getNextToken(); // eat 'inherits'
     SkipNewlines();
 
+    bool expectBaseClass = (kind == AggregateKind::Class);
+    bool sawType = false;
     while (true) {
       if (CurTok != tok_identifier) {
-        LogError("Expected base type name after ':' in class declaration");
+        LogError("Expected type name after 'inherits'");
         return nullptr;
       }
 
-      baseTypes.push_back(IdentifierStr);
+      std::string typeName = IdentifierStr;
+      sawType = true;
       getNextToken();
       SkipNewlines();
+
+      if (expectBaseClass) {
+        baseClass = typeName;
+        expectBaseClass = false;
+      } else {
+        interfaceTypes.push_back(typeName);
+      }
 
       if (CurTok != ',')
         break;
@@ -2658,19 +2721,25 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
       SkipNewlines();
     }
 
-    if (!baseTypes.empty()) {
-      reportCompilerWarning("Inheritance is not implemented yet",
-                            "Base types will be recorded but ignored during compilation");
+    if (!sawType) {
+      LogError("Expected at least one type after 'inherits'");
+      return nullptr;
     }
   }
+
+  if (baseClass)
+    baseTypes.push_back(*baseClass);
+  baseTypes.insert(baseTypes.end(), interfaceTypes.begin(), interfaceTypes.end());
+
+  bool isAbstractComposite = isAbstract || kind == AggregateKind::Interface;
 
   if (CurTok != '{') {
     LogError("Expected '{' after type name");
     return nullptr;
   }
 
-  auto &definitionStack =
-      (kind == AggregateKind::Struct) ? StructDefinitionStack : ClassDefinitionStack;
+  auto &definitionStack = (kind == AggregateKind::Struct) ? StructDefinitionStack
+                                                          : ClassDefinitionStack;
 
   struct ScopedCompositeMarker {
     std::vector<std::string> &stack;
@@ -2815,20 +2884,34 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
     while (CurTok == tok_newline)
       getNextToken();
 
-    if (CurTok != '{') {
-      LogError("Expected '{' after method declaration");
-      return false;
-    }
+    if (kind == AggregateKind::Interface && !modifiers.isAbstract)
+      modifiers.isAbstract = true;
 
-    auto Body = ParseBlock();
-    if (!Body)
-      return false;
-
+    const bool requiresBody = !modifiers.isAbstract && kind != AggregateKind::Interface;
     std::string QualifiedName = compositeName + "." + MethodName;
     TypeInfo methodReturn = buildDeclaredTypeInfo(ReturnType, false);
     auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), QualifiedName, std::move(Args));
-    auto Method = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-    Methods.emplace_back(std::move(Method), modifiers, methodKind, MethodName);
+
+    if (requiresBody) {
+      if (CurTok != '{') {
+        LogError("Expected '{' after method declaration");
+        return false;
+      }
+
+      auto Body = ParseBlock();
+      if (!Body)
+        return false;
+
+      auto Method = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
+      Methods.emplace_back(std::move(Method), modifiers, methodKind, MethodName);
+    } else {
+      if (CurTok == '{') {
+        reportCompilerError("Abstract methods cannot declare a body");
+        return false;
+      }
+      Methods.emplace_back(std::move(Proto), modifiers, methodKind, MethodName);
+    }
+
     return true;
   };
 
@@ -2848,6 +2931,10 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
       SkipNewlines();
 
       if (CurTok == '(') {
+        if (kind == AggregateKind::Interface) {
+          reportCompilerError("Interfaces cannot declare constructors");
+          return nullptr;
+        }
         MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
         if ((modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
           reportCompilerError("Constructors cannot be static");
@@ -2935,6 +3022,10 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
         reportCompilerError("'this' can only be used as a formatter method name");
         return nullptr;
       }
+      if (kind == AggregateKind::Interface) {
+        reportCompilerError("Interfaces cannot declare fields");
+        return nullptr;
+      }
       std::unique_ptr<ExprAST> MemberInitializer;
       if (CurTok == '=') {
         getNextToken(); // eat '='
@@ -2955,7 +3046,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
     }
   }
 
-  if (!hasConstructor) {
+  if (kind != AggregateKind::Interface && !isAbstractComposite && !hasConstructor) {
     const char *kindDescription =
         (kind == AggregateKind::Struct) ? "Struct" : "Class";
     reportCompilerError(std::string(kindDescription) + " '" + compositeName +
@@ -2978,8 +3069,13 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind) {
     StructNames.insert(compositeName);
   }
 
-  return std::make_unique<StructAST>(kind, compositeName, std::move(Fields),
-                                     std::move(Methods), std::move(baseTypes));
+  auto Result = std::make_unique<StructAST>(
+      kind, compositeName, std::move(Fields), std::move(Methods),
+      std::move(baseTypes));
+  Result->setBaseClass(std::move(baseClass));
+  Result->setInterfaces(std::move(interfaceTypes));
+  Result->setAbstract(isAbstractComposite);
+  return Result;
 }
 // Evaluate constant expressions at compile time
 bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {

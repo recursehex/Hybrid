@@ -58,7 +58,8 @@ std::unique_ptr<CaseAST> ParseCase(bool isExpression);
 bool ParseTypeIdentifier(bool isRef = false);
 
 // Struct parsing functions
-std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind = AggregateKind::Struct);
+std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind = AggregateKind::Struct,
+                                                 bool isAbstract = false);
 std::unique_ptr<FieldAST> ParseField();
 
 // Constant expression evaluation

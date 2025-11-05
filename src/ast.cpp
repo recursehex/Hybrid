@@ -357,6 +357,181 @@ static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
          lhs.declaredRef == rhs.declaredRef;
 }
 
+static std::vector<TypeInfo> gatherParamTypes(const std::vector<Parameter> &params);
+static std::vector<bool> gatherParamRefFlags(const std::vector<Parameter> &params);
+static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name);
+
+static std::string makeMethodSignatureKey(const std::string &methodName,
+                                          const std::vector<TypeInfo> &paramTypes,
+                                          const std::vector<bool> &paramIsRef,
+                                          bool skipFirstParam = false) {
+  std::string key = methodName;
+  key.push_back('(');
+  size_t start = skipFirstParam && !paramTypes.empty() ? 1 : 0;
+  for (size_t i = start; i < paramTypes.size(); ++i) {
+    if (i != 0)
+      key.push_back(',');
+    if (i < paramIsRef.size() && paramIsRef[i])
+      key.append("ref ");
+    key.append(typeNameFromInfo(paramTypes[i]));
+  }
+  key.push_back(')');
+  return key;
+}
+
+static std::string makeMethodSignatureKey(const std::string &methodName,
+                                          const PrototypeAST &proto,
+                                          bool skipFirstParam = false) {
+  std::vector<TypeInfo> paramTypes = gatherParamTypes(proto.getArgs());
+  std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
+  return makeMethodSignatureKey(methodName, paramTypes, paramIsRef,
+                                skipFirstParam);
+}
+
+struct MethodRequirement {
+  std::string ownerType;
+  const CompositeMemberInfo *info = nullptr;
+};
+
+template <typename Func>
+static void visitBaseChain(const std::string &typeName, Func &&fn) {
+  std::set<std::string> visited;
+  std::string currentName = typeName;
+
+  while (true) {
+    const CompositeTypeInfo *info = lookupCompositeInfo(currentName);
+    if (!info || !info->baseClass)
+      break;
+
+    const std::string &baseName = *info->baseClass;
+    if (!visited.insert(baseName).second)
+      break;
+
+    const CompositeTypeInfo *baseInfo = lookupCompositeInfo(baseName);
+    if (!baseInfo)
+      break;
+
+    if (!fn(baseName, *baseInfo))
+      break;
+
+    currentName = baseName;
+  }
+}
+
+static void collectInterfaceAncestors(const std::string &interfaceName,
+                                      std::set<std::string> &out) {
+  if (!out.insert(interfaceName).second)
+    return;
+  if (const CompositeTypeInfo *ifaceInfo = lookupCompositeInfo(interfaceName)) {
+    for (const std::string &parent : ifaceInfo->interfaces)
+      collectInterfaceAncestors(parent, out);
+  }
+}
+
+static void gatherInterfaceRequirements(const CompositeTypeInfo &metadata,
+                                        std::map<std::string, MethodRequirement> &requirements) {
+  std::set<std::string> interfaces;
+  for (const std::string &iface : metadata.interfaces)
+    collectInterfaceAncestors(iface, interfaces);
+
+  for (const std::string &ifaceName : interfaces) {
+    const CompositeTypeInfo *ifaceInfo = lookupCompositeInfo(ifaceName);
+    if (!ifaceInfo)
+      continue;
+    for (const auto &entry : ifaceInfo->methodInfo) {
+      const CompositeMemberInfo &member = entry.second;
+      std::string key = makeMethodSignatureKey(entry.first, member.parameterTypes,
+                                               member.parameterIsRef, true);
+      if (!requirements.contains(key))
+        requirements.emplace(key, MethodRequirement{ifaceName, &member});
+    }
+  }
+}
+
+static void collectAbstractBaseMethods(const std::string &typeName,
+                                       std::map<std::string, MethodRequirement> &requirements) {
+  visitBaseChain(typeName, [&](const std::string &baseName,
+                               const CompositeTypeInfo &baseInfo) {
+    for (const auto &entry : baseInfo.methodInfo) {
+      const CompositeMemberInfo &member = entry.second;
+      if (!member.modifiers.isAbstract)
+        continue;
+      std::string key = makeMethodSignatureKey(entry.first, member.parameterTypes,
+                                               member.parameterIsRef, true);
+      if (!requirements.contains(key))
+        requirements.emplace(key, MethodRequirement{baseName, &member});
+    }
+    return true;
+  });
+}
+
+static void removeSatisfiedRequirementsFromType(
+    const CompositeTypeInfo &metadata,
+    std::map<std::string, MethodRequirement> &requirements,
+    bool requireConcrete) {
+  for (const auto &entry : metadata.methodInfo) {
+    const CompositeMemberInfo &member = entry.second;
+    if (requireConcrete && member.modifiers.isAbstract)
+      continue;
+    std::string key = makeMethodSignatureKey(entry.first, member.parameterTypes,
+                                             member.parameterIsRef, true);
+    requirements.erase(key);
+  }
+}
+
+static void removeInterfaceRequirementsSatisfiedByHierarchy(
+    const std::string &typeName,
+    std::map<std::string, MethodRequirement> &requirements) {
+  visitBaseChain(typeName, [&](const std::string &baseName,
+                               const CompositeTypeInfo &baseInfo) {
+    (void)baseName;
+    removeSatisfiedRequirementsFromType(baseInfo, requirements, false);
+    return !requirements.empty();
+  });
+}
+
+static void removeAbstractRequirementsSatisfiedByHierarchy(
+    const std::string &typeName,
+    std::map<std::string, MethodRequirement> &requirements) {
+  visitBaseChain(typeName, [&](const std::string &baseName,
+                               const CompositeTypeInfo &baseInfo) {
+    (void)baseName;
+    removeSatisfiedRequirementsFromType(baseInfo, requirements, true);
+    return !requirements.empty();
+  });
+}
+
+struct BaseMethodMatch {
+  std::string ownerType;
+  const CompositeMemberInfo *info = nullptr;
+};
+
+static std::optional<BaseMethodMatch>
+findBaseMethodMatch(const std::string &typeName,
+                    const std::string &methodName,
+                    const PrototypeAST &proto) {
+  const std::string key = makeMethodSignatureKey(methodName, proto, true);
+  std::optional<BaseMethodMatch> result;
+
+  visitBaseChain(typeName, [&](const std::string &baseName,
+                               const CompositeTypeInfo &baseInfo) {
+    auto it = baseInfo.methodInfo.find(methodName);
+    if (it == baseInfo.methodInfo.end())
+      return true;
+
+    const CompositeMemberInfo &member = it->second;
+    std::string baseKey = makeMethodSignatureKey(methodName, member.parameterTypes,
+                                                 member.parameterIsRef, true);
+    if (baseKey == key) {
+      result = BaseMethodMatch{baseName, &member};
+      return false;
+    }
+    return true;
+  });
+
+  return result;
+}
+
 static std::vector<TypeInfo> gatherParamTypes(const std::vector<Parameter> &params) {
   std::vector<TypeInfo> types;
   types.reserve(params.size());
@@ -535,6 +710,105 @@ static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
   return &it->second;
 }
 
+static std::string describeAggregateKind(AggregateKind kind) {
+  switch (kind) {
+  case AggregateKind::Struct:
+    return "struct";
+  case AggregateKind::Class:
+    return "class";
+  case AggregateKind::Interface:
+    return "interface";
+  }
+  return "type";
+}
+
+static bool isDerivedFrom(const std::string &derivedName,
+                          const std::string &baseName) {
+  if (derivedName == baseName)
+    return true;
+
+  std::set<std::string> visited;
+  std::string current = derivedName;
+
+  while (visited.insert(current).second) {
+    const CompositeTypeInfo *info = lookupCompositeInfo(current);
+    if (!info || !info->baseClass)
+      break;
+
+    const std::string &parent = *info->baseClass;
+    if (parent == baseName)
+      return true;
+    current = parent;
+  }
+
+  return false;
+}
+
+static bool validateCompositeHierarchy(const std::string &name,
+                                       CompositeTypeInfo &metadata) {
+  auto fail = [&](const std::string &message) {
+    reportCompilerError(message);
+    return false;
+  };
+
+  if (metadata.baseClass) {
+    if (*metadata.baseClass == name)
+      return fail("Type '" + name + "' cannot inherit from itself");
+
+    const CompositeTypeInfo *baseInfo =
+        lookupCompositeInfo(*metadata.baseClass);
+    if (!baseInfo)
+      return fail("Type '" + name + "' inherits from undefined base '" +
+                  *metadata.baseClass + "'");
+
+    if (metadata.kind == AggregateKind::Class) {
+      if (baseInfo->kind == AggregateKind::Interface) {
+        if (std::find(metadata.interfaces.begin(), metadata.interfaces.end(),
+                      *metadata.baseClass) == metadata.interfaces.end()) {
+          metadata.interfaces.push_back(*metadata.baseClass);
+        }
+        metadata.baseClass.reset();
+        baseInfo = nullptr;
+      } else if (baseInfo->kind != AggregateKind::Class) {
+        return fail("Class '" + name + "' can only inherit from another class");
+      }
+    } else if (metadata.kind == AggregateKind::Interface) {
+      if (baseInfo->kind != AggregateKind::Interface)
+        return fail("Interface '" + name + "' can only inherit from other interfaces");
+    }
+
+    if (metadata.baseClass) {
+      std::set<std::string> visited;
+      std::string current = *metadata.baseClass;
+      while (visited.insert(current).second) {
+        if (current == name)
+          return fail("Inheritance cycle detected for type '" + name + "'");
+        const CompositeTypeInfo *info = lookupCompositeInfo(current);
+        if (!info || !info->baseClass)
+          break;
+        current = *info->baseClass;
+      }
+    }
+  }
+
+  std::set<std::string> seenInterfaces;
+  for (const std::string &iface : metadata.interfaces) {
+    if (!seenInterfaces.insert(iface).second)
+      return fail("Type '" + name + "' implements interface '" + iface +
+                  "' multiple times");
+
+    const CompositeTypeInfo *ifaceInfo = lookupCompositeInfo(iface);
+    if (!ifaceInfo)
+      return fail("Type '" + name + "' implements undefined interface '" +
+                  iface + "'");
+    if (ifaceInfo->kind != AggregateKind::Interface)
+      return fail("Type '" + name + "' cannot implement non-interface type '" +
+                  iface + "'");
+  }
+
+  return true;
+}
+
 static ActiveCompositeContext *currentCompositeContextMutable() {
   if (CG.compositeContextStack.empty())
     return nullptr;
@@ -622,8 +896,7 @@ static bool ensureMemberInitializedForMutation(MemberAccessExprAST &member) {
   if (memberHasDeclarationInitializer(*info, isStatic, memberName))
     return true;
 
-  const std::string ownerKind =
-      info->kind == AggregateKind::Class ? "class" : "struct";
+  const std::string ownerKind = describeAggregateKind(info->kind);
 
   if (isStatic) {
     auto key = makeMemberKey(ownerName, memberName);
@@ -743,10 +1016,11 @@ static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
                                       const std::string &memberName) {
   const ActiveCompositeContext *ctx = currentCompositeContext();
   const bool sameType = ctx && ctx->name == ownerName;
+  const bool isDerived = ctx && !sameType && isDerivedFrom(ctx->name, ownerName);
+  const bool sameOrDerived = sameType || isDerived;
   const auto *info = lookupCompositeInfo(ownerName);
   const std::string ownerKind =
-      info ? (info->kind == AggregateKind::Class ? "class" : "struct")
-           : "type";
+      info ? describeAggregateKind(info->kind) : "type";
 
   const MemberAccess access = modifiers.access;
   if (intent == AccessIntent::Write &&
@@ -763,18 +1037,18 @@ static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
   auto allowRead = [&] {
     if (hasAccessFlag(access, AccessFlag::ReadPublic))
       return true;
-    if (sameType &&
-        (hasAccessFlag(access, AccessFlag::ReadPrivate) ||
-         hasAccessFlag(access, AccessFlag::ReadProtected)))
+    if (sameType && hasAccessFlag(access, AccessFlag::ReadPrivate))
+      return true;
+    if (sameOrDerived && hasAccessFlag(access, AccessFlag::ReadProtected))
       return true;
     return false;
   };
   auto allowWrite = [&] {
     if (hasAccessFlag(access, AccessFlag::WritePublic))
       return true;
-    if (sameType &&
-        (hasAccessFlag(access, AccessFlag::WritePrivate) ||
-         hasAccessFlag(access, AccessFlag::WriteProtected)))
+    if (sameType && hasAccessFlag(access, AccessFlag::WritePrivate))
+      return true;
+    if (sameOrDerived && hasAccessFlag(access, AccessFlag::WriteProtected))
       return true;
     return false;
   };
@@ -807,7 +1081,20 @@ static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
   }
 
   std::string message;
-  if (!sameType) {
+  if (sameType) {
+    message = "Cannot " + action + " member '" + memberName + "' of " +
+              ownerKind + " '" + ownerName + "'";
+  } else if (isDerived) {
+    if (hasAccessFlag(access, AccessFlag::ReadPrivate) ||
+        hasAccessFlag(access, AccessFlag::WritePrivate)) {
+      message = "Cannot " + action + " private member '" + memberName +
+                "' of " + ownerKind + " '" + ownerName +
+                "' from a subclass";
+    } else {
+      message = "Cannot " + action + " member '" + memberName + "' of " +
+                ownerKind + " '" + ownerName + "'";
+    }
+  } else {
     if (hasAccessFlag(access, AccessFlag::ReadPrivate) ||
         hasAccessFlag(access, AccessFlag::WritePrivate)) {
       message = "Cannot " + action + " private member '" + memberName +
@@ -816,7 +1103,7 @@ static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
                hasAccessFlag(access, AccessFlag::WriteProtected)) {
       message = "Cannot " + action + " protected member '" + memberName +
                 "' of " + ownerKind + " '" + ownerName +
-                "' without inheritance support";
+                "' without inheriting from it";
     } else if (intent == AccessIntent::Write &&
                hasAccessFlag(access, AccessFlag::WritePrivate)) {
       message = "Member '" + memberName + "' of " + ownerKind + " '" +
@@ -825,9 +1112,6 @@ static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
       message = "Access to member '" + memberName + "' of " + ownerKind +
                 " '" + ownerName + "' is not permitted";
     }
-  } else {
-    message = "Cannot " + action + " member '" + memberName + "' of " +
-              ownerKind + " '" + ownerName + "'";
   }
 
   reportCompilerError(message);
@@ -878,8 +1162,7 @@ public:
     if (missingMembers.empty())
       return;
 
-    std::string ownerKind =
-        info->kind == AggregateKind::Class ? "class" : "struct";
+    std::string ownerKind = describeAggregateKind(info->kind);
     std::string missingList;
     missingList.reserve(missingMembers.size() * 12);
     for (size_t i = 0; i < missingMembers.size(); ++i) {
@@ -6897,6 +7180,10 @@ llvm::Type *StructAST::codegen() {
   compositeInfo.kind = kind;
   compositeInfo.baseTypes = BaseTypes;
   compositeInfo.genericParameters = GenericParameters;
+  compositeInfo.baseClass = BaseClass;
+  compositeInfo.interfaces = InterfaceTypes;
+  compositeInfo.isAbstract = IsAbstract;
+  compositeInfo.isInterface = (kind == AggregateKind::Interface);
 
   unsigned FieldIndex = 0;
   for (const auto &Field : Fields) {
@@ -6975,16 +7262,33 @@ llvm::Type *StructAST::codegen() {
 
   CG.compositeMetadata[Name] = std::move(compositeInfo);
   CompositeTypeInfo &metadata = CG.compositeMetadata[Name];
+  if (!validateCompositeHierarchy(Name, metadata)) {
+    abandonStructDefinition();
+    return nullptr;
+  }
+
+  std::map<std::string, MethodRequirement> interfaceRequirements;
+  if (metadata.kind == AggregateKind::Class) {
+    gatherInterfaceRequirements(metadata, interfaceRequirements);
+    removeInterfaceRequirementsSatisfiedByHierarchy(Name, interfaceRequirements);
+  }
+
+  std::map<std::string, MethodRequirement> abstractRequirements;
+  if (metadata.kind == AggregateKind::Class)
+    collectAbstractBaseMethods(Name, abstractRequirements);
+  if (!abstractRequirements.empty())
+    removeAbstractRequirementsSatisfiedByHierarchy(Name, abstractRequirements);
   
   // Generate constructor and other methods
   for (auto &MethodDef : Methods) {
-    FunctionAST *Method = MethodDef.get();
-    if (!Method)
-      continue;
-
     if (MethodDef.getKind() == MethodKind::Constructor) {
-      std::string ConstructorName = Method->getProto()->getMangledName();
-      const auto &CtorArgs = Method->getProto()->getArgs();
+      FunctionAST *Method = MethodDef.get();
+      if (!Method)
+        continue;
+
+      PrototypeAST *CtorProto = Method->getProto();
+      std::string ConstructorName = CtorProto->getMangledName();
+      const auto &CtorArgs = CtorProto->getArgs();
 
       std::vector<llvm::Type *> ParamTypes;
       ParamTypes.reserve(CtorArgs.size());
@@ -7055,7 +7359,7 @@ llvm::Type *StructAST::codegen() {
 
         metadata.constructorMangledNames.push_back(ConstructorName);
         FunctionOverload &ctorEntry =
-            registerFunctionOverload(*Method->getProto(), ConstructorName);
+            registerFunctionOverload(*CtorProto, ConstructorName);
         ctorEntry.function = ConstructorFunc;
       } else {
         ConstructorFunc->eraseFromParent();
@@ -7072,6 +7376,41 @@ llvm::Type *StructAST::codegen() {
       continue;
     }
 
+    PrototypeAST *Proto = MethodDef.getPrototype();
+    if (!Proto)
+      continue;
+
+    const MemberModifiers &methodMods = MethodDef.getModifiers();
+
+    if (metadata.kind == AggregateKind::Interface) {
+      if (MethodDef.isStatic()) {
+        reportCompilerError("Interface '" + Name +
+                            "' cannot declare static method '" +
+                            MethodDef.getDisplayName() + "'");
+        return nullptr;
+      }
+      if (methodMods.isOverride) {
+        reportCompilerError("Interface method '" + MethodDef.getDisplayName() +
+                            "' cannot be marked override");
+        return nullptr;
+      }
+    }
+
+    if (methodMods.isAbstract && metadata.kind == AggregateKind::Class) {
+      if (MethodDef.isStatic()) {
+        reportCompilerError("Abstract method '" + MethodDef.getDisplayName() +
+                            "' of class '" + Name +
+                            "' cannot be static");
+        return nullptr;
+      }
+      if (!metadata.isAbstract) {
+        reportCompilerError("Class '" + Name + "' must be declared abstract to "
+                            "contain abstract method '" +
+                                MethodDef.getDisplayName() + "'");
+        return nullptr;
+      }
+    }
+
     if (MethodDef.needsInstanceThis() && !MethodDef.hasImplicitThis()) {
       Parameter thisParam;
       thisParam.Type = Name;
@@ -7081,15 +7420,65 @@ llvm::Type *StructAST::codegen() {
       thisInfo.refStorage = RefStorageClass::RefAlias;
       thisInfo.declaredRef = true;
       thisParam.DeclaredType = thisInfo;
-      Method->getProto()->prependImplicitParameter(std::move(thisParam));
+      Proto->prependImplicitParameter(std::move(thisParam));
       MethodDef.markImplicitThisInjected();
     }
 
-    if (MethodDef.getKind() == MethodKind::ThisOverride)
-      metadata.thisOverride = Method->getProto()->getName();
+    const std::string methodKey =
+        makeMethodSignatureKey(MethodDef.getDisplayName(), *Proto, true);
+    if (!interfaceRequirements.empty())
+      interfaceRequirements.erase(methodKey);
+    if (!abstractRequirements.empty())
+      abstractRequirements.erase(methodKey);
 
-    metadata.methodInfo[MethodDef.getDisplayName()] =
-        {MethodDef.getModifiers(), Method->getProto()->getName()};
+    if (methodMods.isOverride) {
+      if (MethodDef.isStatic()) {
+        reportCompilerError("Static method '" + MethodDef.getDisplayName() +
+                            "' of class '" + Name +
+                            "' cannot be marked override");
+        return nullptr;
+      }
+
+      auto baseMatch =
+          findBaseMethodMatch(Name, MethodDef.getDisplayName(), *Proto);
+      if (!baseMatch) {
+        reportCompilerError("Method '" + MethodDef.getDisplayName() +
+                                "' of class '" + Name +
+                                "' does not override a base class method");
+        return nullptr;
+      }
+
+      const CompositeMemberInfo &baseMember = *baseMatch->info;
+      if (!baseMember.modifiers.isVirtual &&
+          !baseMember.modifiers.isAbstract &&
+          !baseMember.modifiers.isOverride) {
+        reportCompilerError("Method '" + MethodDef.getDisplayName() +
+                                "' of class '" + Name +
+                                "' cannot override non-virtual member '" +
+                                MethodDef.getDisplayName() + "' of class '" +
+                                baseMatch->ownerType + "'");
+        return nullptr;
+      }
+    }
+
+    if (MethodDef.getKind() == MethodKind::ThisOverride)
+      metadata.thisOverride = Proto->getName();
+
+    CompositeMemberInfo memberInfo;
+    memberInfo.modifiers = MethodDef.getModifiers();
+    memberInfo.signature = Proto->getName();
+    memberInfo.returnType = Proto->getReturnTypeInfo();
+    memberInfo.parameterTypes = gatherParamTypes(Proto->getArgs());
+    memberInfo.parameterIsRef = gatherParamRefFlags(Proto->getArgs());
+    memberInfo.returnsByRef = Proto->returnsByRef();
+    metadata.methodInfo[MethodDef.getDisplayName()] = std::move(memberInfo);
+
+    if (!MethodDef.hasBody())
+      continue;
+
+    FunctionAST *Method = MethodDef.get();
+    if (!Method)
+      continue;
 
     ScopedCompositeContext methodScope(Name, MethodDef.getKind(),
                                        MethodDef.isStatic());
@@ -7103,6 +7492,31 @@ llvm::Type *StructAST::codegen() {
     // No previous insertion point, at top level
     // Clear the insertion point so next top-level code creates its own context
     Builder->ClearInsertionPoint();
+  }
+
+  if (!interfaceRequirements.empty()) {
+    for (const auto &entry : interfaceRequirements) {
+      const MethodRequirement &req = entry.second;
+      std::string signature = req.info ? req.info->signature : req.ownerType +
+                                                       "." + entry.first;
+      reportCompilerError("Class '" + Name +
+                          "' does not implement interface member '" +
+                          signature + "'");
+    }
+    return nullptr;
+  }
+
+  if (!abstractRequirements.empty() && metadata.kind == AggregateKind::Class &&
+      !metadata.isAbstract) {
+    for (const auto &entry : abstractRequirements) {
+      const MethodRequirement &req = entry.second;
+      std::string signature = req.info ? req.info->signature
+                                       : req.ownerType + "." + entry.first;
+      reportCompilerError("Class '" + Name +
+                          "' must override abstract member '" + signature +
+                          "' defined in '" + req.ownerType + "'");
+    }
+    return nullptr;
   }
 
   return StructType;
@@ -7616,6 +8030,58 @@ llvm::Value *ThisExprAST::codegen() {
 // Generate pointer code for 'this' expressions
 llvm::Value *ThisExprAST::codegen_ptr() {
   // 'this' is already a pointer
+  return codegen();
+}
+
+// Generate code for 'base' expressions (placeholder implementation)
+llvm::Value *BaseExprAST::codegen() {
+  const ActiveCompositeContext *ctx = currentCompositeContext();
+  if (!ctx || ctx->isStatic) {
+    if (!ReportedError)
+      reportCompilerError("'base' may only be used inside instance methods");
+    ReportedError = true;
+    return nullptr;
+  }
+
+  const CompositeTypeInfo *info = lookupCompositeInfo(ctx->name);
+  if (!info || !info->baseClass) {
+    if (!ReportedError)
+      reportCompilerError("Type '" + ctx->name + "' does not have a base class");
+    ReportedError = true;
+    return nullptr;
+  }
+
+  auto thisIt = NamedValues.find("this");
+  if (thisIt == NamedValues.end()) {
+    if (!ReportedError)
+      reportCompilerError("'base' is only valid within methods of a class");
+    ReportedError = true;
+    return nullptr;
+  }
+
+  auto structIt = StructTypes.find(*info->baseClass);
+  if (structIt == StructTypes.end()) {
+    if (!ReportedError)
+      reportCompilerError("Base class '" + *info->baseClass +
+                          "' is not available for 'base' expression");
+    ReportedError = true;
+    return nullptr;
+  }
+
+  llvm::Value *thisValue = thisIt->second;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  llvm::Type *expectedPtr = structIt->second->getPointerTo();
+#pragma clang diagnostic pop
+  llvm::Value *basePtr = thisValue;
+  if (thisValue->getType() != expectedPtr)
+    basePtr = Builder->CreateBitCast(thisValue, expectedPtr, "base.ptr");
+
+  setTypeName(*info->baseClass);
+  return basePtr;
+}
+
+llvm::Value *BaseExprAST::codegen_ptr() {
   return codegen();
 }
 

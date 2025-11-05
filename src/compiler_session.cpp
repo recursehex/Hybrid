@@ -188,8 +188,12 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("struct");
     case tok_class:
       return makeKeyword("class");
+    case tok_interface:
+      return makeKeyword("interface");
     case tok_this:
       return makeKeyword("this");
+    case tok_base:
+      return makeKeyword("base");
     case tok_switch:
       return makeKeyword("switch");
     case tok_case:
@@ -198,6 +202,14 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("default");
     case tok_assert:
       return makeKeyword("assert");
+    case tok_abstract:
+      return makeKeyword("abstract");
+    case tok_inherits:
+      return makeKeyword("inherits");
+    case tok_virtual:
+      return makeKeyword("virtual");
+    case tok_override:
+      return makeKeyword("override");
     case tok_public:
       return makeKeyword("public");
     case tok_private:

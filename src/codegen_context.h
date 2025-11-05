@@ -35,6 +35,10 @@ struct FunctionOverload {
 struct CompositeMemberInfo {
   MemberModifiers modifiers;
   std::string signature;
+  TypeInfo returnType;
+  std::vector<TypeInfo> parameterTypes;
+  std::vector<bool> parameterIsRef;
+  bool returnsByRef = false;
 };
 
 struct CompositeTypeInfo {
@@ -50,6 +54,10 @@ struct CompositeTypeInfo {
   std::map<std::string, CompositeMemberInfo> methodInfo;
   std::vector<std::string> baseTypes;
   std::vector<std::string> genericParameters;
+  std::optional<std::string> baseClass;
+  std::vector<std::string> interfaces;
+  bool isAbstract = false;
+  bool isInterface = false;
   std::optional<std::string> thisOverride;
 };
 

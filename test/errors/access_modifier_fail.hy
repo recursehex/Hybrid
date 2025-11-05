@@ -60,3 +60,19 @@ void callPrivateMethod()
     Machine m = Machine()
     m.Service()  // expect: Cannot call private member 'Service' of class 'Machine'
 }
+
+class ProtectedExample
+{
+    protected int counter
+
+    ProtectedExample()
+    {
+        this.counter = 1
+    }
+}
+
+void readProtected()
+{
+    ProtectedExample example = ProtectedExample()
+    int value = example.counter     // expect: Cannot read protected member 'counter' of class 'ProtectedExample' without inheriting from it
+}

@@ -12,49 +12,49 @@ enum Token {
   tok_eof = -1,
 
   // commands
-  tok_use = -2,
-  tok_extern = -3,
-  tok_return = -4,
+  tok_use = -2,             // import statement
+  tok_extern = -3,          // external function declaration
+  tok_return = -4,          // return statement
   
   // control flow
-  tok_for = -5,
-  tok_in = -6,
-  tok_to = -7,
-  tok_by = -8,
-  tok_if = -9,
-  tok_else = -10,
-  tok_while = -11,
-  tok_break = -12,
-  tok_skip = -13,
-  tok_struct = -14,
-  tok_class = -15,
-  tok_this = -16,
-  tok_switch = -17,
-  tok_case = -18,
-  tok_default = -19,
-  tok_assert = -20,
+  tok_for = -5,             // for loop
+  tok_in = -6,              // in keyword for foreach loops
+  tok_to = -7,              // to keyword for for loops
+  tok_by = -8,              // by keyword for step size in for loops
+  tok_if = -9,              // if statement
+  tok_else = -10,           // else statement
+  tok_while = -11,          // while loop
+  tok_break = -12,          // break statement
+  tok_skip = -13,           // continue statement
+  tok_struct = -14,         // struct definition
+  tok_class = -15,          // class definition
+  tok_this = -16,           // this pointer/reference
+  tok_switch = -17,         // switch statement or expression
+  tok_case = -18,           // case in switch
+  tok_default = -19,        // default case in switch
+  tok_assert = -20,         // assert statement
 
   // basic types
-  tok_int = -21,
-  tok_float = -22,
-  tok_double = -23,
-  tok_char = -24,
-  tok_void = -25,
-  tok_bool = -26,
-  tok_string = -27,
+  tok_int = -21,            // int (32-bit signed integer)
+  tok_float = -22,          // float (32-bit floating point)
+  tok_double = -23,         // double (64-bit floating point)
+  tok_char = -24,           // char (16-bit Unicode character)
+  tok_void = -25,           // void (no type)
+  tok_bool = -26,           // bool (true/false)
+  tok_string = -27,         // string (array of chars with int length)
 
   // sized integer types
-  tok_byte = -28,
-  tok_short = -29,
-  tok_long = -30,
-  tok_sbyte = -31,
-  tok_ushort = -32,
-  tok_uint = -33,
-  tok_ulong = -34,
+  tok_byte = -28,           // byte (8-bit unsigned integer)
+  tok_short = -29,          // short (16-bit signed integer)
+  tok_long = -30,           // long (64-bit signed integer)
+  tok_sbyte = -31,          // sbyte (8-bit signed integer)
+  tok_ushort = -32,         // ushort (16-bit unsigned integer)
+  tok_uint = -33,           // uint (32-bit unsigned integer)
+  tok_ulong = -34,          // ulong (64-bit unsigned integer)
 
   // sized character types
-  tok_schar = -35,
-  tok_lchar = -36,
+  tok_schar = -35,          // schar (8-bit character)
+  tok_lchar = -36,          // lchar (32-bit character)
 
   // primary literals
   tok_identifier = -37,     // e.g. foo, bar, baz
@@ -68,7 +68,7 @@ enum Token {
   tok_null = -43,       // null
 
   // delimiters
-  tok_newline = -44,
+  tok_newline = -44,    // \n
 
   // comparison operators
   tok_eq = -45,         // ==
@@ -118,37 +118,45 @@ enum Token {
   tok_lambda = -73,           // =>
 
   // access and storage modifiers
-  tok_public = -74,
-  tok_private = -75,
-  tok_protected = -76,
-  tok_static = -77,
-  tok_const = -78,
+  tok_public = -74,           // public
+  tok_private = -75,          // private
+  tok_protected = -76,        // protected
+  tok_static = -77,           // static
+  tok_const = -78,            // const
+
+  // inheritance & polymorphism
+  tok_inherits = -79,         // inherits
+  tok_abstract = -80,         // abstract
+  tok_interface = -81,        // interface
+  tok_virtual = -82,          // virtual
+  tok_override = -83,         // override
+  tok_base = -84,             // base
 
   // pointer and unsafe operators
-  tok_unsafe = -79,           // unsafe
-  tok_at = -80,               // @ (dereference/pointer type)
-  tok_hash = -81,             // \# (address-of)
-  tok_arrow = -82,            // -> (pointer member access)
+  tok_unsafe = -85,           // unsafe
+  tok_at = -86,               // @ (dereference/pointer type)
+  tok_hash = -87,             // \# (address-of)
+  tok_arrow = -88,            // -> (pointer member access)
 
   // reference type
-  tok_ref = -83,              // ref
+  tok_ref = -89,              // ref
 
   // interpolated string tokens
-  tok_interpolated_string_start = -84,    // $"
-  tok_interpolated_string_segment = -85,
-  tok_interpolated_string_end = -86,      // "
-  tok_interpolated_expr_start = -87,      // `
-  tok_interpolated_expr_end = -88,        // `
+  tok_interpolated_string_start = -90,    // $"
+  tok_interpolated_string_segment = -91,
+  tok_interpolated_string_end = -92,      // "
+  tok_interpolated_expr_start = -93,      // `
+  tok_interpolated_expr_end = -94,        // `
 
   // nullity operators
-  tok_nullable = -89,               // ? (nullable type)
-  tok_null_safe_access = -90,       // ?. (null-safe member access)
-  tok_null_array_access = -91,      // ?[ (null-safe array access)
-  tok_null_coalescing = -92,        // ?? (null-coalescing operator)
-  tok_null_coalescing_assign = -93, // ??= (null-coalescing assignment)
+  tok_nullable = -95,               // ? (nullable type)
+  tok_null_safe_access = -96,       // ?. (null-safe member access)
+  tok_null_array_access = -97,      // ?[ (null-safe array access)
+  tok_null_coalescing = -98,        // ?? (null-coalescing operator)
+  tok_null_coalescing_assign = -99, // ??= (null-coalescing assignment)
 
   // error token
-  tok_error = -94             // error during lexing
+  tok_error = -100            // error during lexing
 };
 
 // gettok - Return the next token from standard input.

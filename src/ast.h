@@ -39,7 +39,8 @@ struct TypeInfo {
 
 enum class AggregateKind : uint8_t {
   Struct,
-  Class
+  Class,
+  Interface
 };
 
 enum class AccessFlag : uint8_t {
@@ -860,6 +861,18 @@ public:
   llvm::Value *codegen_ptr() override;
 };
 
+/// BaseExprAST - Expression class for 'base' keyword in class methods.
+class BaseExprAST : public ExprAST {
+public:
+  BaseExprAST() = default;
+
+  llvm::Value *codegen() override;
+  llvm::Value *codegen_ptr() override;
+
+private:
+  mutable bool ReportedError = false;
+};
+
 enum class MethodKind : uint8_t {
   Constructor,
   Regular,
@@ -868,6 +881,7 @@ enum class MethodKind : uint8_t {
 
 struct MethodDefinition {
   std::unique_ptr<FunctionAST> Function;
+  std::unique_ptr<PrototypeAST> Prototype;
   MemberModifiers Modifiers;
   MethodKind Kind = MethodKind::Regular;
   std::string DisplayName;
@@ -880,13 +894,26 @@ struct MethodDefinition {
       : Function(std::move(Function)), Modifiers(Modifiers), Kind(Kind),
         DisplayName(std::move(DisplayName)) {}
 
+  MethodDefinition(std::unique_ptr<PrototypeAST> Prototype,
+                   MemberModifiers Modifiers,
+                   MethodKind Kind,
+                   std::string DisplayName)
+      : Prototype(std::move(Prototype)), Modifiers(Modifiers), Kind(Kind),
+        DisplayName(std::move(DisplayName)) {}
+
   FunctionAST *get() const { return Function.get(); }
   std::unique_ptr<FunctionAST> takeFunction() { return std::move(Function); }
+  PrototypeAST *getPrototype() const {
+    if (Function)
+      return Function->getProto();
+    return Prototype.get();
+  }
   const MemberModifiers &getModifiers() const { return Modifiers; }
   MethodKind getKind() const { return Kind; }
   const std::string &getDisplayName() const { return DisplayName; }
   void markImplicitThisInjected() { HasImplicitThis = true; }
   bool hasImplicitThis() const { return HasImplicitThis; }
+  bool hasBody() const { return static_cast<bool>(Function); }
   bool isStatic() const {
     return static_cast<uint8_t>(Modifiers.storage & StorageFlag::Static) != 0;
   }
@@ -903,6 +930,9 @@ class StructAST {
   std::vector<MethodDefinition> Methods;
   std::vector<std::string> BaseTypes;
   std::vector<std::string> GenericParameters;
+  std::optional<std::string> BaseClass;
+  std::vector<std::string> InterfaceTypes;
+  bool IsAbstract = false;
 
 public:
   StructAST(AggregateKind Kind,
@@ -924,6 +954,16 @@ public:
   std::vector<MethodDefinition> &getMethods() { return Methods; }
   const std::vector<std::string> &getBaseTypes() const { return BaseTypes; }
   const std::vector<std::string> &getGenericParameters() const { return GenericParameters; }
+  const std::optional<std::string> &getBaseClass() const { return BaseClass; }
+  const std::vector<std::string> &getInterfaces() const { return InterfaceTypes; }
+  bool isAbstract() const { return IsAbstract; }
+  bool isInterface() const { return Kind == AggregateKind::Interface; }
+
+  void setBaseClass(std::optional<std::string> Base) { BaseClass = std::move(Base); }
+  void setInterfaces(std::vector<std::string> Interfaces) { InterfaceTypes = std::move(Interfaces); }
+  void setAbstract(bool Abstract) { IsAbstract = Abstract; }
+  void appendBaseTypes(std::vector<std::string> bases) { BaseTypes = std::move(bases); }
+  void setGenericParameters(std::vector<std::string> Generics) { GenericParameters = std::move(Generics); }
 };
 
 // Initialize LLVM module

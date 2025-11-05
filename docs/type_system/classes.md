@@ -142,3 +142,193 @@ class Ticker
 - The existing access-control diagnostics (`read-only outside definition`, `Cannot call private member`, etc.) remain unchanged.
 
 These rules keep classes aligned with the modern expectations of type and memory safety. Static fields require initialization before use, and instance fields must be handled in every constructor, but Hybrid strengthens them with explicit compiler tracking so that mistakes surface immediately rather than resulting in default-initialized values at runtime.
+
+## Inheritance
+
+Classes participate in single inheritance and interface implementation. The language enforces the following rules:
+
+- A class may inherit from **one** base class and implement zero or more interfaces using the `inherits` clause: `class Player inherits Entity, Drawable`.
+- Interfaces are pure contracts. They cannot declare fields or constructors and every member is implicitly abstract.
+- Classes that declare an interface must implement all of its members. Implementations may be inherited from the base class; otherwise the derived class must provide an override.
+- Use `virtual` on base class members that may be customised and `override` in derived classes. Attempting to override a non-virtual member produces a diagnostic.
+- Mark a class `abstract` to allow abstract members. Non-abstract classes cannot declare abstract methods and must provide concrete implementations for any abstract member inherited from the base hierarchy.
+- `protected` members are visible inside the declaring class and any subclass. Access from unrelated types is rejected.
+- `base` expressions are only valid inside instance methods of a class that declares a base class. They allow you to invoke the base implementation or access protected helpers: `base.UpdatePosition()`.
+
+Example:
+
+```cs
+abstract class Entity
+{
+    protected int health
+
+    Entity()
+    {
+        this.health = 100
+    }
+
+    virtual void TakeDamage(int amount)
+    {
+        this.health -= amount
+    }
+
+    abstract void Draw()
+}
+
+interface Drawable
+{
+    void Draw()
+}
+
+class Player inherits Entity, Drawable
+{
+    Player(int hp)
+    {
+        this.health = hp
+    }
+
+    override void TakeDamage(int amount)
+    {
+        base.TakeDamage(amount / 2)
+    }
+
+    override void Draw()
+    {
+        // render the player
+    }
+}
+```
+
+Attempting to omit an interface member or forget to override an abstract base method results in a compile-time error, keeping derived classes honest.
+
+### Keyword reference
+
+| Keyword | Applies to | Meaning |
+| --- | --- | --- |
+| `inherits` | class/interface declarations | Lists a single base class followed by any number of interfaces. |
+| `abstract` | class or method | Marks a class as non-instantiable and signals members without implementations. Abstract methods are implicitly virtual. |
+| `interface` | type declaration | Declares a contract with only abstract, non-field members. Interfaces cannot declare fields or constructors. |
+| `virtual` | methods | Allows overriding in derived classes. Only meaningful on instance methods. |
+| `override` | methods | Replaces a virtual or abstract member from the base class hierarchy. Signature must match the overridden method. |
+| `protected` | fields/methods | Grants read/write/call access inside the declaring class and any subclasses. |
+| `base` | expressions | Evaluates to the current instance viewed as the base class. Valid only inside instance methods on classes with a base. |
+
+### Declaring a base class
+
+Write the base class first in the `inherits` list:
+
+```cs
+class Button inherits Widget, Clickable, Accessible
+{
+    // ...
+}
+```
+
+- Only classes may specify a base class. Interfaces may extend other interfaces but cannot derive from classes.
+- If the first type resolves to an interface, the compiler treats the class as having no base class and adds that type to the interface list.
+- Inheritance cycles (direct or indirect) produce a diagnostic.
+- Derived constructors automatically receive `this` pointing at the derived storage. Use the usual initializer logic as there is no implicit base constructor chaining yet, so call helpers via `base` if needed.
+
+### Interfaces as contracts
+
+Interfaces collect the members a type must provide:
+
+```cs
+interface Clickable
+{
+    void Click()
+    void DrawHighlight()
+}
+
+class Checkbox inherits Widget, Clickable
+{
+    override void DrawHighlight() { /* ... */ }
+    override void Click() { /* ... */ }
+}
+```
+
+- Interface members are implicitly abstract; adding a body emits `Interfaces cannot declare fields` / `Abstract methods cannot have bodies`.
+- A class may inherit implementations from its base class. If the base class already implements the interface method, the derived class does not have to restate it.
+- Missing implementations trigger `Class 'Foo' does not implement interface member 'Interface.Member'`.
+
+### Virtual and override semantics
+
+- Mark base class members with `virtual` (or `abstract`) to allow specialisation. Leaving a method non-virtual forbids overrides in derived classes.
+- Derived classes must use `override` to replace virtual members. Omitting the keyword produces `Method 'Bar' does not override a base class method`.
+- Attempting to override a non-virtual member emits `Method 'Bar' cannot override non-virtual member 'Baz'`.
+- Overrides must match the signature (parameter types, ref modifiers, and return type). The compiler relies on the stored metadata to verify slot compatibility.
+
+### Abstract classes and methods
+
+- `abstract class` declarations cannot be instantiated directly.
+- Abstract classes may contain a mix of abstract and concrete members. Every abstract method must be implemented by the first concrete descendant; otherwise `Class 'Foo' must override abstract member 'Bar' defined in 'Base'`.
+- Abstract members imply `virtual`; you do not need to add both keywords.
+- Abstract methods cannot be static. Static abstract members produce `Abstract method 'Foo' of class 'Bar' cannot be static`.
+
+### Protected members
+
+`protected` strikes a balance between `private` and `public`:
+
+```cs
+class Shape
+{
+    protected double area
+}
+
+class Circle inherits Shape
+{
+    void Resize(double r)
+    {
+        this.area = r * r * Math.PI // ok: within subclass
+    }
+}
+
+void Example()
+{
+    Shape s = /* ... */
+    double x = s.area   // error: Cannot read protected member 'area' without inheriting from it
+}
+```
+
+- Protected visibility propagates through the inheritance chain. Derived classes can read and write these members; other code cannot.
+- Attempts to access protected members from unrelated types produce `Cannot read protected member 'Member' of class 'Owner' without inheriting from it`.
+
+### Using `base`
+
+`base` reuses existing logic from the superclass:
+
+```cs
+class LoggingButton inherits Button
+{
+    override void Click()
+    {
+        Logger.Info("click")
+        base.Click()  // reuses Button.Click
+    }
+
+    static void Helper()
+    {
+        base.Click() // error: 'base' may only be used inside instance methods
+    }
+}
+```
+
+- Only valid in instance methods and constructors.
+- If the class lacks a base class, `Type 'Foo' does not have a base class` is emitted.
+- When the derived and base types have the same layout (Hybrid classes always use value semantics), `base` performs a bitcast to the base view and then reuses the base implementation.
+
+### Diagnostics for inheritance
+
+The compiler surfaces precise errors to keep hierarchies correct. Examples include:
+
+- `Class 'Foo' can only inherit from another class` – triggered when a non-class type appears first in the `inherits` list.
+- `Interface 'Foo' can only inherit from other interfaces` – ensures interfaces do not derive from classes.
+- `Inheritance cycle detected for type 'Foo'` – prevents recursive hierarchies.
+- `Class 'Foo' does not implement interface member 'Interface.Member'` – missing interface implementation.
+- `Class 'Foo' must override abstract member 'Base.Member' defined in 'Base'` – concrete class failed to supply a definition.
+- `Static method 'Foo' cannot be marked override` / `Abstract method 'Foo' cannot be static` – invalid modifier combinations.
+- `Method 'Foo' does not override a base class method` – `override` used without a matching virtual base member.
+- `Protected member 'Bar' ... without inheriting from it` – invalid access from outside the hierarchy.
+- `'base' may only be used inside instance methods` / `Type 'Foo' does not have a base class` – misuse of the `base` expression.
+
+Together these rules provide a predictable single-inheritance model with interface-based polymorphism, while keeping Hybrid’s value semantics and explicit construction guarantees intact.
