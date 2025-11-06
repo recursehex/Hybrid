@@ -22,7 +22,7 @@ class Door
     void Knock()
     {
         this.knocks++
-        if (this.opens < this.maxOpens)
+        if this.opens < this.maxOpens
         {
             this.opens++
         }

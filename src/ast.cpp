@@ -1798,6 +1798,33 @@ static bool ensureMemberInitializedForMutation(MemberAccessExprAST &member) {
   return false;
 }
 
+
+static std::optional<std::string>
+resolveStaticFieldOwnerInCurrentContext(const std::string &memberName) {
+  const ActiveCompositeContext *ctx = currentCompositeContext();
+  if (!ctx)
+    return std::nullopt;
+
+  std::set<std::string> visited;
+  std::string lookupName = ctx->name;
+
+  while (!lookupName.empty() && visited.insert(lookupName).second) {
+    const CompositeTypeInfo *info = lookupCompositeInfo(lookupName);
+    if (!info)
+      break;
+
+    if (info->staticFieldModifiers.count(memberName) != 0)
+      return lookupName;
+
+    if (info->baseClass)
+      lookupName = *info->baseClass;
+    else
+      break;
+  }
+
+  return std::nullopt;
+}
+
 struct MemberFieldAssignmentInfo {
   llvm::Value *fieldPtr = nullptr;
   llvm::Type *fieldType = nullptr;
@@ -4245,6 +4272,16 @@ llvm::Value *VariableExprAST::codegen_ptr() {
     return G;
   }
 
+  if (auto owner = resolveStaticFieldOwnerInCurrentContext(getName())) {
+    auto object = std::make_unique<VariableExprAST>(*owner);
+    MemberAccessExprAST synthetic(std::move(object), getName());
+    llvm::Value *Ptr = synthetic.codegen_ptr();
+    if (!Ptr)
+      return nullptr;
+    setTypeName(synthetic.getTypeName());
+    return Ptr;
+  }
+
   return LogErrorV("Unknown variable name for increment/decrement");
 }
 
@@ -4449,6 +4486,16 @@ llvm::Value *VariableExprAST::codegen() {
     }
 
     return Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
+  }
+
+  if (auto owner = resolveStaticFieldOwnerInCurrentContext(getName())) {
+    auto object = std::make_unique<VariableExprAST>(*owner);
+    MemberAccessExprAST synthetic(std::move(object), getName());
+    llvm::Value *Value = synthetic.codegen();
+    if (!Value)
+      return nullptr;
+    setTypeName(synthetic.getTypeName());
+    return Value;
   }
 
   return LogErrorV(("Unknown variable name: " + getName()).c_str());
