@@ -31,6 +31,7 @@ struct FunctionOverload {
   bool isUnsafe = false;
   bool isExtern = false;
   llvm::Function *function = nullptr;
+  bool isGenericInstantiation = false;
 };
 
 struct CompositeMemberInfo {
@@ -44,6 +45,8 @@ struct CompositeMemberInfo {
   std::vector<bool> parameterIsRef;
   bool returnsByRef = false;
   unsigned vtableSlot = std::numeric_limits<unsigned>::max();
+  bool isGenericTemplate = false;
+  unsigned genericArity = 0;
 };
 
 struct CompositeTypeInfo {
@@ -78,6 +81,7 @@ struct CompositeTypeInfo {
   std::map<std::string, unsigned> interfaceMethodSlotMap;
   std::optional<std::string> thisOverride;
   std::map<std::string, TypeInfo> typeArgumentBindings;
+  std::map<std::string, std::vector<std::string>> genericMethodInstantiations;
 };
 
 struct ActiveCompositeContext {
@@ -107,6 +111,7 @@ struct CodegenContext {
   std::set<std::string> initializedStaticFields;
 
   std::map<std::string, std::vector<FunctionOverload>> functionOverloads;
+  std::set<std::string> instantiatedGenericFunctions;
 
   std::vector<llvm::BasicBlock *> loopExitBlocks;
   std::vector<llvm::BasicBlock *> loopContinueBlocks;
@@ -134,6 +139,7 @@ inline void CodegenContext::reset() {
   compositeMetadata.clear();
   initializedStaticFields.clear();
   functionOverloads.clear();
+  instantiatedGenericFunctions.clear();
   loopExitBlocks.clear();
   loopContinueBlocks.clear();
   nonNullFactsStack.clear();

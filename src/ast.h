@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <utility>
 #include "concepts.h"
@@ -742,7 +743,8 @@ public:
 private:
   llvm::Value *emitResolvedCall(const std::string &callee,
                                 std::vector<llvm::Value *> ArgValues,
-                                const std::vector<bool> &ArgIsRef);
+                                const std::vector<bool> &ArgIsRef,
+                                bool preferGeneric = false);
   llvm::Value *codegenMemberCall(MemberAccessExprAST &member);
 };
 
@@ -834,15 +836,21 @@ public:
 class MemberAccessExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Object;
   std::string MemberName;
+  std::string GenericArguments;
 
 public:
-  MemberAccessExprAST(std::unique_ptr<ExprAST> Object, const std::string &MemberName)
-      : Object(std::move(Object)), MemberName(MemberName) {}
+  MemberAccessExprAST(std::unique_ptr<ExprAST> Object, std::string MemberName,
+                      std::string GenericArguments = {})
+      : Object(std::move(Object)),
+        MemberName(std::move(MemberName)),
+        GenericArguments(std::move(GenericArguments)) {}
   
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
   ExprAST *getObject() const { return Object.get(); }
   const std::string &getMemberName() const { return MemberName; }
+  bool hasExplicitGenerics() const { return !GenericArguments.empty(); }
+  const std::string &getGenericArguments() const { return GenericArguments; }
 };
 
 /// NullSafeAccessExprAST - Expression class for null-safe member access (e.g. obj?.field).
@@ -894,6 +902,7 @@ struct MethodDefinition {
   MethodKind Kind = MethodKind::Regular;
   std::string DisplayName;
   bool HasImplicitThis = false;
+  PrototypeAST *PrototypeView = nullptr;
 
   MethodDefinition(std::unique_ptr<FunctionAST> Function,
                    MemberModifiers Modifiers,
@@ -914,7 +923,9 @@ struct MethodDefinition {
   PrototypeAST *getPrototype() const {
     if (Function)
       return Function->getProto();
-    return Prototype.get();
+    if (Prototype)
+      return Prototype.get();
+    return PrototypeView;
   }
   const MemberModifiers &getModifiers() const { return Modifiers; }
   MethodKind getKind() const { return Kind; }
@@ -922,6 +933,7 @@ struct MethodDefinition {
   void markImplicitThisInjected() { HasImplicitThis = true; }
   bool hasImplicitThis() const { return HasImplicitThis; }
   bool hasBody() const { return static_cast<bool>(Function); }
+  void setPrototypeView(PrototypeAST *proto) { PrototypeView = proto; }
   bool isStatic() const {
     return static_cast<uint8_t>(Modifiers.storage & StorageFlag::Static) != 0;
   }
@@ -992,6 +1004,12 @@ llvm::Module *getModule();
 
 void RegisterGenericTemplate(std::unique_ptr<StructAST> templ);
 StructAST *FindGenericTemplate(const std::string &name);
+void RegisterGenericFunctionTemplate(std::unique_ptr<FunctionAST> templ);
+FunctionAST *FindGenericFunctionTemplate(const std::string &name,
+                                         std::size_t genericArity);
+llvm::Function *InstantiateGenericFunction(
+    const std::string &name, const std::vector<TypeInfo> &typeArguments,
+    const std::map<std::string, TypeInfo> *additionalBindings = nullptr);
 
 // Check if currently in an unsafe context
 bool isInUnsafeContext();

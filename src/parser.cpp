@@ -1569,6 +1569,7 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       // Member access
       getNextToken(); // eat '.'
       std::string MemberName;
+      std::string MemberGenericSuffix;
       if (CurTok == tok_identifier) {
         MemberName = IdentifierStr;
         getNextToken();
@@ -1579,7 +1580,20 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         LogError("Expected member name after '.'");
         return nullptr;
       }
-      LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName);
+      std::string DecoratedName = MemberName;
+      if (!ParseOptionalGenericArgumentList(DecoratedName))
+        return nullptr;
+      if (DecoratedName.size() > MemberName.size()) {
+        MemberGenericSuffix = DecoratedName.substr(MemberName.size());
+        SkipNewlines();
+        if (CurTok != '(') {
+          reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
+                              "Use parentheses to invoke the method after specifying explicit type arguments.");
+          return nullptr;
+        }
+      }
+      LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
+                                                  std::move(MemberGenericSuffix));
     } else if (CurTok == tok_null_safe_access) {
       // Null-safe member access
       getNextToken(); // eat '?.'
@@ -1589,6 +1603,14 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       }
       std::string MemberName = IdentifierStr;
       getNextToken(); // eat member name
+      std::string DecoratedName = MemberName;
+      if (!ParseOptionalGenericArgumentList(DecoratedName))
+        return nullptr;
+      if (DecoratedName.size() > MemberName.size()) {
+        reportCompilerError("Generic arguments are not supported on null-safe member access",
+                            "Invoke the member with '.' instead of '?.' when providing explicit type arguments.");
+        return nullptr;
+      }
       LHS = std::make_unique<NullSafeAccessExprAST>(std::move(LHS), MemberName);
     } else if (CurTok == tok_arrow) {
       // Pointer member access (-> is syntactic sugar for (@ptr).member)
@@ -1603,9 +1625,23 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       }
       std::string MemberName = IdentifierStr;
       getNextToken(); // eat member name
+      std::string MemberGenericSuffix;
+      std::string DecoratedName = MemberName;
+      if (!ParseOptionalGenericArgumentList(DecoratedName))
+        return nullptr;
+      if (DecoratedName.size() > MemberName.size()) {
+        MemberGenericSuffix = DecoratedName.substr(MemberName.size());
+        SkipNewlines();
+        if (CurTok != '(') {
+          reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
+                              "Use parentheses to invoke the method after specifying explicit type arguments.");
+          return nullptr;
+        }
+      }
       // Create (@ptr).member
       auto Deref = std::make_unique<UnaryExprAST>("@", std::move(LHS), true);
-      LHS = std::make_unique<MemberAccessExprAST>(std::move(Deref), MemberName);
+      LHS = std::make_unique<MemberAccessExprAST>(std::move(Deref), MemberName,
+                                                  std::move(MemberGenericSuffix));
     } else if (CurTok == '(') {
       std::vector<std::unique_ptr<ExprAST>> Args;
       if (!ParseArgumentList(Args))
@@ -2815,10 +2851,15 @@ bool ParseTypeIdentifier(bool isRef) {
 
   SkipNewlines();
 
+  std::vector<std::string> genericParams;
+  if (ParseGenericParameterList(genericParams))
+    SkipNewlines();
+
   // Check what follows
   if (CurTok == '(') {
     // It's a function definition
     // Need to parse the full prototype and then the body
+    GenericParameterScope parameterScope(genericParams);
     getNextToken(); // eat '('
     SkipNewlines();
     
@@ -2883,7 +2924,9 @@ bool ParseTypeIdentifier(bool isRef) {
     
     // Create prototype
     TypeInfo returnInfo = buildDeclaredTypeInfo(Type, false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(returnInfo), Name, std::move(Args));
+    auto Proto = std::make_unique<PrototypeAST>(std::move(returnInfo), Name,
+                                                std::move(Args), false, false,
+                                                std::move(genericParams));
     
     // Parse the body
     auto Body = ParseBlock();
@@ -2893,13 +2936,17 @@ bool ParseTypeIdentifier(bool isRef) {
     }
     
     auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-    fprintf(stderr, "Parsed function successfully, generating code...\n");
-    if (auto FnIR = Fn->codegen()) {
-      fprintf(stderr, "Generated function IR:\n");
-      FnIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+    if (Fn->getProto()->getGenericParameters().empty()) {
+      fprintf(stderr, "Parsed function successfully, generating code...\n");
+      if (auto FnIR = Fn->codegen()) {
+        fprintf(stderr, "Generated function IR:\n");
+        FnIR->print(llvm::errs());
+        fprintf(stderr, "\n");
+      } else {
+        fprintf(stderr, "Error: Failed to generate IR for function\n");
+      }
     } else {
-      fprintf(stderr, "Error: Failed to generate IR for function\n");
+      RegisterGenericFunctionTemplate(std::move(Fn));
     }
     return true;
   } else if (CurTok == '=') {
@@ -3089,7 +3136,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   bool seenThisOverride = false;
   bool hasConstructor = false;
 
-  auto parseConstructor = [&](MemberModifiers modifiers) -> bool {
+  auto parseConstructor = [&](MemberModifiers modifiers,
+                              std::vector<std::string> ctorGenericParams) -> bool {
+    GenericParameterScope ctorScope(ctorGenericParams);
     getNextToken(); // eat '('
     SkipNewlines();
 
@@ -3154,7 +3203,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       return false;
 
     TypeInfo ctorReturn = buildDeclaredTypeInfo(compositeName, false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(ctorReturn), compositeName, std::move(Args));
+    auto Proto = std::make_unique<PrototypeAST>(
+        std::move(ctorReturn), compositeName, std::move(Args),
+        false, false, std::move(ctorGenericParams));
     auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     Methods.emplace_back(std::move(Constructor), modifiers, MethodKind::Constructor, compositeName);
     hasConstructor = true;
@@ -3171,6 +3222,13 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
     std::vector<Parameter> Args;
     while (CurTok != ')' && CurTok != tok_eof) {
+      bool paramIsRef = false;
+      if (CurTok == tok_ref) {
+        paramIsRef = true;
+        getNextToken();
+        SkipNewlines();
+      }
+
       if (!IsValidType()) {
         LogError("Expected parameter type");
         return false;
@@ -3189,8 +3247,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       Parameter param;
       param.Type = ParamType;
       param.Name = ParamName;
-      param.IsRef = false;
-      param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
+      param.IsRef = paramIsRef;
+      param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
       Args.push_back(std::move(param));
 
       if (CurTok == ')')
@@ -3260,6 +3318,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       getNextToken();
       SkipNewlines();
 
+      std::vector<std::string> ctorGenericParams;
+      if (ParseGenericParameterList(ctorGenericParams))
+        SkipNewlines();
+
+      if (!ctorGenericParams.empty() && CurTok != '(') {
+        reportCompilerError("Generic parameter list must be followed by '(' in constructor declarations");
+        return nullptr;
+      }
+
       if (CurTok == '(') {
         if (kind == AggregateKind::Interface) {
           reportCompilerError("Interfaces cannot declare constructors");
@@ -3275,7 +3342,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
           return nullptr;
         }
 
-        if (!parseConstructor(modifiers))
+        if (!parseConstructor(modifiers, std::move(ctorGenericParams)))
           return nullptr;
         continue;
       }

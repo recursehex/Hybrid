@@ -147,6 +147,16 @@ genericTemplateRegistry() {
   return registry;
 }
 
+struct GenericFunctionTemplate {
+  std::unique_ptr<FunctionAST> function;
+};
+
+static std::map<std::string, std::vector<GenericFunctionTemplate>> &
+genericFunctionTemplateRegistry() {
+  static std::map<std::string, std::vector<GenericFunctionTemplate>> registry;
+  return registry;
+}
+
 struct GenericInstantiationContext {
   std::string nameOverride;
 };
@@ -171,6 +181,71 @@ StructAST *FindGenericTemplate(const std::string &name) {
   if (it == registry.end())
     return nullptr;
   return it->second.get();
+}
+
+void RegisterGenericFunctionTemplate(std::unique_ptr<FunctionAST> templ) {
+  if (!templ)
+    return;
+  PrototypeAST *proto = templ->getProto();
+  if (!proto)
+    return;
+  genericFunctionTemplateRegistry()[proto->getName()].push_back(
+      GenericFunctionTemplate{std::move(templ)});
+}
+
+FunctionAST *FindGenericFunctionTemplate(const std::string &name,
+                                         std::size_t genericArity) {
+  auto &registry = genericFunctionTemplateRegistry();
+  auto it = registry.find(name);
+  if (it == registry.end())
+    return nullptr;
+  for (auto &entry : it->second) {
+    if (!entry.function)
+      continue;
+    const auto &params = entry.function->getProto()->getGenericParameters();
+    if (params.size() == genericArity)
+      return entry.function.get();
+  }
+  return nullptr;
+}
+
+static const std::vector<GenericFunctionTemplate> *
+lookupGenericFunctionTemplates(const std::string &name) {
+  auto &registry = genericFunctionTemplateRegistry();
+  auto it = registry.find(name);
+  if (it == registry.end())
+    return nullptr;
+  return &it->second;
+}
+
+static std::vector<std::size_t>
+collectGenericArities(const std::vector<GenericFunctionTemplate> &templates) {
+  std::set<std::size_t> counts;
+  for (const auto &entry : templates) {
+    if (!entry.function)
+      continue;
+    counts.insert(entry.function->getProto()->getGenericParameters().size());
+  }
+  return std::vector<std::size_t>(counts.begin(), counts.end());
+}
+
+static std::string formatArityList(const std::vector<std::size_t> &arities) {
+  if (arities.empty())
+    return "0";
+  if (arities.size() == 1)
+    return std::to_string(arities.front());
+
+  std::string result;
+  for (std::size_t i = 0; i < arities.size(); ++i) {
+    if (i == arities.size() - 1) {
+      result += std::to_string(arities[i]);
+    } else if (i == arities.size() - 2) {
+      result += std::to_string(arities[i]) + " or ";
+    } else {
+      result += std::to_string(arities[i]) + ", ";
+    }
+  }
+  return result;
 }
 
 class GenericInstantiationScope {
@@ -1495,6 +1570,8 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
       existing->mangledName = mangledName;
     existing->isUnsafe = proto.isUnsafe();
     existing->isExtern = proto.isExtern();
+    if (!proto.getGenericParameters().empty())
+      existing->isGenericInstantiation = true;
     return *existing;
   }
 
@@ -1506,6 +1583,7 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
   entry.parameterIsRef = std::move(paramIsRef);
   entry.isUnsafe = proto.isUnsafe();
   entry.isExtern = proto.isExtern();
+  entry.isGenericInstantiation = !proto.getGenericParameters().empty();
 
   auto &overloads = CG.functionOverloads[proto.getName()];
   overloads.push_back(std::move(entry));
@@ -1517,6 +1595,133 @@ static FunctionOverload *lookupFunctionOverload(const PrototypeAST &proto) {
   std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
   return findRegisteredOverload(proto.getName(), proto.getReturnTypeInfo(),
                                 proto.returnsByRef(), paramTypes, paramIsRef);
+}
+
+class FunctionInstantiationScope {
+public:
+  FunctionInstantiationScope()
+      : ctx(currentCodegen()),
+        savedInsertBlock(Builder->GetInsertBlock()),
+        hasInsertPoint(savedInsertBlock != nullptr),
+        savedNamedValues(ctx.namedValues),
+        savedLocalTypes(ctx.localTypes),
+        savedArraySizes(ctx.arraySizes),
+        savedNonNullFacts(ctx.nonNullFactsStack),
+        savedLoopExitBlocks(ctx.loopExitBlocks),
+        savedLoopContinueBlocks(ctx.loopContinueBlocks) {
+    if (hasInsertPoint)
+      savedInsertPoint = Builder->GetInsertPoint();
+  }
+
+  FunctionInstantiationScope(const FunctionInstantiationScope &) = delete;
+  FunctionInstantiationScope &
+  operator=(const FunctionInstantiationScope &) = delete;
+
+  ~FunctionInstantiationScope() {
+    ctx.namedValues = std::move(savedNamedValues);
+    ctx.localTypes = std::move(savedLocalTypes);
+    ctx.arraySizes = std::move(savedArraySizes);
+    ctx.nonNullFactsStack = std::move(savedNonNullFacts);
+    ctx.loopExitBlocks = std::move(savedLoopExitBlocks);
+    ctx.loopContinueBlocks = std::move(savedLoopContinueBlocks);
+    if (hasInsertPoint)
+      Builder->SetInsertPoint(savedInsertBlock, savedInsertPoint);
+    else
+      Builder->ClearInsertionPoint();
+  }
+
+private:
+  CodegenContext &ctx;
+  llvm::BasicBlock *savedInsertBlock = nullptr;
+  llvm::BasicBlock::iterator savedInsertPoint;
+  bool hasInsertPoint = false;
+  std::map<std::string, llvm::Value *> savedNamedValues;
+  std::map<std::string, TypeInfo> savedLocalTypes;
+  std::map<std::string, std::vector<int64_t>> savedArraySizes;
+  std::vector<std::set<std::string>> savedNonNullFacts;
+  std::vector<llvm::BasicBlock *> savedLoopExitBlocks;
+  std::vector<llvm::BasicBlock *> savedLoopContinueBlocks;
+};
+
+llvm::Function *InstantiateGenericFunction(
+    const std::string &name, const std::vector<TypeInfo> &typeArguments,
+    const std::map<std::string, TypeInfo> *additionalBindings) {
+  auto &registry = genericFunctionTemplateRegistry();
+  auto it = registry.find(name);
+  if (it == registry.end())
+    return nullptr;
+
+  llvm::Function *primaryResult = nullptr;
+
+  for (auto &entry : it->second) {
+    FunctionAST *fn = entry.function.get();
+    if (!fn)
+      continue;
+
+    PrototypeAST *proto = fn->getProto();
+    if (!proto)
+      continue;
+
+    const auto &genericParams = proto->getGenericParameters();
+    if (genericParams.size() != typeArguments.size())
+      continue;
+
+    std::map<std::string, TypeInfo> substitutions;
+    if (additionalBindings)
+      substitutions = *additionalBindings;
+
+    bool duplicateBinding = false;
+    for (size_t idx = 0; idx < genericParams.size(); ++idx) {
+      const std::string &paramName = genericParams[idx];
+      const auto [itBinding, inserted] =
+          substitutions.emplace(paramName, typeArguments[idx]);
+      if (!inserted) {
+        if (!typeInfoEquals(itBinding->second, typeArguments[idx])) {
+          reportCompilerError(
+              "Conflicting bindings for generic parameter '" + paramName +
+                  "' while instantiating '" + name + "'",
+              "Ensure method-level generic parameters use unique names.");
+          duplicateBinding = true;
+          break;
+        }
+      }
+    }
+
+    if (duplicateBinding)
+      return nullptr;
+
+    GenericTypeBindingScope bindingScope(substitutions);
+
+    TypeInfo boundReturn = applyActiveTypeBindings(proto->getReturnTypeInfo());
+    std::vector<TypeInfo> boundParams = gatherParamTypes(proto->getArgs());
+    std::vector<bool> boundParamIsRef = gatherParamRefFlags(proto->getArgs());
+
+    if (FunctionOverload *existing =
+            findRegisteredOverload(proto->getName(), boundReturn,
+                                   proto->returnsByRef(), boundParams,
+                                   boundParamIsRef)) {
+      if (!existing->function)
+        existing->function =
+            TheModule->getFunction(existing->mangledName);
+      if (existing->function)
+        currentCodegen().instantiatedGenericFunctions.insert(
+            std::string(existing->function->getName()));
+      if (!primaryResult)
+        primaryResult = existing->function;
+      continue;
+    }
+
+    FunctionInstantiationScope instantiationScope;
+    llvm::Function *instantiated = fn->codegen();
+    if (!instantiated)
+      return nullptr;
+    currentCodegen().instantiatedGenericFunctions.insert(
+        std::string(instantiated->getName()));
+    if (!primaryResult)
+      primaryResult = instantiated;
+  }
+
+  return primaryResult;
 }
 
 struct ParsedTypeDescriptor {
@@ -6585,8 +6790,61 @@ llvm::Value *RefExprAST::codegen() {
   }
 }
 
+static bool parseExplicitTypeArgumentSuffix(const std::string &text,
+                                            std::string &baseName,
+                                            std::vector<TypeInfo> &typeArguments) {
+  size_t anglePos = text.find('<');
+  if (anglePos == std::string::npos) {
+    baseName = text;
+    typeArguments.clear();
+    return true;
+  }
+
+  auto closePos = findMatchingAngleInTypeName(text, anglePos);
+  if (!closePos || *closePos != text.size() - 1) {
+    reportCompilerError("Malformed generic argument list in '" + text + "'");
+    return false;
+  }
+
+  baseName = text.substr(0, anglePos);
+  std::string segment = text.substr(anglePos + 1, *closePos - anglePos - 1);
+  typeArguments = buildGenericArgumentTypeInfos(segment);
+  return true;
+}
+
 // Generate code for function calls, including struct constructors
 llvm::Value *CallExprAST::codegen() {
+  std::string decoratedCallee = getCallee();
+  std::string baseCallee = decoratedCallee;
+  std::vector<TypeInfo> explicitTypeArgs;
+  if (!parseExplicitTypeArgumentSuffix(decoratedCallee, baseCallee,
+                                       explicitTypeArgs))
+    return nullptr;
+  const auto *functionTemplates =
+      lookupGenericFunctionTemplates(baseCallee);
+  bool treatAsFunctionGenerics =
+      !explicitTypeArgs.empty() &&
+      FindGenericTemplate(baseCallee) == nullptr;
+  bool preferGeneric = treatAsFunctionGenerics;
+
+  if (!treatAsFunctionGenerics && explicitTypeArgs.empty() &&
+      functionTemplates && !functionTemplates->empty()) {
+    bool hasNonGenericOverload = false;
+    if (auto overloadIt = CG.functionOverloads.find(baseCallee);
+        overloadIt != CG.functionOverloads.end()) {
+      hasNonGenericOverload = std::ranges::any_of(
+          overloadIt->second,
+          [](const FunctionOverload &overload) {
+            return !overload.isGenericInstantiation;
+          });
+    }
+    if (!hasNonGenericOverload) {
+      reportCompilerError("Function '" + baseCallee +
+                          "' requires explicit type arguments");
+      return nullptr;
+    }
+  }
+
   if (hasCalleeExpr()) {
     if (auto *member = dynamic_cast<MemberAccessExprAST *>(getCalleeExpr()))
       return codegenMemberCall(*member);
@@ -6601,7 +6859,7 @@ llvm::Value *CallExprAST::codegen() {
   for (const auto &ArgExpr : getArgs()) {
     bool handled = false;
 
-    if (getCallee() == "print") {
+    if (baseCallee == "print") {
       std::string candidateName = baseCompositeName(ArgExpr->getTypeName());
       if (!candidateName.empty()) {
         auto metaIt = CG.compositeMetadata.find(candidateName);
@@ -6650,18 +6908,40 @@ llvm::Value *CallExprAST::codegen() {
     ArgValues.push_back(Value);
   }
 
-  if (getCallee().find('<') != std::string::npos)
-    lookupCompositeInfo(getCallee());
+  if (treatAsFunctionGenerics) {
+    if (!functionTemplates) {
+      reportCompilerError("Function '" + baseCallee +
+                          "' does not declare generic parameters");
+      return nullptr;
+    }
 
-  if (StructTypes.contains(getCallee())) {
-    setTypeName(getCallee());
+    const auto arities = collectGenericArities(*functionTemplates);
+    if (!std::ranges::any_of(
+            arities, [&](std::size_t arity) { return arity == explicitTypeArgs.size(); })) {
+      reportCompilerError("Function '" + baseCallee + "' expects " +
+                              formatArityList(arities) + " type argument(s)",
+                          "Provide exactly " + formatArityList(arities) +
+                              " type argument(s) when calling this generic function.");
+      return nullptr;
+    }
+
+    if (!InstantiateGenericFunction(baseCallee, explicitTypeArgs, nullptr))
+      return nullptr;
+  }
+
+  if (decoratedCallee.find('<') != std::string::npos)
+    lookupCompositeInfo(decoratedCallee);
+
+  if (StructTypes.contains(decoratedCallee)) {
+    setTypeName(decoratedCallee);
 
     llvm::Value *ConstructedValue =
-        emitResolvedCall(getCallee(), std::move(ArgValues), ArgIsRef);
+        emitResolvedCall(baseCallee, std::move(ArgValues), ArgIsRef,
+                         preferGeneric);
     if (!ConstructedValue)
       return nullptr;
 
-    llvm::StructType *StructType = StructTypes[getCallee()];
+    llvm::StructType *StructType = StructTypes[decoratedCallee];
     if (ConstructedValue->getType()->isPointerTy())
       return ConstructedValue;
 
@@ -6669,20 +6949,21 @@ llvm::Value *CallExprAST::codegen() {
       ConstructedValue = castToType(ConstructedValue, StructType);
 
     llvm::AllocaInst *StructAlloca = Builder->CreateAlloca(
-        StructType, nullptr, getCallee() + "_inst");
+        StructType, nullptr, decoratedCallee + "_inst");
     Builder->CreateStore(ConstructedValue, StructAlloca);
     return StructAlloca;
   }
 
-  return emitResolvedCall(getCallee(), std::move(ArgValues), ArgIsRef);
+  return emitResolvedCall(baseCallee, std::move(ArgValues), ArgIsRef,
+                          preferGeneric);
 }
 
 llvm::Value *CallExprAST::emitResolvedCall(
-    const std::string &callee, std::vector<llvm::Value *> ArgValues,
-    const std::vector<bool> &ArgIsRef) {
-  auto overloadIt = CG.functionOverloads.find(callee);
+    const std::string &calleeBase, std::vector<llvm::Value *> ArgValues,
+    const std::vector<bool> &ArgIsRef, bool preferGeneric) {
+  auto overloadIt = CG.functionOverloads.find(calleeBase);
   if (overloadIt == CG.functionOverloads.end())
-    return LogErrorV(("Unknown function referenced: " + callee).c_str());
+    return LogErrorV(("Unknown function referenced: " + calleeBase).c_str());
 
   struct CandidateResult {
     FunctionOverload *overload = nullptr;
@@ -6756,7 +7037,18 @@ llvm::Value *CallExprAST::emitResolvedCall(
   }
 
   if (viable.empty())
-    return LogErrorV(("No matching overload found for call to '" + callee + "'").c_str());
+    return LogErrorV(("No matching overload found for call to '" + calleeBase + "'").c_str());
+
+  if (preferGeneric) {
+    std::vector<CandidateResult> genericViable;
+    genericViable.reserve(viable.size());
+    for (const auto &candidate : viable) {
+      if (candidate.overload->isGenericInstantiation)
+        genericViable.push_back(candidate);
+    }
+    if (!genericViable.empty())
+      viable = std::move(genericViable);
+  }
 
   auto bestIt = std::min_element(
       viable.begin(), viable.end(),
@@ -6772,12 +7064,12 @@ llvm::Value *CallExprAST::emitResolvedCall(
       }));
 
   if (bestCount > 1)
-    return LogErrorV(("Ambiguous call to '" + callee + "'").c_str());
+    return LogErrorV(("Ambiguous call to '" + calleeBase + "'").c_str());
 
   FunctionOverload *chosen = bestIt->overload;
   llvm::Function *CalleeF = chosen->function;
   if (!CalleeF)
-    return LogErrorV(("Internal error: overload for '" + callee +
+    return LogErrorV(("Internal error: overload for '" + calleeBase +
                       "' lacks function definition").c_str());
 
   std::vector<llvm::Value *> CallArgs;
@@ -6889,6 +7181,68 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   const CompositeMemberInfo &memberInfo = methodIt->second;
+
+  std::vector<TypeInfo> methodTypeArgs;
+  if (member.hasExplicitGenerics()) {
+    std::string decoratedMemberName =
+        member.getMemberName() + member.getGenericArguments();
+    std::string parsedBase;
+    if (!parseExplicitTypeArgumentSuffix(decoratedMemberName, parsedBase,
+                                         methodTypeArgs))
+      return nullptr;
+    if (parsedBase != member.getMemberName()) {
+      reportCompilerError("Internal error: mismatched member name while parsing generic arguments");
+      return nullptr;
+    }
+  }
+
+  if (!methodTypeArgs.empty() && !memberInfo.isGenericTemplate) {
+    reportCompilerError("Method '" + memberInfo.signature +
+                        "' does not accept explicit type arguments");
+    return nullptr;
+  }
+
+  if (memberInfo.isGenericTemplate) {
+    if (methodTypeArgs.empty()) {
+      reportCompilerError("Method '" + memberInfo.signature +
+                          "' requires explicit type arguments");
+      return nullptr;
+    }
+
+    const auto *templates =
+        lookupGenericFunctionTemplates(memberInfo.signature);
+    if (!templates || templates->empty()) {
+      reportCompilerError("Internal error: generic method template '" +
+                          memberInfo.signature + "' is not registered");
+      return nullptr;
+    }
+
+    const auto arities = collectGenericArities(*templates);
+    if (!std::ranges::any_of(
+            arities, [&](std::size_t arity) { return arity == methodTypeArgs.size(); })) {
+      reportCompilerError("Method '" + memberInfo.signature + "' expects " +
+                              formatArityList(arities) + " type argument(s)",
+                          "Provide " + formatArityList(arities) +
+                              " type argument(s) for this generic method.");
+      return nullptr;
+    }
+
+    const std::map<std::string, TypeInfo> *additionalBindings =
+        &info->typeArgumentBindings;
+    llvm::Function *instantiated =
+        InstantiateGenericFunction(memberInfo.signature, methodTypeArgs,
+                                   additionalBindings);
+    if (!instantiated)
+      return nullptr;
+    if (auto infoRefIt = CG.compositeMetadata.find(ownerName);
+        infoRefIt != CG.compositeMetadata.end()) {
+      auto &records =
+          infoRefIt->second.genericMethodInstantiations[memberInfo.signature];
+      std::string mangled(instantiated->getName());
+      if (std::find(records.begin(), records.end(), mangled) == records.end())
+        records.push_back(std::move(mangled));
+    }
+  }
 
   if (!isStaticMethod && info->kind == AggregateKind::Interface) {
     if (!instancePtr)
@@ -7020,7 +7374,9 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   return emitResolvedCall(memberInfo.signature, std::move(ArgValues),
-                          ArgIsRef);
+                          ArgIsRef,
+                          memberInfo.isGenericTemplate &&
+                              member.hasExplicitGenerics());
 }
 
 //===----------------------------------------------------------------------===//
@@ -8953,6 +9309,15 @@ llvm::Type *StructAST::codegen() {
         continue;
 
       PrototypeAST *CtorProto = Method->getProto();
+      if (!CtorProto)
+        continue;
+
+      if (!CtorProto->getGenericParameters().empty()) {
+        MethodDef.setPrototypeView(CtorProto);
+        RegisterGenericFunctionTemplate(MethodDef.takeFunction());
+        continue;
+      }
+
       std::string ConstructorName = CtorProto->getMangledName();
       const auto &CtorArgs = CtorProto->getArgs();
 
@@ -9180,21 +9545,34 @@ llvm::Type *StructAST::codegen() {
     if (MethodDef.getKind() == MethodKind::ThisOverride)
       metadata.thisOverride = Proto->getName();
 
+    const bool methodIsGeneric =
+        !Proto->getGenericParameters().empty();
+    const bool methodHasBody = MethodDef.hasBody();
+
     CompositeMemberInfo memberInfo;
     memberInfo.modifiers = MethodDef.getModifiers();
     memberInfo.signature = Proto->getName();
-    if (MethodDef.hasBody())
-      memberInfo.mangledName = Proto->getMangledName();
     memberInfo.dispatchKey = methodKey;
    memberInfo.overridesSignature = overrideSignature;
     memberInfo.returnType = applyActiveTypeBindings(Proto->getReturnTypeInfo());
     memberInfo.parameterTypes = gatherParamTypes(Proto->getArgs());
     memberInfo.parameterIsRef = gatherParamRefFlags(Proto->getArgs());
     memberInfo.returnsByRef = Proto->returnsByRef();
+    memberInfo.isGenericTemplate = methodIsGeneric;
+    memberInfo.genericArity =
+        static_cast<unsigned>(Proto->getGenericParameters().size());
+    if (methodHasBody && !methodIsGeneric)
+      memberInfo.mangledName = Proto->getMangledName();
     metadata.methodInfo[MethodDef.getDisplayName()] = std::move(memberInfo);
 
-    if (!MethodDef.hasBody())
+    if (!methodHasBody)
       continue;
+
+    if (methodIsGeneric) {
+      MethodDef.setPrototypeView(Proto);
+      RegisterGenericFunctionTemplate(MethodDef.takeFunction());
+      continue;
+    }
 
     FunctionAST *Method = MethodDef.get();
     if (!Method)

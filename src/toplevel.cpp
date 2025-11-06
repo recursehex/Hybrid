@@ -24,6 +24,11 @@ void SetInteractiveMode(bool enabled) {
 
 void HandleDefinition() {
   if (auto FnAST = ParseDefinition()) {
+    if (!FnAST->getProto()->getGenericParameters().empty()) {
+      RegisterGenericFunctionTemplate(std::move(FnAST));
+      return;
+    }
+
     if (gInteractiveMode) fprintf(stderr, "Parsed function successfully, generating code...\n");
     if (auto FnIR = FnAST->codegen()) {
       if (gInteractiveMode) fprintf(stderr, "Generated function IR:\n");
