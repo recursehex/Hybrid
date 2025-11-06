@@ -257,9 +257,11 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
 /// lexer and updates CurTok with its results.
 int getNextToken() {
   ParserContext &parser = currentParser();
+  int prevToken = parser.curTok;
   if (parser.hasReplayTokens()) {
     ParserContext::PendingToken pending = parser.popReplayToken();
     parser.previousTokenLocation = parser.currentTokenLocation;
+    parser.previousToken = prevToken;
     parser.curTok = pending.token;
     parser.currentTokenLocation = pending.location;
     currentLexer().identifierStr.clear();
@@ -269,6 +271,7 @@ int getNextToken() {
     return parser.curTok;
   }
   parser.previousTokenLocation = parser.currentTokenLocation;
+  parser.previousToken = prevToken;
   int next = gettok();
   parser.curTok = next;
   parser.currentTokenLocation = currentLexer().tokenStart();
@@ -946,12 +949,24 @@ static bool ConvertParenInitializerToConstructor(std::unique_ptr<ExprAST> &Initi
   if (!paren)
     return false;
 
-  const std::string &compositeName = declInfo.typeName;
-  bool knownComposite =
-      StructNames.contains(compositeName) ||
-      ClassNames.contains(compositeName) ||
-      IsActiveStructName(compositeName) ||
-      IsActiveClassName(compositeName);
+  auto isKnownComposite = [](const std::string &name) {
+    return StructNames.contains(name) ||
+           ClassNames.contains(name) ||
+           IsActiveStructName(name) ||
+           IsActiveClassName(name);
+  };
+
+  const std::string &fullTypeName = declInfo.typeName;
+  std::string constructorName = fullTypeName;
+
+  bool knownComposite = isKnownComposite(fullTypeName);
+  if (!knownComposite && !declInfo.baseTypeName.empty() &&
+      declInfo.baseTypeName != fullTypeName) {
+    knownComposite = isKnownComposite(declInfo.baseTypeName);
+    if (knownComposite)
+      constructorName = fullTypeName;
+  }
+
   if (!knownComposite)
     return false;
 
@@ -964,7 +979,7 @@ static bool ConvertParenInitializerToConstructor(std::unique_ptr<ExprAST> &Initi
       args.push_back(std::move(single));
   }
 
-  Initializer = std::make_unique<CallExprAST>(compositeName, std::move(args));
+  Initializer = std::make_unique<CallExprAST>(constructorName, std::move(args));
   return true;
 }
 
@@ -1098,6 +1113,11 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   std::string IdName = IdentifierStr;
 
   getNextToken(); // eat identifier.
+
+  if (!ParseOptionalGenericArgumentList(IdName))
+    return nullptr;
+  SkipNewlines();
+
   if (CurTok == '[') {
     // Array indexing
     auto ArrayVar = std::make_unique<VariableExprAST>(IdName);
@@ -1379,6 +1399,21 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
   while (true) {
     int TokPrec = GetTokPrecedence();
 
+    if (CurTok == tok_if) {
+      ParserContext &parserCtx = currentParser();
+      int prevTok = parserCtx.previousToken;
+      bool locationsValid = parserCtx.previousTokenLocation.isValid() &&
+                            parserCtx.currentTokenLocation.isValid();
+      bool sameLine = locationsValid &&
+                      parserCtx.previousTokenLocation.line == parserCtx.currentTokenLocation.line;
+      bool atBoundary = prevTok == 0 || prevTok == tok_newline || prevTok == ';' ||
+                        prevTok == '{' || prevTok == '}' || prevTok == tok_eof ||
+                        prevTok == tok_else;
+
+      if (!sameLine || atBoundary)
+        return LHS;
+    }
+
     // If this is a binop that binds at least as tightly as the current binop,
     // Consume it, otherwise done
     if (TokPrec < ExprPrec)
@@ -1513,6 +1548,19 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       if (!LHS)
         return nullptr;
     } else if (CurTok == tok_inc || CurTok == tok_dec) {
+      ParserContext &parserCtx = currentParser();
+      bool locationsValid = parserCtx.previousTokenLocation.isValid() &&
+                            parserCtx.currentTokenLocation.isValid();
+      bool sameLine = locationsValid &&
+                      parserCtx.previousTokenLocation.line == parserCtx.currentTokenLocation.line;
+      bool atBoundary = parserCtx.previousToken == tok_newline ||
+                        parserCtx.previousToken == ';' ||
+                        parserCtx.previousToken == '{' ||
+                        parserCtx.previousToken == '}' ||
+                        parserCtx.previousToken == tok_eof ||
+                        parserCtx.previousToken == 0;
+      if (!sameLine || atBoundary)
+        break;
       // Postfix increment/decrement
       std::string OpStr = (CurTok == tok_inc) ? "++" : "--";
       getNextToken(); // eat the operator

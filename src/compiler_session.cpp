@@ -405,6 +405,7 @@ void ParserContext::reset(bool clearSymbols) {
   hadError = false;
   currentTokenLocation = {};
   previousTokenLocation = {};
+  previousToken = 0;
   structDefinitionStack.clear();
   classDefinitionStack.clear();
   tokenReplayBuffer.clear();

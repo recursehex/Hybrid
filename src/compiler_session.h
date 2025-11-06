@@ -82,6 +82,7 @@ struct ParserContext {
   bool hadError = false;
   SourceLocation currentTokenLocation{};
   SourceLocation previousTokenLocation{};
+  int previousToken = 0;
   struct PendingToken {
     int token = 0;
     SourceLocation location{};

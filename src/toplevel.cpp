@@ -119,6 +119,10 @@ void HandleUseStatement() {
 
 void HandleStructDefinition() {
   if (auto StructAST = ParseStructDefinition(AggregateKind::Struct)) {
+    if (StructAST->isGenericTemplate()) {
+      RegisterGenericTemplate(std::move(StructAST));
+      return;
+    }
     if (auto StructType = StructAST->codegen()) {
       if (gInteractiveMode) fprintf(stderr, "Generated struct type:\n");
       StructType->print(llvm::errs());
@@ -132,6 +136,10 @@ void HandleStructDefinition() {
 
 void HandleClassDefinition(bool isAbstract) {
   if (auto ClassAST = ParseStructDefinition(AggregateKind::Class, isAbstract)) {
+    if (ClassAST->isGenericTemplate()) {
+      RegisterGenericTemplate(std::move(ClassAST));
+      return;
+    }
     if (auto ClassType = ClassAST->codegen()) {
       if (gInteractiveMode) fprintf(stderr, "Generated class type:\n");
       ClassType->print(llvm::errs());
@@ -144,6 +152,10 @@ void HandleClassDefinition(bool isAbstract) {
 
 void HandleInterfaceDefinition(bool isAbstract = false) {
   if (auto InterfaceAST = ParseStructDefinition(AggregateKind::Interface, isAbstract)) {
+    if (InterfaceAST->isGenericTemplate()) {
+      RegisterGenericTemplate(std::move(InterfaceAST));
+      return;
+    }
     if (auto InterfaceType = InterfaceAST->codegen()) {
       if (gInteractiveMode) fprintf(stderr, "Generated interface type:\n");
       InterfaceType->print(llvm::errs());

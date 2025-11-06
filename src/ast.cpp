@@ -104,6 +104,122 @@ static bool convertUTF8LiteralToUTF16(const std::string &input,
 #define LoopContinueBlocks (CG.loopContinueBlocks)
 #define NonNullFacts (CG.nonNullFactsStack)
 
+static llvm::PointerType *pointerType(llvm::Type *elementType,
+                                      unsigned addressSpace = 0) {
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  auto *ptr = llvm::PointerType::get(elementType, addressSpace);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+  return ptr;
+}
+
+static TypeInfo applyActiveTypeBindings(const TypeInfo &info);
+static std::string applyActiveTypeBindingsToName(const std::string &typeName);
+static std::vector<std::string>
+applyActiveTypeBindingsToNames(const std::vector<std::string> &names);
+static std::optional<std::string>
+applyActiveTypeBindingsToOptionalName(const std::optional<std::string> &name);
+
+static bool ensureNoDuplicateGenericParameters(const std::vector<std::string> &params,
+                                               const std::string &contextDescription);
+
+class GenericTypeBindingScope {
+public:
+  explicit GenericTypeBindingScope(const std::map<std::string, TypeInfo> &bindings)
+      : active(true) {
+    currentCodegen().genericTypeBindingsStack.push_back(bindings);
+  }
+
+  GenericTypeBindingScope(const GenericTypeBindingScope &) = delete;
+  GenericTypeBindingScope &operator=(const GenericTypeBindingScope &) = delete;
+
+  ~GenericTypeBindingScope() {
+    if (active)
+      currentCodegen().genericTypeBindingsStack.pop_back();
+  }
+
+private:
+  bool active = false;
+};
+
+static std::map<std::string, std::unique_ptr<StructAST>> &
+genericTemplateRegistry() {
+  static std::map<std::string, std::unique_ptr<StructAST>> registry;
+  return registry;
+}
+
+struct GenericInstantiationContext {
+  std::string nameOverride;
+};
+
+static thread_local std::vector<GenericInstantiationContext>
+    ActiveInstantiationContexts;
+
+void RegisterGenericTemplate(std::unique_ptr<StructAST> templ) {
+  if (!templ)
+    return;
+  if (!ensureNoDuplicateGenericParameters(
+          templ->getGenericParameters(),
+          "type '" + templ->getName() + "'"))
+    return;
+  std::string key = templ->getName();
+  genericTemplateRegistry()[key] = std::move(templ);
+}
+
+StructAST *FindGenericTemplate(const std::string &name) {
+  auto &registry = genericTemplateRegistry();
+  auto it = registry.find(name);
+  if (it == registry.end())
+    return nullptr;
+  return it->second.get();
+}
+
+class GenericInstantiationScope {
+public:
+  explicit GenericInstantiationScope(std::string name) : active(true) {
+    ActiveInstantiationContexts.push_back({std::move(name)});
+  }
+
+  GenericInstantiationScope(const GenericInstantiationScope &) = delete;
+  GenericInstantiationScope &operator=(const GenericInstantiationScope &) = delete;
+
+  ~GenericInstantiationScope() {
+    if (active)
+      ActiveInstantiationContexts.pop_back();
+  }
+
+private:
+  bool active = false;
+};
+
+static const GenericInstantiationContext *currentInstantiationContext() {
+  if (ActiveInstantiationContexts.empty())
+    return nullptr;
+  return &ActiveInstantiationContexts.back();
+}
+
+class StructNameOverrideScope {
+public:
+  StructNameOverrideScope(std::string &target, const std::string &replacement)
+      : ref(target), original(target) {
+    ref = replacement;
+  }
+
+  StructNameOverrideScope(const StructNameOverrideScope &) = delete;
+  StructNameOverrideScope &
+  operator=(const StructNameOverrideScope &) = delete;
+
+  ~StructNameOverrideScope() { ref = original; }
+
+private:
+  std::string &ref;
+  std::string original;
+};
+
 static void pushGenericParameterScope(const std::vector<std::string> &params) {
   if (params.empty())
     return;
@@ -515,16 +631,16 @@ static llvm::StructType *getInterfaceEntryType() {
   auto *interfaceEntryTy =
       llvm::StructType::create(*TheContext, "__HybridInterfaceEntry");
 
-  auto *typeDescPtrTy = llvm::PointerType::get(typeDescTy, 0);
-  auto *opaquePtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-  auto *opaquePtrPtrTy = llvm::PointerType::get(opaquePtrTy, 0);
+  auto *typeDescPtrTy = pointerType(typeDescTy);
+  auto *opaquePtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *opaquePtrPtrTy = pointerType(opaquePtrTy);
 
   interfaceEntryTy->setBody({typeDescPtrTy, opaquePtrPtrTy});
   typeDescTy->setBody({opaquePtrTy,
                        typeDescPtrTy,
                        opaquePtrPtrTy,
                        llvm::Type::getInt32Ty(*TheContext),
-                       llvm::PointerType::get(interfaceEntryTy, 0),
+                       pointerType(interfaceEntryTy),
                        llvm::Type::getInt32Ty(*TheContext)});
   return interfaceEntryTy;
 }
@@ -545,7 +661,7 @@ static llvm::StructType *getClassHeaderType() {
     return existing;
 
   auto *headerTy = llvm::StructType::create(*TheContext, "__HybridClassHeader");
-  auto *typeDescPtrTy = llvm::PointerType::get(getTypeDescriptorType(), 0);
+  auto *typeDescPtrTy = pointerType(getTypeDescriptorType());
   headerTy->setBody({llvm::Type::getInt32Ty(*TheContext),
                      llvm::Type::getInt32Ty(*TheContext),
                      typeDescPtrTy});
@@ -556,7 +672,7 @@ static llvm::Constant *getOrCreateTypeNameConstant(const std::string &typeName) 
   std::string symbol = makeRuntimeSymbolName("__hybrid_type_name$", typeName);
   if (auto *existing = TheModule->getNamedGlobal(symbol))
     return llvm::ConstantExpr::getPointerCast(
-        existing, llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0));
+        existing, pointerType(llvm::Type::getInt8Ty(*TheContext)));
 
   auto *literal =
       llvm::ConstantDataArray::getString(*TheContext, typeName, true);
@@ -566,7 +682,7 @@ static llvm::Constant *getOrCreateTypeNameConstant(const std::string &typeName) 
   global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   global->setAlignment(llvm::MaybeAlign(1));
   return llvm::ConstantExpr::getPointerCast(
-      global, llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0));
+      global, pointerType(llvm::Type::getInt8Ty(*TheContext)));
 }
 
 static void computeInterfaceMethodLayout(const std::string &typeName,
@@ -734,11 +850,11 @@ static bool emitInterfaceDescriptor(const std::string &typeName,
                                     CompositeTypeInfo &metadata) {
   llvm::StructType *typeDescTy = getTypeDescriptorType();
   llvm::StructType *ifaceEntryTy = getInterfaceEntryType();
-  auto *charPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-  auto *typeDescPtrTy = llvm::PointerType::get(typeDescTy, 0);
-  auto *voidPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-  auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
-  auto *ifaceEntryPtrTy = llvm::PointerType::get(ifaceEntryTy, 0);
+  auto *charPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *typeDescPtrTy = pointerType(typeDescTy);
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *voidPtrPtrTy = pointerType(voidPtrTy);
+  auto *ifaceEntryPtrTy = pointerType(ifaceEntryTy);
 
   llvm::GlobalVariable *descriptorGV =
       TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
@@ -778,11 +894,11 @@ static bool emitClassRuntimeStructures(const std::string &typeName,
   llvm::StructType *typeDescTy = getTypeDescriptorType();
   llvm::StructType *ifaceEntryTy = getInterfaceEntryType();
   auto *int32Ty = llvm::Type::getInt32Ty(*TheContext);
-  auto *charPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-  auto *voidPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-  auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
-  auto *typeDescPtrTy = llvm::PointerType::get(typeDescTy, 0);
-  auto *ifaceEntryPtrTy = llvm::PointerType::get(ifaceEntryTy, 0);
+  auto *charPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *voidPtrPtrTy = pointerType(voidPtrTy);
+  auto *typeDescPtrTy = pointerType(typeDescTy);
+  auto *ifaceEntryPtrTy = pointerType(ifaceEntryTy);
 
   llvm::GlobalVariable *descriptorGV =
       TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
@@ -1079,7 +1195,7 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
   }
 
   llvm::Value *typedFnPtr =
-      Builder->CreateBitCast(functionPointer, fnType->getPointerTo(),
+      Builder->CreateBitCast(functionPointer, pointerType(fnType),
                              "hybrid.dispatch.fn");
 
   if (fnType->getReturnType()->isVoidTy()) {
@@ -1100,9 +1216,9 @@ static llvm::Function *getInterfaceLookupFunction() {
   if (fn)
     return fn;
 
-  auto *typeDescPtrTy = llvm::PointerType::get(getTypeDescriptorType(), 0);
-  auto *voidPtrTy = llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-  auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+  auto *typeDescPtrTy = pointerType(getTypeDescriptorType());
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *voidPtrPtrTy = pointerType(voidPtrTy);
 
   llvm::FunctionType *fnTy =
       llvm::FunctionType::get(voidPtrPtrTy, {typeDescPtrTy, typeDescPtrTy}, false);
@@ -1303,7 +1419,7 @@ static std::vector<TypeInfo> gatherParamTypes(const std::vector<Parameter> &para
   std::vector<TypeInfo> types;
   types.reserve(params.size());
   for (const auto &param : params)
-    types.push_back(param.DeclaredType);
+    types.push_back(applyActiveTypeBindings(param.DeclaredType));
   return types;
 }
 
@@ -1470,12 +1586,7 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
 
 enum class AccessIntent : uint8_t { Read, Write, Call };
 
-static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
-  auto it = CG.compositeMetadata.find(name);
-  if (it == CG.compositeMetadata.end())
-    return nullptr;
-  return &it->second;
-}
+static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name);
 
 static std::string describeAggregateKind(AggregateKind kind) {
   switch (kind) {
@@ -2062,6 +2173,171 @@ static void populateTypeInfoGenerics(TypeInfo &info) {
   info.isGenericParameter = isActiveGenericParameter(info.baseTypeName);
 }
 
+static std::pair<std::string, std::string>
+splitTypeStemAndSuffix(const std::string &typeName) {
+  size_t suffixPos = typeName.find_first_of("@[");
+  if (suffixPos == std::string::npos)
+    return {typeName, std::string()};
+  return {typeName.substr(0, suffixPos), typeName.substr(suffixPos)};
+}
+
+static TypeInfo applyTypeWrappers(const TypeInfo &replacement,
+                                  const TypeInfo &pattern) {
+  std::string replacementStem =
+      stripNullableAnnotations(typeNameFromInfo(replacement));
+  auto [ignoredStem, patternSuffix] = splitTypeStemAndSuffix(pattern.typeName);
+  (void)ignoredStem;
+  std::string sanitized = replacementStem + patternSuffix;
+  TypeInfo result = makeTypeInfo(sanitized);
+  result.typeArguments = replacement.typeArguments;
+  result.baseTypeName = replacement.baseTypeName;
+  result.isNullable = replacement.isNullable || pattern.isNullable;
+  result.elementNullable = replacement.elementNullable || pattern.elementNullable;
+  result.refStorage = pattern.refStorage;
+  result.isMutable = pattern.isMutable;
+  result.declaredRef = pattern.declaredRef;
+  return result;
+}
+
+static TypeInfo
+substituteTypeInfo(const TypeInfo &info,
+                   const std::map<std::string, TypeInfo> &substitutions);
+
+static TypeInfo
+substituteTypeInfo(const TypeInfo &info,
+                   const std::map<std::string, TypeInfo> &substitutions) {
+  if (info.isGenericParameter) {
+    auto It = substitutions.find(info.baseTypeName);
+    if (It == substitutions.end())
+      return info;
+    return applyTypeWrappers(It->second, info);
+  }
+
+  if (!info.hasTypeArguments())
+    return info;
+
+  std::vector<TypeInfo> substitutedArgs;
+  substitutedArgs.reserve(info.typeArguments.size());
+  std::vector<std::string> sanitizedArgs;
+  sanitizedArgs.reserve(info.typeArguments.size());
+
+  for (const auto &arg : info.typeArguments) {
+    TypeInfo substituted = substituteTypeInfo(arg, substitutions);
+    sanitizedArgs.push_back(
+        stripNullableAnnotations(typeNameFromInfo(substituted)));
+    substitutedArgs.push_back(std::move(substituted));
+  }
+
+  auto [stem, suffix] = splitTypeStemAndSuffix(info.typeName);
+  (void)stem;
+  std::string basePortion = info.baseTypeName;
+  if (!sanitizedArgs.empty()) {
+    basePortion += "<";
+    for (size_t i = 0; i < sanitizedArgs.size(); ++i) {
+      if (i != 0)
+        basePortion += ",";
+      basePortion += sanitizedArgs[i];
+    }
+    basePortion += ">";
+  }
+
+  std::string sanitized = basePortion + suffix;
+  TypeInfo result = makeTypeInfo(sanitized);
+  result.typeArguments = substitutedArgs;
+  result.baseTypeName = info.baseTypeName;
+  result.isNullable = info.isNullable;
+  result.elementNullable = info.elementNullable;
+  result.refStorage = info.refStorage;
+  result.isMutable = info.isMutable;
+  result.declaredRef = info.declaredRef;
+  return result;
+}
+
+static const CompositeTypeInfo *
+materializeCompositeInstantiation(const TypeInfo &requestedType) {
+  std::string constructedName =
+      stripNullableAnnotations(typeNameFromInfo(requestedType));
+  auto existing = CG.compositeMetadata.find(constructedName);
+  if (existing != CG.compositeMetadata.end())
+    return &existing->second;
+
+  StructAST *templateAst = FindGenericTemplate(requestedType.baseTypeName);
+  if (!templateAst)
+    return nullptr;
+
+  if (templateAst->getGenericParameters().size() !=
+      requestedType.typeArguments.size())
+    return nullptr;
+
+  std::map<std::string, TypeInfo> substitutions;
+
+  for (size_t i = 0; i < templateAst->getGenericParameters().size(); ++i)
+    substitutions.emplace(templateAst->getGenericParameters()[i],
+                          requestedType.typeArguments[i]);
+
+  GenericTypeBindingScope bindingScope(substitutions);
+  GenericInstantiationScope instantiationScope(constructedName);
+
+  if (StructTypes.contains(constructedName))
+    return lookupCompositeInfo(constructedName);
+
+  if (!templateAst->codegen())
+    return nullptr;
+
+  return lookupCompositeInfo(constructedName);
+}
+
+static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
+  auto it = CG.compositeMetadata.find(name);
+  if (it != CG.compositeMetadata.end())
+    return &it->second;
+
+  if (!currentParser().enableGenerics)
+    return nullptr;
+
+  if (name.find('<') == std::string::npos)
+    return nullptr;
+
+  TypeInfo requested = makeTypeInfo(name);
+  if (!requested.hasTypeArguments())
+    return nullptr;
+
+  return materializeCompositeInstantiation(requested);
+}
+
+static const std::map<std::string, TypeInfo> *currentTypeBindings() {
+  auto &stack = currentCodegen().genericTypeBindingsStack;
+  if (stack.empty())
+    return nullptr;
+  return &stack.back();
+}
+
+static TypeInfo applyActiveTypeBindings(const TypeInfo &info) {
+  if (const auto *bindings = currentTypeBindings())
+    return substituteTypeInfo(info, *bindings);
+  return info;
+}
+
+static std::string applyActiveTypeBindingsToName(const std::string &typeName) {
+  return typeNameFromInfo(applyActiveTypeBindings(makeTypeInfo(typeName)));
+}
+
+static std::vector<std::string>
+applyActiveTypeBindingsToNames(const std::vector<std::string> &names) {
+  std::vector<std::string> result;
+  result.reserve(names.size());
+  for (const auto &entry : names)
+    result.push_back(applyActiveTypeBindingsToName(entry));
+  return result;
+}
+
+static std::optional<std::string>
+applyActiveTypeBindingsToOptionalName(const std::optional<std::string> &name) {
+  if (!name)
+    return std::nullopt;
+  return applyActiveTypeBindingsToName(*name);
+}
+
 static const TypeInfo *lookupLocalTypeInfo(const std::string &name) {
   auto It = LocalTypes.find(name);
   if (It != LocalTypes.end())
@@ -2142,6 +2418,9 @@ static bool validateTypeForGenerics(const TypeInfo &info,
                  lookupCompositeInfo(info.baseTypeName)) {
     expectedArguments = metadata->genericParameters.size();
     hasDefinition = true;
+  } else if (StructAST *templateAst = FindGenericTemplate(info.baseTypeName)) {
+    expectedArguments = templateAst->getGenericParameters().size();
+    hasDefinition = expectedArguments > 0;
   }
 
   if (info.hasTypeArguments()) {
@@ -2790,6 +3069,15 @@ static bool diagnoseDisallowedImplicitIntegerConversion(const ExprAST *sourceExp
 // Type conversion helper
 llvm::Type *getTypeFromString(const std::string &TypeStr) {
   std::string CleanType = stripNullableAnnotations(TypeStr);
+  if (const auto *bindings = currentTypeBindings()) {
+    TypeInfo info = makeTypeInfo(CleanType);
+    TypeInfo substituted = substituteTypeInfo(info, *bindings);
+    std::string boundName = stripNullableAnnotations(typeNameFromInfo(substituted));
+    if (boundName != CleanType)
+      return getTypeFromString(boundName);
+    CleanType = boundName;
+  }
+
   if (CleanType == "int")
     return llvm::Type::getInt32Ty(*TheContext);
   else if (CleanType == "float")
@@ -2861,6 +3149,9 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   }
 
   // Check if it's a struct type
+  if (CleanType.find('<') != std::string::npos)
+    lookupCompositeInfo(CleanType);
+
   auto structIt = StructTypes.find(CleanType);
   if (structIt != StructTypes.end()) {
     return llvm::PointerType::get(*TheContext, 0); // Struct instances are opaque pointers
@@ -6246,6 +6537,9 @@ llvm::Value *CallExprAST::codegen() {
     ArgValues.push_back(Value);
   }
 
+  if (getCallee().find('<') != std::string::npos)
+    lookupCompositeInfo(getCallee());
+
   if (StructTypes.contains(getCallee())) {
     setTypeName(getCallee());
 
@@ -6472,14 +6766,14 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
                            .c_str());
 
     auto *voidPtrTy =
-        llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-    auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+        pointerType(llvm::Type::getInt8Ty(*TheContext));
+    auto *voidPtrPtrTy = pointerType(voidPtrTy);
     auto *typeDescPtrTy =
-        llvm::PointerType::get(getTypeDescriptorType(), 0);
+        pointerType(getTypeDescriptorType());
 
     llvm::StructType *headerTy = getClassHeaderType();
     llvm::Value *headerPtr = Builder->CreateBitCast(
-        instancePtr, headerTy->getPointerTo(), "hybrid.header.iface");
+        instancePtr, pointerType(headerTy), "hybrid.header.iface");
     llvm::Value *descAddr = Builder->CreateStructGEP(
         headerTy, headerPtr, 2, "hybrid.header.descptr");
     llvm::Value *descriptorValue = Builder->CreateLoad(
@@ -6554,9 +6848,9 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
 
     llvm::StructType *ownerStructTy = structIt->second;
     llvm::Value *typedInstancePtr = instancePtr;
-    if (typedInstancePtr->getType() != ownerStructTy->getPointerTo()) {
+    if (typedInstancePtr->getType() != pointerType(ownerStructTy)) {
       typedInstancePtr = Builder->CreateBitCast(
-          typedInstancePtr, ownerStructTy->getPointerTo(),
+          typedInstancePtr, pointerType(ownerStructTy),
           "hybrid.method.recv");
     }
 
@@ -6564,15 +6858,15 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
     llvm::Value *headerPtr = Builder->CreateStructGEP(
         ownerStructTy, typedInstancePtr, 0, "hybrid.header.ptr");
     auto *typeDescPtrTy =
-        llvm::PointerType::get(getTypeDescriptorType(), 0);
+        pointerType(getTypeDescriptorType());
     llvm::Value *descAddr = Builder->CreateStructGEP(
         headerTy, headerPtr, 2, "hybrid.header.descptr");
     llvm::Value *descriptorValue = Builder->CreateLoad(
         typeDescPtrTy, descAddr, "hybrid.header.desc");
 
     auto *voidPtrTy =
-        llvm::PointerType::get(llvm::Type::getInt8Ty(*TheContext), 0);
-    auto *voidPtrPtrTy = llvm::PointerType::get(voidPtrTy, 0);
+        pointerType(llvm::Type::getInt8Ty(*TheContext));
+    auto *voidPtrPtrTy = pointerType(voidPtrTy);
     llvm::Value *vtableAddr = Builder->CreateStructGEP(
         getTypeDescriptorType(), descriptorValue, 2, "hybrid.vtable.ptr");
     llvm::Value *vtablePtr =
@@ -6646,13 +6940,14 @@ llvm::Value *BlockStmtAST::codegen() {
 
 llvm::Value *VariableDeclarationStmtAST::codegen() {
   // Get the type
-  llvm::Type *VarType = getTypeFromString(getType());
+  TypeInfo declaredInfo = applyActiveTypeBindings(getTypeInfo());
+
+  llvm::Type *VarType = getTypeFromString(declaredInfo.typeName);
   if (!VarType)
     return LogErrorV("Unknown type name");
 
   // For ref variables, need to store a pointer to the actual type
   bool isRefVar = isRef();
-  TypeInfo declaredInfo = getTypeInfo();
 
   const ExprAST *InitializerExpr = getInitializer();
   const RefExprAST *RefInitializer = dynamic_cast<const RefExprAST*>(InitializerExpr);
@@ -7937,6 +8232,35 @@ void PrototypeAST::prependImplicitParameter(Parameter Param) {
 //===----------------------------------------------------------------------===//
 
 const std::string &PrototypeAST::getMangledName() const {
+  auto buildSignature = [this]() {
+    std::string signature;
+    signature.reserve(32 + Args.size() * 16);
+
+    TypeInfo boundReturn = applyActiveTypeBindings(ReturnTypeInfo);
+    signature.append("R");
+    signature.push_back(returnsByRef() ? 'R' : 'V');
+    signature.push_back('_');
+    signature.append(sanitizeForMangle(typeNameFromInfo(boundReturn)));
+    signature.append("_P");
+    signature.append(std::to_string(Args.size()));
+
+    for (const auto &Param : Args) {
+      signature.push_back('_');
+      signature.push_back(Param.IsRef ? 'R' : 'V');
+      signature.push_back('_');
+      TypeInfo boundParam = applyActiveTypeBindings(Param.DeclaredType);
+      signature.append(sanitizeForMangle(typeNameFromInfo(boundParam)));
+    }
+
+    return signature;
+  };
+
+  if (currentTypeBindings()) {
+    thread_local std::string BoundMangledName;
+    BoundMangledName = Name + "$" + buildSignature();
+    return BoundMangledName;
+  }
+
   if (!MangledName.empty())
     return MangledName;
 
@@ -7954,23 +8278,7 @@ const std::string &PrototypeAST::getMangledName() const {
     }
   }
 
-  std::string signature;
-  signature.reserve(32 + Args.size() * 16);
-  signature.append("R");
-  signature.push_back(returnsByRef() ? 'R' : 'V');
-  signature.push_back('_');
-  signature.append(sanitizeForMangle(typeNameFromInfo(ReturnTypeInfo)));
-  signature.append("_P");
-  signature.append(std::to_string(Args.size()));
-
-  for (const auto &Param : Args) {
-    signature.push_back('_');
-    signature.push_back(Param.IsRef ? 'R' : 'V');
-    signature.push_back('_');
-    signature.append(sanitizeForMangle(typeNameFromInfo(Param.DeclaredType)));
-  }
-
-  MangledName = Name + "$" + signature;
+  MangledName = Name + "$" + buildSignature();
   return MangledName;
 }
 
@@ -7983,10 +8291,11 @@ llvm::Function *PrototypeAST::codegen() {
   std::vector<llvm::Type*> ParamTypes;
   ParamTypes.reserve(Args.size());
   for (const auto &Param : Args) {
-    if (!validateTypeForGenerics(Param.DeclaredType,
+    TypeInfo boundParam = applyActiveTypeBindings(Param.DeclaredType);
+    if (!validateTypeForGenerics(boundParam,
                                  "parameter '" + Param.Name + "' of function '" + Name + "'"))
       return nullptr;
-    llvm::Type *ParamType = getTypeFromString(Param.DeclaredType.typeName);
+    llvm::Type *ParamType = getTypeFromString(boundParam.typeName);
     if (!ParamType)
       return LogErrorF("Unknown parameter type");
     if (Param.IsRef) {
@@ -7996,11 +8305,12 @@ llvm::Function *PrototypeAST::codegen() {
     }
   }
 
-  if (!validateTypeForGenerics(ReturnTypeInfo,
+  TypeInfo boundReturn = applyActiveTypeBindings(ReturnTypeInfo);
+  if (!validateTypeForGenerics(boundReturn,
                                "return type of function '" + Name + "'"))
     return nullptr;
 
-  llvm::Type *RetType = getTypeFromString(ReturnTypeInfo.typeName);
+  llvm::Type *RetType = getTypeFromString(boundReturn.typeName);
   if (!RetType)
     return LogErrorF("Unknown return type");
 
@@ -8193,49 +8503,75 @@ llvm::Function *FunctionAST::codegen() {
 // Generate code for struct definitions
 llvm::Type *StructAST::codegen() {
   const AggregateKind kind = Kind;
+  const std::string originalName = Name;
+
+  std::optional<StructNameOverrideScope> nameOverride;
+  if (isGenericTemplate()) {
+    if (const auto *instCtx = currentInstantiationContext())
+      nameOverride.emplace(Name, instCtx->nameOverride);
+  }
+
+  const std::string typeKey = Name;
+  const std::string definitionKey =
+      isGenericTemplate() ? originalName : typeKey;
+
   // Check if this struct type already exists
-  if (StructTypes.contains(Name)) {
+  if (StructTypes.contains(typeKey)) {
+    if (isGenericTemplate() && currentInstantiationContext())
+      return StructTypes[typeKey];
     reportCompilerError(std::string(kind == AggregateKind::Struct ? "Struct" : "Class") +
-                        " type already defined: " + Name);
+                        " type already defined: " + typeKey);
     return nullptr;
   }
 
-  if (!ensureNoDuplicateGenericParameters(GenericParameters, "type '" + Name + "'"))
+  if (!ensureNoDuplicateGenericParameters(GenericParameters, "type '" + typeKey + "'"))
     return nullptr;
   
   // Save the current insertion point to restore it after generating constructors
   auto SavedInsertBlock = Builder->GetInsertBlock();
   
   // Reserve an opaque struct so recursive field lookups can see it
-  llvm::StructType *StructType = llvm::StructType::create(*TheContext, Name);
-  StructTypes[Name] = StructType;
+  llvm::StructType *StructType = llvm::StructType::create(*TheContext, typeKey);
+  StructTypes[typeKey] = StructType;
 
   auto abandonStructDefinition = [&]() {
-    StructTypes.erase(Name);
-    StructFieldIndices.erase(Name);
-    StructFieldTypes.erase(Name);
+    StructTypes.erase(typeKey);
+    StructFieldIndices.erase(typeKey);
+    StructFieldTypes.erase(typeKey);
   };
 
   std::vector<llvm::Type *> FieldTypes;
   std::vector<std::pair<std::string, unsigned>> FieldIndices;
   std::map<std::string, std::string> FieldTypeMap;
+
+  std::vector<std::string> effectiveBaseTypes =
+      applyActiveTypeBindingsToNames(BaseTypes);
+  std::optional<std::string> effectiveBaseClass =
+      applyActiveTypeBindingsToOptionalName(BaseClass);
+  std::vector<std::string> effectiveInterfaces =
+      applyActiveTypeBindingsToNames(InterfaceTypes);
+
   CompositeTypeInfo compositeInfo;
   compositeInfo.kind = kind;
-  compositeInfo.baseTypes = BaseTypes;
+  compositeInfo.baseTypes = effectiveBaseTypes;
   compositeInfo.genericParameters = GenericParameters;
-  compositeInfo.baseClass = BaseClass;
-  compositeInfo.interfaces = InterfaceTypes;
+  compositeInfo.baseClass = effectiveBaseClass;
+  compositeInfo.interfaces = effectiveInterfaces;
   compositeInfo.isAbstract = IsAbstract;
   compositeInfo.isInterface = (kind == AggregateKind::Interface);
+  if (const auto *bindings = currentTypeBindings())
+    compositeInfo.typeArgumentBindings = *bindings;
+  else
+    compositeInfo.typeArgumentBindings.clear();
 
   SemanticGenericParameterScope typeGenericScope(GenericParameters);
-  GenericDefinitionInfo currentTypeDefinition{Name, &GenericParameters};
+  GenericDefinitionInfo currentTypeDefinition{definitionKey, &GenericParameters};
   GenericDefinitionScope definitionScope(&currentTypeDefinition);
 
   if (kind == AggregateKind::Class || kind == AggregateKind::Interface) {
     llvm::StructType *TypeDescTy = getTypeDescriptorType();
     std::string descriptorName =
-        makeRuntimeSymbolName("__hybrid_type_descriptor$", Name);
+        makeRuntimeSymbolName("__hybrid_type_descriptor$", typeKey);
     llvm::GlobalVariable *descriptorGV =
         TheModule->getGlobalVariable(descriptorName, true);
     if (!descriptorGV) {
@@ -8248,11 +8584,11 @@ llvm::Type *StructAST::codegen() {
 
   unsigned FieldIndex = 0;
   if (kind == AggregateKind::Class) {
-    if (BaseClass) {
-      auto baseStructIt = StructTypes.find(*BaseClass);
+    if (effectiveBaseClass) {
+      auto baseStructIt = StructTypes.find(*effectiveBaseClass);
       if (baseStructIt == StructTypes.end()) {
-        reportCompilerError("Base class '" + *BaseClass +
-                            "' must be defined before derived class '" + Name +
+        reportCompilerError("Base class '" + *effectiveBaseClass +
+                            "' must be defined before derived class '" + typeKey +
                             "'");
         abandonStructDefinition();
         return nullptr;
@@ -8265,16 +8601,16 @@ llvm::Type *StructAST::codegen() {
         FieldTypes.push_back(Elem);
       FieldIndex = BaseStruct->getNumElements();
 
-      auto baseIndicesIt = StructFieldIndices.find(*BaseClass);
+      auto baseIndicesIt = StructFieldIndices.find(*effectiveBaseClass);
       if (baseIndicesIt != StructFieldIndices.end())
         FieldIndices = baseIndicesIt->second;
 
-      auto baseTypeMapIt = StructFieldTypes.find(*BaseClass);
+      auto baseTypeMapIt = StructFieldTypes.find(*effectiveBaseClass);
       if (baseTypeMapIt != StructFieldTypes.end())
         FieldTypeMap = baseTypeMapIt->second;
 
       if (const CompositeTypeInfo *baseInfo =
-              lookupCompositeInfo(*BaseClass)) {
+              lookupCompositeInfo(*effectiveBaseClass)) {
         compositeInfo.fieldModifiers = baseInfo->fieldModifiers;
         compositeInfo.fieldDeclarationInitializers =
             baseInfo->fieldDeclarationInitializers;
@@ -8291,12 +8627,14 @@ llvm::Type *StructAST::codegen() {
 
   FieldIndices.reserve(FieldIndices.size() + Fields.size());
   for (const auto &Field : Fields) {
-    const std::string &FieldTypeName = Field->getType();
+    const std::string &originalFieldTypeName = Field->getType();
+    std::string FieldTypeName =
+        applyActiveTypeBindingsToName(originalFieldTypeName);
     ParsedTypeDescriptor FieldDesc = parseTypeString(FieldTypeName);
-    if (FieldDesc.sanitized == Name && FieldDesc.pointerDepth == 0 &&
+    if (FieldDesc.sanitized == typeKey && FieldDesc.pointerDepth == 0 &&
         !FieldDesc.isNullable && !FieldDesc.isArray) {
       reportCompilerError(
-          "Struct '" + Name + "' cannot contain non-nullable field '" +
+          "Struct '" + typeKey + "' cannot contain non-nullable field '" +
               Field->getName() + "' of its own type",
           "Use a nullable or pointer field to avoid infinite size.");
       abandonStructDefinition();
@@ -8304,8 +8642,9 @@ llvm::Type *StructAST::codegen() {
     }
 
     TypeInfo fieldTypeInfo = makeTypeInfo(FieldTypeName);
+    fieldTypeInfo = applyActiveTypeBindings(fieldTypeInfo);
     if (!validateTypeForGenerics(fieldTypeInfo,
-                                 "field '" + Field->getName() + "' of type '" + Name + "'",
+                                 "field '" + Field->getName() + "' of type '" + typeKey + "'",
                                  &currentTypeDefinition)) {
       abandonStructDefinition();
       return nullptr;
@@ -8339,7 +8678,7 @@ llvm::Type *StructAST::codegen() {
         }
       }
 
-      std::string GlobalName = Name + "." + Field->getName();
+      std::string GlobalName = typeKey + "." + Field->getName();
 
       auto *GV = new llvm::GlobalVariable(
           *TheModule, FieldType,
@@ -8354,7 +8693,7 @@ llvm::Type *StructAST::codegen() {
       compositeInfo.staticFieldGlobals[Field->getName()] = GlobalName;
       if (hasInitializer) {
         compositeInfo.staticDeclarationInitializers.insert(Field->getName());
-        markStaticFieldInitialized(Name, Field->getName());
+        markStaticFieldInitialized(typeKey, Field->getName());
       }
       continue;
     }
@@ -8368,13 +8707,13 @@ llvm::Type *StructAST::codegen() {
   }
 
   StructType->setBody(FieldTypes);
-  StructFieldIndices[Name] = FieldIndices;
-  StructFieldTypes[Name] = FieldTypeMap;
+  StructFieldIndices[typeKey] = FieldIndices;
+  StructFieldTypes[typeKey] = FieldTypeMap;
   compositeInfo.fieldTypes = FieldTypeMap;
 
-  CG.compositeMetadata[Name] = std::move(compositeInfo);
-  CompositeTypeInfo &metadata = CG.compositeMetadata[Name];
-  if (!validateCompositeHierarchy(Name, metadata)) {
+  CG.compositeMetadata[typeKey] = std::move(compositeInfo);
+  CompositeTypeInfo &metadata = CG.compositeMetadata[typeKey];
+  if (!validateCompositeHierarchy(typeKey, metadata)) {
     abandonStructDefinition();
     return nullptr;
   }
@@ -8382,14 +8721,14 @@ llvm::Type *StructAST::codegen() {
   std::map<std::string, MethodRequirement> interfaceRequirements;
   if (metadata.kind == AggregateKind::Class) {
     gatherInterfaceRequirements(metadata, interfaceRequirements);
-    removeInterfaceRequirementsSatisfiedByHierarchy(Name, interfaceRequirements);
+    removeInterfaceRequirementsSatisfiedByHierarchy(typeKey, interfaceRequirements);
   }
 
   std::map<std::string, MethodRequirement> abstractRequirements;
   if (metadata.kind == AggregateKind::Class)
-    collectAbstractBaseMethods(Name, abstractRequirements);
+    collectAbstractBaseMethods(typeKey, abstractRequirements);
   if (!abstractRequirements.empty())
-    removeAbstractRequirementsSatisfiedByHierarchy(Name, abstractRequirements);
+    removeAbstractRequirementsSatisfiedByHierarchy(typeKey, abstractRequirements);
   
   // Generate constructor and other methods
   for (auto &MethodDef : Methods) {
@@ -8435,7 +8774,7 @@ llvm::Type *StructAST::codegen() {
         llvm::GlobalVariable *descriptorGV =
             TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
         if (!descriptorGV) {
-          reportCompilerError("Internal error: descriptor for class '" + Name +
+          reportCompilerError("Internal error: descriptor for class '" + typeKey +
                               "' missing during constructor emission");
           ConstructorFunc->eraseFromParent();
           NamedValues.clear();
@@ -8447,7 +8786,7 @@ llvm::Type *StructAST::codegen() {
         llvm::StructType *headerTy = getClassHeaderType();
         auto *int32Ty = llvm::Type::getInt32Ty(*TheContext);
         DescriptorPtrConst = llvm::ConstantExpr::getBitCast(
-            descriptorGV, llvm::PointerType::get(getTypeDescriptorType(), 0));
+            descriptorGV, pointerType(getTypeDescriptorType()));
         llvm::Value *headerPtr =
             Builder->CreateStructGEP(StructType, StructPtr, 0, "hybrid.header");
         llvm::Value *strongPtr =
@@ -8466,9 +8805,9 @@ llvm::Type *StructAST::codegen() {
       NonNullFacts.clear();
       ensureBaseNonNullScope();
       NamedValues["this"] = StructPtr;
-      rememberLocalType("this", makeTypeInfo(Name));
+      rememberLocalType("this", makeTypeInfo(typeKey));
 
-      ScopedCompositeContext methodScope(Name, MethodKind::Constructor, false);
+      ScopedCompositeContext methodScope(typeKey, MethodKind::Constructor, false);
 
       argIndex = 0;
       for (auto &Arg : ConstructorFunc->args()) {
@@ -8480,14 +8819,12 @@ llvm::Type *StructAST::codegen() {
         Builder->CreateStore(&Arg, Alloca);
 
         NamedValues[ArgName] = Alloca;
+        TypeInfo paramInfo = applyActiveTypeBindings(Param.DeclaredType);
         if (Param.IsRef) {
-          TypeInfo paramInfo = Param.DeclaredType;
           paramInfo.refStorage = RefStorageClass::RefAlias;
           paramInfo.declaredRef = true;
-          rememberLocalType(ArgName, std::move(paramInfo));
-        } else {
-          rememberLocalType(ArgName, Param.DeclaredType);
         }
+        rememberLocalType(ArgName, std::move(paramInfo));
         ++argIndex;
       }
 
@@ -8512,6 +8849,15 @@ llvm::Type *StructAST::codegen() {
         FunctionOverload &ctorEntry =
             registerFunctionOverload(*CtorProto, ConstructorName);
         ctorEntry.function = ConstructorFunc;
+        if (CtorProto->getName() != typeKey) {
+          std::vector<TypeInfo> ctorParamTypes = gatherParamTypes(CtorProto->getArgs());
+          std::vector<bool> ctorParamIsRef = gatherParamRefFlags(CtorProto->getArgs());
+          if (!findRegisteredOverload(typeKey, CtorProto->getReturnTypeInfo(),
+                                      CtorProto->returnsByRef(), ctorParamTypes,
+                                      ctorParamIsRef)) {
+            CG.functionOverloads[typeKey].push_back(ctorEntry);
+          }
+        }
       } else {
         ConstructorFunc->eraseFromParent();
         NamedValues.clear();
@@ -8564,10 +8910,10 @@ llvm::Type *StructAST::codegen() {
 
     if (MethodDef.needsInstanceThis() && !MethodDef.hasImplicitThis()) {
       Parameter thisParam;
-      thisParam.Type = Name;
+      thisParam.Type = typeKey;
       thisParam.Name = "__hybrid_this";
       thisParam.IsRef = true;
-      TypeInfo thisInfo = makeTypeInfo(Name);
+      TypeInfo thisInfo = makeTypeInfo(typeKey);
       thisInfo.refStorage = RefStorageClass::RefAlias;
       thisInfo.declaredRef = true;
       thisParam.DeclaredType = thisInfo;
@@ -8625,8 +8971,8 @@ llvm::Type *StructAST::codegen() {
     if (MethodDef.hasBody())
       memberInfo.mangledName = Proto->getMangledName();
     memberInfo.dispatchKey = methodKey;
-    memberInfo.overridesSignature = overrideSignature;
-    memberInfo.returnType = Proto->getReturnTypeInfo();
+   memberInfo.overridesSignature = overrideSignature;
+    memberInfo.returnType = applyActiveTypeBindings(Proto->getReturnTypeInfo());
     memberInfo.parameterTypes = gatherParamTypes(Proto->getArgs());
     memberInfo.parameterIsRef = gatherParamRefFlags(Proto->getArgs());
     memberInfo.returnsByRef = Proto->returnsByRef();
@@ -8639,15 +8985,15 @@ llvm::Type *StructAST::codegen() {
     if (!Method)
       continue;
 
-    ScopedCompositeContext methodScope(Name, MethodDef.getKind(),
+    ScopedCompositeContext methodScope(typeKey, MethodDef.getKind(),
                                        MethodDef.isStatic());
     Method->codegen();
   }
 
   if (metadata.kind == AggregateKind::Interface) {
-    computeInterfaceMethodLayout(Name, Methods, metadata);
+    computeInterfaceMethodLayout(typeKey, Methods, metadata);
   } else if (metadata.kind == AggregateKind::Class) {
-    if (!computeVirtualDispatchLayout(Name, metadata)) {
+    if (!computeVirtualDispatchLayout(typeKey, metadata)) {
       abandonStructDefinition();
       return nullptr;
     }
@@ -8667,7 +9013,7 @@ llvm::Type *StructAST::codegen() {
       const MethodRequirement &req = entry.second;
       std::string signature = req.info ? req.info->signature : req.ownerType +
                                                        "." + entry.first;
-      reportCompilerError("Class '" + Name +
+      reportCompilerError("Class '" + typeKey +
                           "' does not implement interface member '" +
                           signature + "'");
     }
@@ -8680,7 +9026,7 @@ llvm::Type *StructAST::codegen() {
       const MethodRequirement &req = entry.second;
       std::string signature = req.info ? req.info->signature
                                        : req.ownerType + "." + entry.first;
-      reportCompilerError("Class '" + Name +
+      reportCompilerError("Class '" + typeKey +
                           "' must override abstract member '" + signature +
                           "' defined in '" + req.ownerType + "'");
     }
@@ -8688,12 +9034,12 @@ llvm::Type *StructAST::codegen() {
   }
 
   if (metadata.kind == AggregateKind::Interface) {
-    if (!emitInterfaceDescriptor(Name, metadata)) {
+    if (!emitInterfaceDescriptor(typeKey, metadata)) {
       abandonStructDefinition();
       return nullptr;
     }
   } else if (metadata.kind == AggregateKind::Class) {
-    if (!emitClassRuntimeStructures(Name, StructType, metadata)) {
+    if (!emitClassRuntimeStructures(typeKey, StructType, metadata)) {
       abandonStructDefinition();
       return nullptr;
     }
@@ -9251,7 +9597,7 @@ llvm::Value *BaseExprAST::codegen() {
   llvm::Value *thisValue = thisIt->second;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  llvm::Type *expectedPtr = structIt->second->getPointerTo();
+  llvm::Type *expectedPtr = pointerType(structIt->second);
 #pragma clang diagnostic pop
   llvm::Value *basePtr = thisValue;
   if (thisValue->getType() != expectedPtr)

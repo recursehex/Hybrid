@@ -966,6 +966,7 @@ public:
   const std::vector<std::string> &getInterfaces() const { return InterfaceTypes; }
   bool isAbstract() const { return IsAbstract; }
   bool isInterface() const { return Kind == AggregateKind::Interface; }
+  bool isGenericTemplate() const { return !GenericParameters.empty(); }
 
   void setBaseClass(std::optional<std::string> Base) { BaseClass = std::move(Base); }
   void setInterfaces(std::vector<std::string> Interfaces) { InterfaceTypes = std::move(Interfaces); }
@@ -979,6 +980,9 @@ void InitializeModule();
 
 // Get the LLVM module for printing
 llvm::Module *getModule();
+
+void RegisterGenericTemplate(std::unique_ptr<StructAST> templ);
+StructAST *FindGenericTemplate(const std::string &name);
 
 // Check if currently in an unsafe context
 bool isInUnsafeContext();

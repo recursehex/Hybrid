@@ -73,6 +73,7 @@ struct CompositeTypeInfo {
   std::vector<std::string> interfaceMethodOrder;
   std::map<std::string, unsigned> interfaceMethodSlotMap;
   std::optional<std::string> thisOverride;
+  std::map<std::string, TypeInfo> typeArgumentBindings;
 };
 
 struct ActiveCompositeContext {
@@ -109,6 +110,7 @@ struct CodegenContext {
   std::vector<ActiveCompositeContext> compositeContextStack;
   std::vector<std::vector<std::string>> genericParameterStack;
   std::map<std::string, unsigned> activeGenericParameters;
+  std::vector<std::map<std::string, TypeInfo>> genericTypeBindingsStack;
 
   void reset();
 };
@@ -134,6 +136,7 @@ inline void CodegenContext::reset() {
   compositeContextStack.clear();
   genericParameterStack.clear();
   activeGenericParameters.clear();
+  genericTypeBindingsStack.clear();
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H
