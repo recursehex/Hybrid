@@ -104,21 +104,16 @@ static bool convertUTF8LiteralToUTF16(const std::string &input,
 #define LoopContinueBlocks (CG.loopContinueBlocks)
 #define NonNullFacts (CG.nonNullFactsStack)
 
-static llvm::PointerType *pointerType(llvm::Type *elementType,
+static llvm::PointerType *pointerType(unsigned addressSpace = 0) {
+  return llvm::PointerType::get(*TheContext, addressSpace);
+}
+
+static llvm::PointerType *pointerType(llvm::Type * /*elementType*/,
                                       unsigned addressSpace = 0) {
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-  auto *ptr = llvm::PointerType::get(elementType, addressSpace);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-  return ptr;
+  return llvm::PointerType::get(*TheContext, addressSpace);
 }
 
 static TypeInfo applyActiveTypeBindings(const TypeInfo &info);
-static std::string applyActiveTypeBindingsToName(const std::string &typeName);
 static std::vector<std::string>
 applyActiveTypeBindingsToNames(const std::vector<std::string> &names);
 static std::optional<std::string>
@@ -9595,10 +9590,7 @@ llvm::Value *BaseExprAST::codegen() {
   }
 
   llvm::Value *thisValue = thisIt->second;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  llvm::Type *expectedPtr = pointerType(structIt->second);
-#pragma clang diagnostic pop
+  llvm::Type *expectedPtr = pointerType();
   llvm::Value *basePtr = thisValue;
   if (thisValue->getType() != expectedPtr)
     basePtr = Builder->CreateBitCast(thisValue, expectedPtr, "base.ptr");
