@@ -3005,6 +3005,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   std::optional<std::string> baseClass;
   std::vector<std::string> interfaceTypes;
   std::vector<std::string> baseTypes;
+  std::optional<TypeInfo> baseClassInfo;
+  std::vector<TypeInfo> interfaceTypeInfos;
+  std::vector<TypeInfo> baseTypeInfos;
 
   if ((kind == AggregateKind::Class || kind == AggregateKind::Interface) &&
       CurTok == tok_inherits) {
@@ -3014,21 +3017,27 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     bool expectBaseClass = (kind == AggregateKind::Class);
     bool sawType = false;
     while (true) {
-      if (CurTok != tok_identifier) {
+      if (!IsValidType()) {
         LogError("Expected type name after 'inherits'");
         return nullptr;
       }
 
-      std::string typeName = IdentifierStr;
+      std::string typeName = ParseCompleteType();
+      if (typeName.empty())
+        return nullptr;
       sawType = true;
-      getNextToken();
       SkipNewlines();
+
+      TypeInfo clauseInfo = buildDeclaredTypeInfo(typeName, false);
+      baseTypeInfos.push_back(clauseInfo);
 
       if (expectBaseClass) {
         baseClass = typeName;
+        baseClassInfo = clauseInfo;
         expectBaseClass = false;
       } else {
         interfaceTypes.push_back(typeName);
+        interfaceTypeInfos.push_back(clauseInfo);
       }
 
       if (CurTok != ',')
@@ -3409,6 +3418,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       std::move(baseTypes), std::move(genericParameters));
   Result->setBaseClass(std::move(baseClass));
   Result->setInterfaces(std::move(interfaceTypes));
+  Result->setBaseTypeInfos(std::move(baseTypeInfos));
+  Result->setBaseClassInfo(std::move(baseClassInfo));
+  Result->setInterfaceTypeInfos(std::move(interfaceTypeInfos));
   Result->setAbstract(isAbstractComposite);
   return Result;
 }

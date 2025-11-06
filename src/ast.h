@@ -940,6 +940,9 @@ class StructAST {
   std::vector<std::string> GenericParameters;
   std::optional<std::string> BaseClass;
   std::vector<std::string> InterfaceTypes;
+  std::vector<TypeInfo> BaseTypeInfos;
+  std::optional<TypeInfo> BaseClassInfo;
+  std::vector<TypeInfo> InterfaceTypeInfos;
   bool IsAbstract = false;
 
 public:
@@ -962,16 +965,22 @@ public:
   std::vector<MethodDefinition> &getMethods() { return Methods; }
   const std::vector<std::string> &getBaseTypes() const { return BaseTypes; }
   const std::vector<std::string> &getGenericParameters() const { return GenericParameters; }
+  const std::vector<TypeInfo> &getBaseTypeInfos() const { return BaseTypeInfos; }
   const std::optional<std::string> &getBaseClass() const { return BaseClass; }
+  const std::optional<TypeInfo> &getBaseClassInfo() const { return BaseClassInfo; }
   const std::vector<std::string> &getInterfaces() const { return InterfaceTypes; }
+  const std::vector<TypeInfo> &getInterfaceTypeInfos() const { return InterfaceTypeInfos; }
   bool isAbstract() const { return IsAbstract; }
   bool isInterface() const { return Kind == AggregateKind::Interface; }
   bool isGenericTemplate() const { return !GenericParameters.empty(); }
 
   void setBaseClass(std::optional<std::string> Base) { BaseClass = std::move(Base); }
+  void setBaseClassInfo(std::optional<TypeInfo> Info) { BaseClassInfo = std::move(Info); }
   void setInterfaces(std::vector<std::string> Interfaces) { InterfaceTypes = std::move(Interfaces); }
+  void setInterfaceTypeInfos(std::vector<TypeInfo> Infos) { InterfaceTypeInfos = std::move(Infos); }
   void setAbstract(bool Abstract) { IsAbstract = Abstract; }
   void appendBaseTypes(std::vector<std::string> bases) { BaseTypes = std::move(bases); }
+  void setBaseTypeInfos(std::vector<TypeInfo> Infos) { BaseTypeInfos = std::move(Infos); }
   void setGenericParameters(std::vector<std::string> Generics) { GenericParameters = std::move(Generics); }
 };
 

@@ -56,6 +56,10 @@ struct CompositeTypeInfo {
   std::set<std::string> fieldDeclarationInitializers;
   std::set<std::string> staticDeclarationInitializers;
   std::vector<std::string> constructorMangledNames;
+  std::vector<TypeInfo> resolvedBaseTypeInfos;
+  std::optional<TypeInfo> resolvedBaseClassInfo;
+  std::vector<TypeInfo> resolvedInterfaceTypeInfos;
+  std::map<std::string, std::map<std::string, TypeInfo>> resolvedBaseTypeArgumentBindings;
   std::map<std::string, CompositeMemberInfo> methodInfo;
   std::vector<std::string> baseTypes;
   std::vector<std::string> genericParameters;

@@ -114,10 +114,10 @@ static llvm::PointerType *pointerType(llvm::Type * /*elementType*/,
 }
 
 static TypeInfo applyActiveTypeBindings(const TypeInfo &info);
-static std::vector<std::string>
-applyActiveTypeBindingsToNames(const std::vector<std::string> &names);
-static std::optional<std::string>
-applyActiveTypeBindingsToOptionalName(const std::optional<std::string> &name);
+static TypeInfo makeTypeInfo(std::string typeName,
+                             RefStorageClass storage = RefStorageClass::None,
+                             bool isMutable = true,
+                             bool declaredRef = false);
 
 static bool ensureNoDuplicateGenericParameters(const std::vector<std::string> &params,
                                                const std::string &contextDescription);
@@ -1224,17 +1224,39 @@ static llvm::Function *getInterfaceLookupFunction() {
 }
 
 static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
-  return lhs.typeName == rhs.typeName &&
-         lhs.pointerDepth == rhs.pointerDepth &&
-         lhs.isArray == rhs.isArray &&
-         lhs.arrayDepth == rhs.arrayDepth &&
-         lhs.arrayRanks == rhs.arrayRanks &&
-         lhs.isMultidimensional == rhs.isMultidimensional &&
-         lhs.isNullable == rhs.isNullable &&
-         lhs.elementNullable == rhs.elementNullable &&
-         lhs.refStorage == rhs.refStorage &&
-         lhs.isMutable == rhs.isMutable &&
-         lhs.declaredRef == rhs.declaredRef;
+  if (lhs.typeName != rhs.typeName)
+    return false;
+  if (lhs.baseTypeName != rhs.baseTypeName)
+    return false;
+  if (lhs.pointerDepth != rhs.pointerDepth)
+    return false;
+  if (lhs.isArray != rhs.isArray)
+    return false;
+  if (lhs.arrayDepth != rhs.arrayDepth)
+    return false;
+  if (lhs.arrayRanks != rhs.arrayRanks)
+    return false;
+  if (lhs.isMultidimensional != rhs.isMultidimensional)
+    return false;
+  if (lhs.isNullable != rhs.isNullable)
+    return false;
+  if (lhs.elementNullable != rhs.elementNullable)
+    return false;
+  if (lhs.refStorage != rhs.refStorage)
+    return false;
+  if (lhs.isMutable != rhs.isMutable)
+    return false;
+  if (lhs.declaredRef != rhs.declaredRef)
+    return false;
+  if (lhs.isGenericParameter != rhs.isGenericParameter)
+    return false;
+  if (lhs.typeArguments.size() != rhs.typeArguments.size())
+    return false;
+  for (size_t i = 0; i < lhs.typeArguments.size(); ++i) {
+    if (!typeInfoEquals(lhs.typeArguments[i], rhs.typeArguments[i]))
+      return false;
+  }
+  return true;
 }
 
 static std::vector<TypeInfo> gatherParamTypes(const std::vector<Parameter> &params);
@@ -1831,6 +1853,7 @@ struct MemberFieldAssignmentInfo {
   std::string structName;
   std::string rawFieldTypeName;
   std::string sanitizedFieldTypeName;
+  TypeInfo declaredFieldType;
   bool allowsNull = false;
   bool isStatic = false;
 };
@@ -2124,6 +2147,43 @@ static bool expressionIsNullable(const ExprAST *expr) {
   return typeAllowsNull(desc);
 }
 
+static bool validateInvariantAssignment(const TypeInfo &targetInfo,
+                                        const ExprAST *sourceExpr,
+                                        const std::string &contextDescription) {
+  if (!sourceExpr)
+    return true;
+
+  const ExprAST *coreExpr = unwrapRefExpr(sourceExpr);
+  if (!coreExpr || exprIsNullLiteral(coreExpr))
+    return true;
+
+  const std::string &sourceTypeName = coreExpr->getTypeName();
+  if (sourceTypeName.empty())
+    return true;
+
+  TypeInfo boundTarget = applyActiveTypeBindings(targetInfo);
+  TypeInfo boundSource = applyActiveTypeBindings(makeTypeInfo(sourceTypeName));
+
+  const bool targetHasGenerics = !boundTarget.typeArguments.empty();
+  const bool sourceHasGenerics = !boundSource.typeArguments.empty();
+  if (!targetHasGenerics && !sourceHasGenerics)
+    return true;
+
+  if (!boundTarget.baseTypeName.empty() && !boundSource.baseTypeName.empty() &&
+      boundTarget.baseTypeName != boundSource.baseTypeName)
+    return true;
+
+  if (!typeInfoEquals(boundTarget, boundSource)) {
+    reportCompilerError("Cannot use value of type '" +
+                        typeNameFromInfo(boundSource) + "' for " +
+                        contextDescription + " expecting '" +
+                        typeNameFromInfo(boundTarget) + "'");
+    return false;
+  }
+
+  return true;
+}
+
 static bool validateNullableAssignment(const TypeInfo &targetInfo,
                                        const ExprAST *expr,
                                        const std::string &targetDescription) {
@@ -2135,9 +2195,9 @@ static bool validateNullableAssignment(const TypeInfo &targetInfo,
 }
 
 static TypeInfo makeTypeInfo(std::string typeName,
-                             RefStorageClass storage = RefStorageClass::None,
-                             bool isMutable = true,
-                             bool declaredRef = false) {
+                             RefStorageClass storage,
+                             bool isMutable,
+                             bool declaredRef) {
   ParsedTypeDescriptor desc = parseTypeString(typeName);
   TypeInfo info;
   info.typeName = std::move(desc.sanitized);
@@ -2344,20 +2404,20 @@ static std::string applyActiveTypeBindingsToName(const std::string &typeName) {
   return typeNameFromInfo(applyActiveTypeBindings(makeTypeInfo(typeName)));
 }
 
-static std::vector<std::string>
-applyActiveTypeBindingsToNames(const std::vector<std::string> &names) {
-  std::vector<std::string> result;
-  result.reserve(names.size());
-  for (const auto &entry : names)
-    result.push_back(applyActiveTypeBindingsToName(entry));
+static std::vector<TypeInfo>
+applyActiveTypeBindingsToInfos(const std::vector<TypeInfo> &infos) {
+  std::vector<TypeInfo> result;
+  result.reserve(infos.size());
+  for (const auto &info : infos)
+    result.push_back(applyActiveTypeBindings(info));
   return result;
 }
 
-static std::optional<std::string>
-applyActiveTypeBindingsToOptionalName(const std::optional<std::string> &name) {
-  if (!name)
+static std::optional<TypeInfo>
+applyActiveTypeBindingsToOptionalInfo(const std::optional<TypeInfo> &info) {
+  if (!info)
     return std::nullopt;
-  return applyActiveTypeBindingsToName(*name);
+  return applyActiveTypeBindings(*info);
 }
 
 static const TypeInfo *lookupLocalTypeInfo(const std::string &name) {
@@ -2861,6 +2921,8 @@ collectMemberFieldAssignmentInfo(MemberAccessExprAST &member) {
   if (fieldTypeName.empty())
     fieldTypeName = member.getTypeName();
 
+  info.declaredFieldType =
+      applyActiveTypeBindings(makeTypeInfo(fieldTypeName));
   info.fieldType = fieldType;
   info.rawFieldTypeName = fieldTypeName;
   info.sanitizedFieldTypeName = cleanFieldTypeName;
@@ -5132,6 +5194,11 @@ llvm::Value *BinaryExprAST::codegen() {
       }
 
       const TypeInfo *info = lookupTypeInfo(varName);
+      if (info) {
+        if (!validateInvariantAssignment(*info, getRHS(),
+                                         "assignment to variable '" + varName + "'"))
+          return nullptr;
+      }
       std::string lhsPromoteType;
       if (info)
         lhsPromoteType = typeNameFromInfo(*info);
@@ -5723,6 +5790,10 @@ llvm::Value *BinaryExprAST::codegen() {
         if (!fieldInfoOpt)
           return nullptr;
         auto &fieldInfo = *fieldInfoOpt;
+
+        if (!validateInvariantAssignment(fieldInfo.declaredFieldType, getRHS(),
+                                         "assignment to field '" + LHSMA->getMemberName() + "'"))
+          return nullptr;
 
         if (rhsIsNullable && !fieldInfo.allowsNull) {
           return LogErrorV(("Cannot assign nullable value to non-nullable field '" + LHSMA->getMemberName() + "'").c_str());
@@ -6621,6 +6692,9 @@ llvm::Value *CallExprAST::emitResolvedCall(
   std::vector<CandidateResult> viable;
   viable.reserve(overloadIt->second.size());
 
+  size_t syntheticArgCount =
+      ArgValues.size() > getArgs().size() ? ArgValues.size() - getArgs().size() : 0;
+
   for (auto &overload : overloadIt->second) {
     if (overload.parameterTypes.size() != ArgValues.size())
       continue;
@@ -6639,6 +6713,26 @@ llvm::Value *CallExprAST::emitResolvedCall(
       if (overload.parameterIsRef[idx] != ArgIsRef[idx]) {
         compatible = false;
         break;
+      }
+
+      const ExprAST *argExpr = nullptr;
+      if (idx >= syntheticArgCount) {
+        size_t exprIndex = idx - syntheticArgCount;
+        if (exprIndex < getArgs().size())
+          argExpr = getArgs()[exprIndex].get();
+      }
+      const ExprAST *coreArg = unwrapRefExpr(argExpr);
+      if (coreArg && !coreArg->getTypeName().empty()) {
+        TypeInfo expectedInfo = overload.parameterTypes[idx];
+        TypeInfo actualInfo =
+            applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+        const bool expectedHasGenerics = !expectedInfo.typeArguments.empty();
+        const bool actualHasGenerics = !actualInfo.typeArguments.empty();
+        if ((expectedHasGenerics || actualHasGenerics) &&
+            !typeInfoEquals(expectedInfo, actualInfo)) {
+          compatible = false;
+          break;
+        }
       }
 
       llvm::Type *ExpectedType =
@@ -6996,6 +7090,12 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   const ExprAST *NullableCheckExpr = unwrapRefExpr(InitializerExpr);
   const bool shouldCheckNullability = NullableCheckExpr && !RefInitializer;
   std::string targetDescription = "variable '" + getName() + "'";
+
+  if (InitializerExpr) {
+    if (!validateInvariantAssignment(declaredInfo, InitializerExpr,
+                                     "initializer for '" + getName() + "'"))
+      return nullptr;
+  }
 
   std::string declaredElementTypeName;
   llvm::Type *declaredElementType = nullptr;
@@ -8586,12 +8686,71 @@ llvm::Type *StructAST::codegen() {
   std::vector<std::pair<std::string, unsigned>> FieldIndices;
   std::map<std::string, std::string> FieldTypeMap;
 
-  std::vector<std::string> effectiveBaseTypes =
-      applyActiveTypeBindingsToNames(BaseTypes);
-  std::optional<std::string> effectiveBaseClass =
-      applyActiveTypeBindingsToOptionalName(BaseClass);
-  std::vector<std::string> effectiveInterfaces =
-      applyActiveTypeBindingsToNames(InterfaceTypes);
+  SemanticGenericParameterScope typeGenericScope(GenericParameters);
+  GenericDefinitionInfo currentTypeDefinition{definitionKey, &GenericParameters};
+  GenericDefinitionScope definitionScope(&currentTypeDefinition);
+
+  std::vector<TypeInfo> effectiveBaseTypeInfos =
+      applyActiveTypeBindingsToInfos(BaseTypeInfos);
+  std::optional<TypeInfo> effectiveBaseClassInfo =
+      applyActiveTypeBindingsToOptionalInfo(BaseClassInfo);
+  std::vector<TypeInfo> effectiveInterfaceInfos =
+      applyActiveTypeBindingsToInfos(InterfaceTypeInfos);
+
+  for (const auto &baseInfo : effectiveBaseTypeInfos) {
+    const std::string sanitizedName =
+        stripNullableAnnotations(typeNameFromInfo(baseInfo));
+    std::string description =
+        "base type '" + sanitizedName + "' of " +
+        describeAggregateKind(kind) + " '" + typeKey + "'";
+    if (!validateTypeForGenerics(baseInfo, description, &currentTypeDefinition)) {
+      abandonStructDefinition();
+      return nullptr;
+    }
+  }
+
+  std::vector<std::string> effectiveBaseTypes;
+  effectiveBaseTypes.reserve(effectiveBaseTypeInfos.size());
+  for (const auto &info : effectiveBaseTypeInfos)
+    effectiveBaseTypes.push_back(
+        stripNullableAnnotations(typeNameFromInfo(info)));
+
+  std::optional<std::string> effectiveBaseClass;
+  if (effectiveBaseClassInfo)
+    effectiveBaseClass =
+        stripNullableAnnotations(typeNameFromInfo(*effectiveBaseClassInfo));
+
+  std::vector<std::string> effectiveInterfaces;
+  effectiveInterfaces.reserve(effectiveInterfaceInfos.size());
+  for (const auto &info : effectiveInterfaceInfos)
+    effectiveInterfaces.push_back(
+        stripNullableAnnotations(typeNameFromInfo(info)));
+
+  std::map<std::string, std::map<std::string, TypeInfo>>
+      baseTypeArgumentBindings;
+  for (const auto &info : effectiveBaseTypeInfos) {
+    if (!info.hasTypeArguments())
+      continue;
+
+    std::string baseKey =
+        stripNullableAnnotations(typeNameFromInfo(info));
+    std::vector<std::string> parameterNames;
+    if (const CompositeTypeInfo *baseMeta = lookupCompositeInfo(baseKey)) {
+      if (!baseMeta->genericParameters.empty())
+        parameterNames = baseMeta->genericParameters;
+    }
+    if (parameterNames.empty()) {
+      if (StructAST *templateAst = FindGenericTemplate(info.baseTypeName))
+        parameterNames = templateAst->getGenericParameters();
+    }
+    if (parameterNames.size() != info.typeArguments.size())
+      continue;
+
+    std::map<std::string, TypeInfo> mapping;
+    for (size_t i = 0; i < parameterNames.size(); ++i)
+      mapping.emplace(parameterNames[i], info.typeArguments[i]);
+    baseTypeArgumentBindings.emplace(baseKey, std::move(mapping));
+  }
 
   CompositeTypeInfo compositeInfo;
   compositeInfo.kind = kind;
@@ -8599,16 +8758,17 @@ llvm::Type *StructAST::codegen() {
   compositeInfo.genericParameters = GenericParameters;
   compositeInfo.baseClass = effectiveBaseClass;
   compositeInfo.interfaces = effectiveInterfaces;
+  compositeInfo.resolvedBaseTypeInfos = effectiveBaseTypeInfos;
+  compositeInfo.resolvedBaseClassInfo = effectiveBaseClassInfo;
+  compositeInfo.resolvedInterfaceTypeInfos = effectiveInterfaceInfos;
+  compositeInfo.resolvedBaseTypeArgumentBindings =
+      std::move(baseTypeArgumentBindings);
   compositeInfo.isAbstract = IsAbstract;
   compositeInfo.isInterface = (kind == AggregateKind::Interface);
   if (const auto *bindings = currentTypeBindings())
     compositeInfo.typeArgumentBindings = *bindings;
   else
     compositeInfo.typeArgumentBindings.clear();
-
-  SemanticGenericParameterScope typeGenericScope(GenericParameters);
-  GenericDefinitionInfo currentTypeDefinition{definitionKey, &GenericParameters};
-  GenericDefinitionScope definitionScope(&currentTypeDefinition);
 
   if (kind == AggregateKind::Class || kind == AggregateKind::Interface) {
     llvm::StructType *TypeDescTy = getTypeDescriptorType();
@@ -8755,6 +8915,19 @@ llvm::Type *StructAST::codegen() {
 
   CG.compositeMetadata[typeKey] = std::move(compositeInfo);
   CompositeTypeInfo &metadata = CG.compositeMetadata[typeKey];
+  if (metadata.baseClass) {
+    if (const CompositeTypeInfo *baseInfo =
+            lookupCompositeInfo(*metadata.baseClass)) {
+      for (const auto &entry : baseInfo->methodInfo)
+        metadata.methodInfo.emplace(entry.first, entry.second);
+    }
+  }
+  for (const std::string &ifaceName : metadata.interfaces) {
+    if (const CompositeTypeInfo *ifaceInfo = lookupCompositeInfo(ifaceName)) {
+      for (const auto &entry : ifaceInfo->methodInfo)
+        metadata.methodInfo.emplace(entry.first, entry.second);
+    }
+  }
   if (!validateCompositeHierarchy(typeKey, metadata)) {
     abandonStructDefinition();
     return nullptr;
