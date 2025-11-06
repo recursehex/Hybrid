@@ -21,6 +21,8 @@ enum class RefStorageClass {
 
 struct TypeInfo {
   std::string typeName;           // canonical language-visible type
+  std::string baseTypeName;       // base identifier without generic arguments or suffixes
+  std::vector<TypeInfo> typeArguments; // explicit generic type arguments, if any
   unsigned pointerDepth = 0;      // number of explicit pointer levels (@)
   bool isArray = false;           // whether type is an array ("[]")
   unsigned arrayDepth = 0;        // number of array segments ([], [,,], etc.)
@@ -35,6 +37,7 @@ struct TypeInfo {
   bool isReference() const { return refStorage != RefStorageClass::None; }
   bool ownsStorage() const { return refStorage == RefStorageClass::RefValue; }
   bool isAlias() const { return refStorage == RefStorageClass::RefAlias; }
+  bool hasTypeArguments() const { return !typeArguments.empty(); }
 };
 
 enum class AggregateKind : uint8_t {
@@ -756,6 +759,7 @@ class PrototypeAST {
   TypeInfo ReturnTypeInfo;
   std::string Name;
   std::vector<Parameter> Args;
+  std::vector<std::string> GenericParameters;
   bool IsUnsafe;
   bool ReturnsByRef;
   bool IsExtern = false;
@@ -763,13 +767,16 @@ class PrototypeAST {
 
 public:
   PrototypeAST(TypeInfo ReturnTypeInfo, const std::string &Name,
-               std::vector<Parameter> Args, bool IsUnsafe = false, bool ReturnsByRef = false)
-      : ReturnTypeInfo(std::move(ReturnTypeInfo)), Name(Name), Args(std::move(Args)), IsUnsafe(IsUnsafe), ReturnsByRef(ReturnsByRef) {}
+               std::vector<Parameter> Args, bool IsUnsafe = false, bool ReturnsByRef = false,
+               std::vector<std::string> GenericParams = {})
+      : ReturnTypeInfo(std::move(ReturnTypeInfo)), Name(Name), Args(std::move(Args)),
+        GenericParameters(std::move(GenericParams)), IsUnsafe(IsUnsafe), ReturnsByRef(ReturnsByRef) {}
 
   const std::string &getReturnType() const { return ReturnTypeInfo.typeName; }
   const TypeInfo &getReturnTypeInfo() const { return ReturnTypeInfo; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
+  const std::vector<std::string> &getGenericParameters() const { return GenericParameters; }
   bool isUnsafe() const { return IsUnsafe; }
   bool returnsByRef() const { return ReturnsByRef; }
   bool isExtern() const { return IsExtern; }

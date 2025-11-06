@@ -174,8 +174,13 @@ run_test() {
     # Run the test and capture both output and exit code
     local output
     local exit_code
-    output=$($HYBRID_EXEC < "$test_file" 2>&1)
-    exit_code=$?
+    if [[ "$test_file" == test/generics/* ]]; then
+        output=$(HYBRID_ENABLE_GENERICS=1 $HYBRID_EXEC < "$test_file" 2>&1)
+        exit_code=$?
+    else
+        output=$($HYBRID_EXEC < "$test_file" 2>&1)
+        exit_code=$?
+    fi
     
     # Check for error patterns in output
     local has_errors=0

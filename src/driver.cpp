@@ -91,6 +91,7 @@ void printUsage() {
   fprintf(stderr, "Options:\n");
   fprintf(stderr, "  --emit-llvm        Emit the generated LLVM IR\n");
   fprintf(stderr, "  -o <file>          Write output to <file> (implies --emit-llvm)\n");
+  fprintf(stderr, "  --enable-generics  Enable experimental generic syntax\n");
   fprintf(stderr, "  -o -               Write LLVM IR to stdout\n");
 }
 
@@ -102,8 +103,14 @@ int main(int argc, char **argv) {
   pushCompilerSession(session);
 
   bool emitLLVM = false;
+  bool enableGenerics = false;
   std::string outputPath;
   std::vector<std::string> sourceFiles;
+
+  if (const char *envGenerics = std::getenv("HYBRID_ENABLE_GENERICS")) {
+    if (envGenerics[0] != '\0' && envGenerics[0] != '0')
+      enableGenerics = true;
+  }
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -117,6 +124,10 @@ int main(int argc, char **argv) {
         return 1;
       }
       outputPath = argv[++i];
+    } else if (arg == "--enable-generics") {
+      enableGenerics = true;
+    } else if (arg == "--disable-generics") {
+      enableGenerics = false;
     } else if (!arg.empty() && arg[0] == '-') {
       fprintf(stderr, "Error: Unknown option '%s'\n", arg.c_str());
       printUsage();
@@ -129,6 +140,8 @@ int main(int argc, char **argv) {
 
   if (!outputPath.empty())
     emitLLVM = emitLLVM || outputPath == "-" || endsWith(outputPath, ".ll") || endsWith(outputPath, ".bc");
+
+  session.parser().enableGenerics = enableGenerics;
 
   // Initialize LLVM
   InitializeModule();

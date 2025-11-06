@@ -30,6 +30,31 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr();
 static void RecoverAfterExpressionError();
 static void SkipNewlines();
 static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args);
+static std::string ParseCompleteType();
+static bool ParseGenericParameterList(std::vector<std::string> &parameters);
+static bool ParseOptionalGenericArgumentList(std::string &typeSpelling);
+static void splitRightShiftToken();
+static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
+
+class GenericParameterScope {
+public:
+  explicit GenericParameterScope(const std::vector<std::string> &params)
+      : active(!params.empty()) {
+    if (active)
+      currentParser().pushGenericParameters(params);
+  }
+
+  GenericParameterScope(const GenericParameterScope &) = delete;
+  GenericParameterScope &operator=(const GenericParameterScope &) = delete;
+
+  ~GenericParameterScope() {
+    if (active)
+      currentParser().popGenericParameters();
+  }
+
+private:
+  bool active = false;
+};
 
 static unsigned parsePointerDepth(const std::string &typeName) {
   size_t atPos = typeName.find('@');
@@ -50,6 +75,74 @@ static unsigned parsePointerDepth(const std::string &typeName) {
     depth = 1;
   }
   return depth;
+}
+
+static std::optional<size_t> findMatchingAngle(const std::string &text, size_t openPos) {
+  if (openPos >= text.size() || text[openPos] != '<')
+    return std::nullopt;
+
+  int depth = 1;
+  for (size_t pos = openPos + 1; pos < text.size(); ++pos) {
+    char ch = text[pos];
+    if (ch == '<') {
+      ++depth;
+    } else if (ch == '>') {
+      --depth;
+      if (depth == 0)
+        return pos;
+    }
+  }
+
+  return std::nullopt;
+}
+
+static bool splitGenericArguments(const std::string &segment,
+                                  std::vector<std::string> &out) {
+  size_t start = 0;
+  int angleDepth = 0;
+  int bracketDepth = 0;
+
+  for (size_t i = 0; i <= segment.size(); ++i) {
+    const bool atEnd = (i == segment.size());
+    const char ch = atEnd ? ',' : segment[i];
+
+    if (ch == '<') {
+      ++angleDepth;
+    } else if (ch == '>') {
+      if (angleDepth > 0)
+        --angleDepth;
+    } else if (ch == '[') {
+      ++bracketDepth;
+    } else if (ch == ']') {
+      if (bracketDepth > 0)
+        --bracketDepth;
+    }
+
+    if (atEnd || (ch == ',' && angleDepth == 0 && bracketDepth == 0)) {
+      if (i < start)
+        return false;
+      std::string arg = segment.substr(start, i - start);
+      if (arg.empty())
+        return false;
+      out.push_back(std::move(arg));
+      start = i + 1;
+    }
+  }
+
+  return true;
+}
+
+static bool parseGenericArgumentSegment(const std::string &segment,
+                                        std::vector<TypeInfo> &out) {
+  std::vector<std::string> parts;
+  if (!splitGenericArguments(segment, parts))
+    return false;
+
+  for (std::string &part : parts) {
+    out.push_back(buildDeclaredTypeInfo(part, false));
+  }
+
+  return true;
 }
 
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef) {
@@ -133,6 +226,25 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
     info.isNullable = true;
   }
 
+  std::string basePortion = info.typeName;
+  size_t suffixPos = basePortion.find_first_of("@[");
+  if (suffixPos != std::string::npos)
+    basePortion = basePortion.substr(0, suffixPos);
+
+  size_t anglePos = basePortion.find('<');
+  if (anglePos != std::string::npos) {
+    if (auto closePos = findMatchingAngle(basePortion, anglePos)) {
+      std::string segment =
+          basePortion.substr(anglePos + 1, *closePos - anglePos - 1);
+      parseGenericArgumentSegment(segment, info.typeArguments);
+      info.baseTypeName = basePortion.substr(0, anglePos);
+    } else {
+      info.baseTypeName = basePortion.substr(0, anglePos);
+    }
+  } else {
+    info.baseTypeName = basePortion;
+  }
+
   info.refStorage = declaredRef ? RefStorageClass::RefValue : RefStorageClass::None;
   info.isMutable = true;
   info.declaredRef = declaredRef;
@@ -144,6 +256,17 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
 /// lexer and updates CurTok with its results.
 int getNextToken() {
   ParserContext &parser = currentParser();
+  if (parser.hasReplayTokens()) {
+    ParserContext::PendingToken pending = parser.popReplayToken();
+    parser.previousTokenLocation = parser.currentTokenLocation;
+    parser.curTok = pending.token;
+    parser.currentTokenLocation = pending.location;
+    currentLexer().identifierStr.clear();
+    currentLexer().stringLiteral.clear();
+    currentLexer().numericLiteral = NumericLiteral();
+    currentLexer().charLiteral = 0;
+    return parser.curTok;
+  }
   parser.previousTokenLocation = parser.currentTokenLocation;
   int next = gettok();
   parser.curTok = next;
@@ -206,7 +329,8 @@ bool IsValidType()
           (StructNames.contains(IdentifierStr) ||
            ClassNames.contains(IdentifierStr) ||
            IsActiveStructName(IdentifierStr) ||
-           IsActiveClassName(IdentifierStr)));
+           IsActiveClassName(IdentifierStr) ||
+           currentParser().isGenericParameter(IdentifierStr)));
 }
 
 enum class AccessSpecifier {
@@ -433,6 +557,130 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
   return true;
 }
 
+static void splitRightShiftToken() {
+  if (CurTok != tok_right_shift)
+    return;
+
+  ParserContext &parser = currentParser();
+  SourceLocation loc = parser.currentTokenLocation;
+  parser.curTok = tok_gt;
+  parser.pushReplayToken(tok_gt, loc);
+  currentLexer().identifierStr.clear();
+  currentLexer().stringLiteral.clear();
+  currentLexer().numericLiteral = NumericLiteral();
+  currentLexer().charLiteral = 0;
+}
+
+static bool ParseOptionalGenericArgumentList(std::string &Type) {
+  ParserContext &parser = currentParser();
+  if (!parser.enableGenerics || CurTok != tok_lt)
+    return true;
+
+  std::string buffer;
+  buffer.push_back('<');
+
+  getNextToken(); // eat '<'
+  SkipNewlines();
+
+  bool expectArgument = true;
+  while (true) {
+    if (CurTok == tok_gt) {
+      if (expectArgument) {
+        reportCompilerError("Expected type argument after '<'");
+        return false;
+      }
+      buffer.push_back('>');
+      getNextToken();
+      break;
+    }
+
+    if (CurTok == tok_right_shift) {
+      if (expectArgument) {
+        reportCompilerError("Expected type argument after '<'");
+        return false;
+      }
+      splitRightShiftToken();
+      buffer.push_back('>');
+      getNextToken();
+      break;
+    }
+
+    if (!expectArgument) {
+      if (CurTok == ',') {
+        buffer.push_back(',');
+        getNextToken();
+        SkipNewlines();
+        expectArgument = true;
+        continue;
+      }
+      if (CurTok == tok_gt || CurTok == tok_right_shift)
+        continue; // handled at loop start
+
+      reportCompilerError("Expected ',' or '>' in generic argument list");
+      return false;
+    }
+
+    if (!IsValidType()) {
+      reportCompilerError("Expected type argument in generic list");
+      return false;
+    }
+
+    std::string argument = ParseCompleteType();
+    if (argument.empty())
+      return false;
+
+    buffer.append(argument);
+    SkipNewlines();
+    expectArgument = false;
+  }
+
+  Type += buffer;
+  return true;
+}
+
+static bool ParseGenericParameterList(std::vector<std::string> &parameters) {
+  ParserContext &parser = currentParser();
+  if (!parser.enableGenerics || CurTok != tok_lt)
+    return false;
+
+  getNextToken(); // eat '<'
+  SkipNewlines();
+
+  if (CurTok == tok_gt) {
+    reportCompilerError("Generic parameter list cannot be empty");
+    return false;
+  }
+
+  while (true) {
+    if (CurTok != tok_identifier) {
+      reportCompilerError("Expected identifier in generic parameter list");
+      return false;
+    }
+
+    std::string param = IdentifierStr;
+    parameters.push_back(param);
+
+    getNextToken();
+    SkipNewlines();
+
+    if (CurTok == ',') {
+      getNextToken();
+      SkipNewlines();
+      continue;
+    }
+
+    if (CurTok != tok_gt) {
+      reportCompilerError("Expected '>' to close generic parameter list");
+      return false;
+    }
+
+    getNextToken();
+    break;
+  }
+
+  return true;
+}
+
 /// Helper function to parse a complete type including array and pointer modifiers
 /// Returns the full type string (e.g. "int@", "int@2", "int[]", "float@[]")
 std::string ParseCompleteType()
@@ -442,6 +690,11 @@ std::string ParseCompleteType()
 
   std::string Type = IdentifierStr;
   getNextToken(); // eat base type
+
+  if (!ParseOptionalGenericArgumentList(Type))
+    return "";
+
+  SkipNewlines();
 
   bool pointerSeen = false;
 
@@ -1373,8 +1626,14 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   std::string FnName = IdentifierStr;
   getNextToken();
 
+  std::vector<std::string> GenericParams;
+  if (ParseGenericParameterList(GenericParams))
+    SkipNewlines();
+
   if (CurTok != '(')
     return LogErrorP("Expected '(' in prototype");
+
+  GenericParameterScope parameterScope(GenericParams);
 
   std::vector<Parameter> Args;
   getNextToken(); // eat '('
@@ -1384,7 +1643,9 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   if (CurTok == ')') {
     getNextToken(); // eat ')'
     TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
-    return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName, std::move(Args), isUnsafe, returnsByRef);
+    return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName,
+                                          std::move(Args), isUnsafe, returnsByRef,
+                                          std::move(GenericParams));
   }
 
   // Parse parameters
@@ -1431,7 +1692,9 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   }
 
   TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
-  return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName, std::move(Args), isUnsafe, returnsByRef);
+  return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName,
+                                        std::move(Args), isUnsafe, returnsByRef,
+                                        std::move(GenericParams));
 }
 
 /// definition ::= prototype block
@@ -2682,8 +2945,13 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     return nullptr;
   }
 
-  while (CurTok == tok_newline)
-    getNextToken();
+  SkipNewlines();
+
+  std::vector<std::string> genericParameters;
+  if (ParseGenericParameterList(genericParameters))
+    SkipNewlines();
+
+  GenericParameterScope compositeGenerics(genericParameters);
 
   std::optional<std::string> baseClass;
   std::vector<std::string> interfaceTypes;
@@ -2838,7 +3106,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   auto parseCompositeMethod = [&](const std::string &ReturnType,
                                   const std::string &MethodName,
                                   MemberModifiers modifiers,
-                                  MethodKind methodKind) -> bool {
+                                  MethodKind methodKind,
+                                  std::vector<std::string> methodGenericParams) -> bool {
+    GenericParameterScope methodScope(methodGenericParams);
     getNextToken(); // eat '('
 
     std::vector<Parameter> Args;
@@ -2890,7 +3160,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     const bool requiresBody = !modifiers.isAbstract && kind != AggregateKind::Interface;
     std::string QualifiedName = compositeName + "." + MethodName;
     TypeInfo methodReturn = buildDeclaredTypeInfo(ReturnType, false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), QualifiedName, std::move(Args));
+    auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), QualifiedName,
+                                                std::move(Args), false, false,
+                                                std::move(methodGenericParams));
 
     if (requiresBody) {
       if (CurTok != '{') {
@@ -2980,6 +3252,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     while (CurTok == tok_newline)
       getNextToken();
 
+    std::vector<std::string> methodGenericParams;
+    if (ParseGenericParameterList(methodGenericParams))
+      SkipNewlines();
+
+    if (!methodGenericParams.empty() && CurTok != '(') {
+      reportCompilerError("Generic parameter list must be followed by '(' in method declarations");
+      return nullptr;
+    }
+
     if (CurTok == '(') {
       MethodKind methodKind = MethodKind::Regular;
       if (MemberName == "this") {
@@ -3015,9 +3296,14 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
                               "Rename '" + MemberName + "' to PascalCase for consistency");
       }
 
-      if (!parseCompositeMethod(Type, MemberName, modifiers, methodKind))
+      if (!parseCompositeMethod(Type, MemberName, modifiers, methodKind,
+                                std::move(methodGenericParams)))
         return nullptr;
     } else {
+      if (!methodGenericParams.empty()) {
+        reportCompilerError("Only methods may declare generic parameter lists");
+        return nullptr;
+      }
       if (MemberName == "this") {
         reportCompilerError("'this' can only be used as a formatter method name");
         return nullptr;
@@ -3071,7 +3357,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
   auto Result = std::make_unique<StructAST>(
       kind, compositeName, std::move(Fields), std::move(Methods),
-      std::move(baseTypes));
+      std::move(baseTypes), std::move(genericParameters));
   Result->setBaseClass(std::move(baseClass));
   Result->setInterfaces(std::move(interfaceTypes));
   Result->setAbstract(isAbstractComposite);

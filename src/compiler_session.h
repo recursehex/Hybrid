@@ -82,9 +82,23 @@ struct ParserContext {
   bool hadError = false;
   SourceLocation currentTokenLocation{};
   SourceLocation previousTokenLocation{};
+  struct PendingToken {
+    int token = 0;
+    SourceLocation location{};
+  };
+  std::vector<PendingToken> tokenReplayBuffer;
+  std::vector<std::vector<std::string>> genericParameterStack;
+  std::set<std::string> activeGenericParameters;
+  bool enableGenerics = false;
 
   void reset(bool clearSymbols = true);
   void clearPrecedence();
+  void pushGenericParameters(const std::vector<std::string> &params);
+  void popGenericParameters();
+  bool isGenericParameter(const std::string &name) const;
+  void pushReplayToken(int token, SourceLocation location);
+  bool hasReplayTokens() const;
+  PendingToken popReplayToken();
 };
 
 /// CompilerSession groups lexer and parser context for a single compilation

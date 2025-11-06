@@ -407,6 +407,9 @@ void ParserContext::reset(bool clearSymbols) {
   previousTokenLocation = {};
   structDefinitionStack.clear();
   classDefinitionStack.clear();
+  tokenReplayBuffer.clear();
+  genericParameterStack.clear();
+  activeGenericParameters.clear();
   if (clearSymbols)
     structNames.clear();
   if (clearSymbols)
@@ -415,6 +418,41 @@ void ParserContext::reset(bool clearSymbols) {
 
 void ParserContext::clearPrecedence() {
   binopPrecedence.clear();
+}
+
+void ParserContext::pushGenericParameters(const std::vector<std::string> &params) {
+  if (params.empty())
+    return;
+  genericParameterStack.push_back(params);
+  for (const auto &name : params)
+    activeGenericParameters.insert(name);
+}
+
+void ParserContext::popGenericParameters() {
+  if (genericParameterStack.empty())
+    return;
+  const auto &params = genericParameterStack.back();
+  for (const auto &name : params)
+    activeGenericParameters.erase(name);
+  genericParameterStack.pop_back();
+}
+
+bool ParserContext::isGenericParameter(const std::string &name) const {
+  return activeGenericParameters.contains(name);
+}
+
+void ParserContext::pushReplayToken(int token, SourceLocation location) {
+  tokenReplayBuffer.push_back(PendingToken{token, location});
+}
+
+bool ParserContext::hasReplayTokens() const {
+  return !tokenReplayBuffer.empty();
+}
+
+ParserContext::PendingToken ParserContext::popReplayToken() {
+  PendingToken tok = tokenReplayBuffer.back();
+  tokenReplayBuffer.pop_back();
+  return tok;
 }
 
 // CompilerSession --------------------------------------------------------------
