@@ -107,6 +107,8 @@ struct CodegenContext {
   std::vector<llvm::BasicBlock *> loopContinueBlocks;
   std::vector<std::set<std::string>> nonNullFactsStack;
   std::vector<ActiveCompositeContext> compositeContextStack;
+  std::vector<std::vector<std::string>> genericParameterStack;
+  std::map<std::string, unsigned> activeGenericParameters;
 
   void reset();
 };
@@ -130,6 +132,8 @@ inline void CodegenContext::reset() {
   loopContinueBlocks.clear();
   nonNullFactsStack.clear();
   compositeContextStack.clear();
+  genericParameterStack.clear();
+  activeGenericParameters.clear();
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

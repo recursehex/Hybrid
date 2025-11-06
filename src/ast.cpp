@@ -104,6 +104,156 @@ static bool convertUTF8LiteralToUTF16(const std::string &input,
 #define LoopContinueBlocks (CG.loopContinueBlocks)
 #define NonNullFacts (CG.nonNullFactsStack)
 
+static void pushGenericParameterScope(const std::vector<std::string> &params) {
+  if (params.empty())
+    return;
+  CodegenContext &ctx = currentCodegen();
+  ctx.genericParameterStack.push_back(params);
+  for (const auto &name : params)
+    ++ctx.activeGenericParameters[name];
+}
+
+static void popGenericParameterScope() {
+  CodegenContext &ctx = currentCodegen();
+  if (ctx.genericParameterStack.empty())
+    return;
+  const auto &params = ctx.genericParameterStack.back();
+  for (const auto &name : params) {
+    auto it = ctx.activeGenericParameters.find(name);
+    if (it == ctx.activeGenericParameters.end())
+      continue;
+    if (it->second <= 1)
+      ctx.activeGenericParameters.erase(it);
+    else
+      --it->second;
+  }
+  ctx.genericParameterStack.pop_back();
+}
+
+static bool isActiveGenericParameter(const std::string &name) {
+  if (!hasCompilerSession())
+    return false;
+  CodegenContext &ctx = currentCodegen();
+  return ctx.activeGenericParameters.contains(name);
+}
+
+class SemanticGenericParameterScope {
+public:
+  explicit SemanticGenericParameterScope(const std::vector<std::string> &params)
+      : active(!params.empty()) {
+    if (active)
+      pushGenericParameterScope(params);
+  }
+
+  SemanticGenericParameterScope(const SemanticGenericParameterScope &) = delete;
+  SemanticGenericParameterScope &operator=(const SemanticGenericParameterScope &) = delete;
+
+  ~SemanticGenericParameterScope() {
+    if (active)
+      popGenericParameterScope();
+  }
+
+private:
+  bool active = false;
+};
+
+struct GenericDefinitionInfo {
+  std::string_view typeName;
+  const std::vector<std::string> *parameters = nullptr;
+};
+
+static thread_local std::vector<const GenericDefinitionInfo *> ActiveGenericDefinitions;
+
+class GenericDefinitionScope {
+public:
+  explicit GenericDefinitionScope(const GenericDefinitionInfo *info)
+      : active(info != nullptr) {
+    if (active)
+      ActiveGenericDefinitions.push_back(info);
+  }
+
+  GenericDefinitionScope(const GenericDefinitionScope &) = delete;
+  GenericDefinitionScope &operator=(const GenericDefinitionScope &) = delete;
+
+  ~GenericDefinitionScope() {
+    if (active)
+      ActiveGenericDefinitions.pop_back();
+  }
+
+private:
+  bool active = false;
+};
+
+static bool ensureNoDuplicateGenericParameters(const std::vector<std::string> &params,
+                                               const std::string &contextDescription) {
+  if (params.empty())
+    return true;
+  std::set<std::string> seen;
+  for (const auto &name : params) {
+    if (!seen.insert(name).second) {
+      reportCompilerError("Duplicate generic parameter '" + name + "' in " + contextDescription);
+      return false;
+    }
+  }
+  return true;
+}
+
+static std::optional<size_t> findMatchingAngleInTypeName(const std::string &text, size_t openPos) {
+  int depth = 0;
+  for (size_t i = openPos; i < text.size(); ++i) {
+    char ch = text[i];
+    if (ch == '<') {
+      ++depth;
+    } else if (ch == '>') {
+      --depth;
+      if (depth == 0)
+        return i;
+      if (depth < 0)
+        break;
+    }
+  }
+  return std::nullopt;
+}
+
+static bool splitGenericArgumentList(const std::string &segment,
+                                     std::vector<std::string> &out) {
+  size_t start = 0;
+  int angleDepth = 0;
+  int bracketDepth = 0;
+
+  for (size_t i = 0; i <= segment.size(); ++i) {
+    const bool atEnd = (i == segment.size());
+    const char ch = atEnd ? ',' : segment[i];
+
+    if (ch == '<') {
+      ++angleDepth;
+    } else if (ch == '>') {
+      if (angleDepth > 0)
+        --angleDepth;
+    } else if (ch == '[') {
+      ++bracketDepth;
+    } else if (ch == ']') {
+      if (bracketDepth > 0)
+        --bracketDepth;
+    }
+
+    if (atEnd || (ch == ',' && angleDepth == 0 && bracketDepth == 0)) {
+      if (i < start)
+        return false;
+      std::string arg = segment.substr(start, i - start);
+      if (arg.empty())
+        return false;
+      out.push_back(std::move(arg));
+      start = i + 1;
+    }
+  }
+
+  return true;
+}
+
+static std::vector<TypeInfo> buildGenericArgumentTypeInfos(const std::string &segment);
+static void populateTypeInfoGenerics(TypeInfo &info);
+
 static void ensureBaseNonNullScope();
 
 static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name);
@@ -1868,7 +2018,48 @@ static TypeInfo makeTypeInfo(std::string typeName,
   info.refStorage = storage;
   info.isMutable = isMutable;
   info.declaredRef = declaredRef;
+  populateTypeInfoGenerics(info);
   return info;
+}
+
+static std::vector<TypeInfo> buildGenericArgumentTypeInfos(const std::string &segment) {
+  std::vector<TypeInfo> result;
+  std::vector<std::string> parts;
+  if (!splitGenericArgumentList(segment, parts))
+    return result;
+
+  result.reserve(parts.size());
+  for (const std::string &part : parts)
+    result.push_back(makeTypeInfo(part));
+  return result;
+}
+
+static void populateTypeInfoGenerics(TypeInfo &info) {
+  info.typeArguments.clear();
+
+  std::string basePortion = info.typeName;
+  size_t suffixPos = basePortion.find_first_of("@[");
+  if (suffixPos != std::string::npos)
+    basePortion = basePortion.substr(0, suffixPos);
+
+  size_t anglePos = basePortion.find('<');
+  if (anglePos != std::string::npos) {
+    info.baseTypeName = basePortion.substr(0, anglePos);
+    if (auto closePos = findMatchingAngleInTypeName(basePortion, anglePos)) {
+      std::string segment =
+          basePortion.substr(anglePos + 1, *closePos - anglePos - 1);
+      info.typeArguments = buildGenericArgumentTypeInfos(segment);
+    } else {
+      info.typeArguments.clear();
+    }
+  } else {
+    info.baseTypeName = basePortion;
+  }
+
+  if (info.baseTypeName.empty())
+    info.baseTypeName = basePortion;
+
+  info.isGenericParameter = isActiveGenericParameter(info.baseTypeName);
 }
 
 static const TypeInfo *lookupLocalTypeInfo(const std::string &name) {
@@ -1904,6 +2095,97 @@ static TypeInfo runtimeTypeFrom(const TypeInfo &declared, RefStorageClass storag
   info.refStorage = storage;
   info.declaredRef = declaredRefOverride;
   return info;
+}
+
+static bool validateTypeForGenerics(const TypeInfo &info,
+                                    const std::string &contextDescription,
+                                    const GenericDefinitionInfo *currentDefinition = nullptr) {
+  if (!currentParser().enableGenerics)
+    return true;
+
+  bool valid = true;
+
+  if (info.isGenericParameter) {
+    if (!isActiveGenericParameter(info.baseTypeName)) {
+      reportCompilerError("Unknown generic parameter '" + info.baseTypeName +
+                          "' in " + contextDescription);
+      valid = false;
+    }
+    if (info.hasTypeArguments()) {
+      reportCompilerError("Generic parameter '" + info.baseTypeName +
+                          "' cannot have type arguments in " + contextDescription);
+      valid = false;
+    }
+  }
+
+  size_t expectedArguments = 0;
+  bool hasDefinition = false;
+
+  const GenericDefinitionInfo *definition = nullptr;
+  if (currentDefinition && currentDefinition->typeName == info.baseTypeName) {
+    definition = currentDefinition;
+  } else {
+    for (auto it = ActiveGenericDefinitions.rbegin();
+         it != ActiveGenericDefinitions.rend(); ++it) {
+      if (*it && (*it)->typeName == info.baseTypeName) {
+        definition = *it;
+        break;
+      }
+    }
+  }
+
+  if (definition) {
+    if (definition->parameters)
+      expectedArguments = definition->parameters->size();
+    hasDefinition = true;
+  } else if (const CompositeTypeInfo *metadata =
+                 lookupCompositeInfo(info.baseTypeName)) {
+    expectedArguments = metadata->genericParameters.size();
+    hasDefinition = true;
+  }
+
+  if (info.hasTypeArguments()) {
+    if (!hasDefinition) {
+      reportCompilerError("Type '" + info.baseTypeName +
+                          "' does not accept generic arguments in " + contextDescription);
+      valid = false;
+    } else if (expectedArguments == 0) {
+      reportCompilerError("Type '" + info.baseTypeName +
+                          "' does not declare generic parameters but was used with type arguments in " + contextDescription);
+      valid = false;
+    } else if (info.typeArguments.size() != expectedArguments) {
+      reportCompilerError("Type '" + info.baseTypeName + "' expects " +
+                          std::to_string(expectedArguments) +
+                          (expectedArguments == 1 ? " type argument" : " type arguments") +
+                          " but received " +
+                          std::to_string(info.typeArguments.size()) + " in " +
+                          contextDescription);
+      valid = false;
+    }
+  }
+
+  for (const auto &arg : info.typeArguments) {
+    if (!validateTypeForGenerics(arg, "type argument of '" + info.baseTypeName + "'",
+                                 definition))
+      valid = false;
+  }
+
+  if (!info.isGenericParameter && !info.hasTypeArguments()) {
+    bool known = hasDefinition;
+    if (!known) {
+      if (lookupTypeInfo(info.baseTypeName))
+        known = true;
+      else if (getTypeFromString(info.baseTypeName))
+        known = true;
+    }
+    if (!known) {
+      reportCompilerError("Unknown type '" + info.baseTypeName +
+                          "' in " + contextDescription);
+      valid = false;
+    }
+  }
+
+  return valid;
 }
 
 static bool isDeclaredRefGlobal(const std::string &name) {
@@ -7694,9 +7976,16 @@ const std::string &PrototypeAST::getMangledName() const {
 
 // Generate code for function prototypes
 llvm::Function *PrototypeAST::codegen() {
+  if (!ensureNoDuplicateGenericParameters(getGenericParameters(),
+                                          "function '" + Name + "'"))
+    return nullptr;
+  SemanticGenericParameterScope prototypeGenerics(getGenericParameters());
   std::vector<llvm::Type*> ParamTypes;
   ParamTypes.reserve(Args.size());
   for (const auto &Param : Args) {
+    if (!validateTypeForGenerics(Param.DeclaredType,
+                                 "parameter '" + Param.Name + "' of function '" + Name + "'"))
+      return nullptr;
     llvm::Type *ParamType = getTypeFromString(Param.DeclaredType.typeName);
     if (!ParamType)
       return LogErrorF("Unknown parameter type");
@@ -7706,6 +7995,10 @@ llvm::Function *PrototypeAST::codegen() {
       ParamTypes.push_back(ParamType);
     }
   }
+
+  if (!validateTypeForGenerics(ReturnTypeInfo,
+                               "return type of function '" + Name + "'"))
+    return nullptr;
 
   llvm::Type *RetType = getTypeFromString(ReturnTypeInfo.typeName);
   if (!RetType)
@@ -7779,6 +8072,7 @@ llvm::Function *FunctionAST::codegen() {
   if (!TheFunction)
     return nullptr;
 
+  SemanticGenericParameterScope functionGenerics(getProto()->getGenericParameters());
   FunctionOverload *overloadEntry = lookupFunctionOverload(*getProto());
   if (overloadEntry)
     overloadEntry->function = TheFunction;
@@ -7905,6 +8199,9 @@ llvm::Type *StructAST::codegen() {
                         " type already defined: " + Name);
     return nullptr;
   }
+
+  if (!ensureNoDuplicateGenericParameters(GenericParameters, "type '" + Name + "'"))
+    return nullptr;
   
   // Save the current insertion point to restore it after generating constructors
   auto SavedInsertBlock = Builder->GetInsertBlock();
@@ -7930,6 +8227,10 @@ llvm::Type *StructAST::codegen() {
   compositeInfo.interfaces = InterfaceTypes;
   compositeInfo.isAbstract = IsAbstract;
   compositeInfo.isInterface = (kind == AggregateKind::Interface);
+
+  SemanticGenericParameterScope typeGenericScope(GenericParameters);
+  GenericDefinitionInfo currentTypeDefinition{Name, &GenericParameters};
+  GenericDefinitionScope definitionScope(&currentTypeDefinition);
 
   if (kind == AggregateKind::Class || kind == AggregateKind::Interface) {
     llvm::StructType *TypeDescTy = getTypeDescriptorType();
@@ -8002,6 +8303,14 @@ llvm::Type *StructAST::codegen() {
       return nullptr;
     }
 
+    TypeInfo fieldTypeInfo = makeTypeInfo(FieldTypeName);
+    if (!validateTypeForGenerics(fieldTypeInfo,
+                                 "field '" + Field->getName() + "' of type '" + Name + "'",
+                                 &currentTypeDefinition)) {
+      abandonStructDefinition();
+      return nullptr;
+    }
+
     llvm::Type *FieldType = getTypeFromString(FieldTypeName);
     if (!FieldType) {
       reportCompilerError("Unknown field type '" + FieldTypeName + "' in struct '" + Name + "'");
@@ -8038,7 +8347,7 @@ llvm::Type *StructAST::codegen() {
           llvm::GlobalValue::InternalLinkage, Init, GlobalName);
 
       CG.globalValues[GlobalName] = GV;
-      rememberGlobalType(GlobalName, makeTypeInfo(FieldTypeName));
+      rememberGlobalType(GlobalName, fieldTypeInfo);
 
       compositeInfo.staticFieldTypes[Field->getName()] = FieldTypeName;
       compositeInfo.staticFieldModifiers[Field->getName()] = Field->getModifiers();

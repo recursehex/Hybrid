@@ -245,6 +245,7 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
     info.baseTypeName = basePortion;
   }
 
+  info.isGenericParameter = currentParser().isGenericParameter(info.baseTypeName);
   info.refStorage = declaredRef ? RefStorageClass::RefValue : RefStorageClass::None;
   info.isMutable = true;
   info.declaredRef = declaredRef;

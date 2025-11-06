@@ -33,6 +33,7 @@ struct TypeInfo {
   RefStorageClass refStorage = RefStorageClass::None;
   bool isMutable = true;
   bool declaredRef = false;       // whether declared via `ref`
+  bool isGenericParameter = false; // true when the type refers to a generic parameter
 
   bool isReference() const { return refStorage != RefStorageClass::None; }
   bool ownsStorage() const { return refStorage == RefStorageClass::RefValue; }
