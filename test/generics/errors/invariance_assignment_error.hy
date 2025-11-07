@@ -18,11 +18,6 @@ class Crate<T>
     {
         this.occupant = occupant
     }
-
-    T Get()
-    {
-        return this.occupant
-    }
 }
 
 void main()

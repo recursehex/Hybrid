@@ -14,7 +14,6 @@ int test_skip_while()
         sum += i
     }
     
-    // Should return 50 (55 - 5)
     assert sum == 50
     return sum
 }

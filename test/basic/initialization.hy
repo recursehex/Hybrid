@@ -1,5 +1,4 @@
 // Test that all variables must be initialized
-// These should all work:
 int x = 5
 float y = 3.14
 bool flag = true

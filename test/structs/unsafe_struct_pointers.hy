@@ -26,8 +26,6 @@ unsafe void test_ptr_container()
     // Create container
     PtrContainer container = PtrContainer(ptrs, 3)
 
-    // For now, just verify the struct was created
-    // Complex array access through struct fields needs more work
     int c = container.count
     assert c == 3
     assert @container.pointers[0] == 10

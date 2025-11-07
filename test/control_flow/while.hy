@@ -91,7 +91,6 @@ int test_while_false()
     return counter
 }
 
-// Main function to run tests
 int main()
 {
     assert test_countdown() == 15

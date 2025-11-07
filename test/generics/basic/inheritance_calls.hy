@@ -40,7 +40,9 @@ void main()
 
     assert tracked.Get() == 10
     assert tracked.Snapshot() == 10
+    tracked.Set(5)
+    assert tracked.Get() == 5
 
     Box<int> asBase = tracked
-    assert asBase.Get() == 10
+    assert asBase.Get() == 5
 }

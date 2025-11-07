@@ -9,11 +9,6 @@ class Box<T>
         this.value = value
     }
 
-    T Get()
-    {
-        return this.value
-    }
-
     void Set(T value)
     {
         this.value = value
@@ -22,12 +17,12 @@ class Box<T>
 
 void main()
 {
-    Box<int> numbers = (42)
-    assert numbers.Get() == 42
+    Box<int> numbers = (42)     // shorthand
+    assert numbers.value == 42
 
     numbers.Set(7)
-    assert numbers.Get() == 7
+    assert numbers.value == 7
 
-    Box<string> words = Box<string>("hello")
-    assert words.Get() == "hello"
+    Box<string> words = Box<string>("hello")    // full construction
+    assert words.value == "hello"
 }

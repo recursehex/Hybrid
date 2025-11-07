@@ -43,7 +43,7 @@ class Square inherits Shape, Drawable
 
     override void Draw()
     {
-        // drawing omitted in tests
+        // Complex drawing method
     }
 }
 

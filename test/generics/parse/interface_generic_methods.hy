@@ -5,6 +5,4 @@ interface Repository<TItem>
     void Clear()
 }
 
-void main()
-{
-}
+void main() {}

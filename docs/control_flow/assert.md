@@ -6,7 +6,7 @@ Assert statements can be used both inside functions and at the top level (global
 
 ## Basic Syntax
 
-```c
+```java
 assert expression
 ```
 
@@ -19,7 +19,7 @@ Assert can be used in two contexts:
 1. **Inside functions**: For runtime validation within function bodies
 2. **At top level**: For global constant validation and test assertions
 
-```c
+```java
 // Top-level assertions (global scope)
 int global_value = 42
 assert global_value == 42  // OK - validates global state
@@ -35,7 +35,7 @@ int test()
 
 ## Usage Examples
 
-```c
+```java
 // Simple boolean assertions
 assert true              // Always passes
 assert 1 == 1           // Passes
@@ -64,7 +64,7 @@ assert x * y == 50            // Passes
 
 Assert statements with constant expressions are evaluated at compile time. If a constant assertion would fail, the compiler reports an error:
 
-```c
+```java
 // Compile-time error - assertion always fails
 assert 1 == 2          // Error: Assert condition evaluates to false at compile time
 assert false           // Error: Assert condition evaluates to false at compile time
@@ -81,7 +81,7 @@ Non-boolean expressions are automatically converted to boolean:
 - Floating-point values: 0.0 is false, non-zero is true
 - Boolean values: Used directly
 
-```c
+```java
 int count = 5
 assert count           // Passes (5 != 0)
 
@@ -97,7 +97,7 @@ assert active         // Passes
 Assert statements are commonly used for:
 
 1. **Preconditions** - Verify function requirements:
-```c
+```java
 int divide(int a, int b)
 {
     assert b != 0     // Ensure no division by zero
@@ -106,7 +106,7 @@ int divide(int a, int b)
 ```
 
 2. **Postconditions** - Verify function results:
-```c
+```java
 int abs(int x)
 {
     int result = x if x >= 0 else -x
@@ -116,7 +116,7 @@ int abs(int x)
 ```
 
 3. **Invariants** - Verify loop or data structure properties:
-```c
+```java
 int sum(int[] arr, int len)
 {
     assert len > 0       // Array must not be empty
@@ -130,7 +130,7 @@ int sum(int[] arr, int len)
 ```
 
 4. **Testing** - Verify expected behavior:
-```c
+```java
 int testAddition()
 {
     assert add(2, 3) == 5

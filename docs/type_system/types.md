@@ -54,3 +54,48 @@ Arrays are implemented as structs containing a pointer to elements and a size in
 ## Strings and Unicode
 
 `string` values are stored as UTF-16 sequences. Every string literal is validated and converted from its UTF-8 spelling during lexing, then emitted as a 16-bit array that shares a single global instance: identical literals point at the same address, so pointer equality works while still representing Unicode text correctly. Character literals adopt the consumer's width, so `'😊'` becomes a 32-bit `lchar` in wide contexts, but narrows to `char`/`schar` if it fits the target range, otherwise invalid UTF-8 triggers a diagnostic. Use the sized character aliases (`schar`, `char`, `lchar`) when you need to control storage explicitly.
+
+## Custom Types
+
+Beyond the built-in primitives, you can define your own types using `struct` and `class` declarations. Structs cover value-type aggregates with deterministic layout, while classes provide reference semantics plus inheritance. See `docs/type_system/structs.md` and `docs/type_system/classes.md` for the full syntax, rules, and examples.
+
+```cs
+struct Vector2
+{
+    float x
+    float y
+
+    Vector2(float x, float y)
+    {
+        this.x = x
+        this.y = y
+    }
+}
+
+Vector2 origin = (0, 0)
+origin.x = 5.0f
+```
+
+```cs
+class Player inherits Entity
+{
+    string name
+    int score
+    private float health
+
+    void SetHealth(float value)
+    {
+        this.health = value if value >= 0.0f && value <= 100.0f else this.health
+    }
+
+    Player(string name, int score)
+    {
+        this.name = name
+        this.score = score
+        this.health = 100.0f
+    }
+}
+
+Player alice = ("Alice", 9999)
+alice.SetHealth(85.5f)
+```

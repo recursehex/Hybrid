@@ -1,9 +1,7 @@
 // Expect generic arity mismatch diagnostic
 class Box<T>
 {
-    Box()
-    {
-    }
+    Box() {}
 }
 
 class Uses
@@ -11,6 +9,4 @@ class Uses
     Box<int, string> invalidField
 }
 
-void main()
-{
-}
+void main() {}
