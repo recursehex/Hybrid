@@ -411,6 +411,7 @@ void ParserContext::reset(bool clearSymbols) {
   tokenReplayBuffer.clear();
   genericParameterStack.clear();
   activeGenericParameters.clear();
+  templateAngleDepth = 0;
   if (clearSymbols)
     structNames.clear();
   if (clearSymbols)
@@ -443,7 +444,14 @@ bool ParserContext::isGenericParameter(const std::string &name) const {
 }
 
 void ParserContext::pushReplayToken(int token, SourceLocation location) {
-  tokenReplayBuffer.push_back(PendingToken{token, location});
+  PendingToken pending;
+  pending.token = token;
+  pending.location = location;
+  tokenReplayBuffer.push_back(std::move(pending));
+}
+
+void ParserContext::pushReplayToken(const PendingToken &token) {
+  tokenReplayBuffer.push_back(token);
 }
 
 bool ParserContext::hasReplayTokens() const {

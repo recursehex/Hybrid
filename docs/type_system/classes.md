@@ -75,12 +75,12 @@ class Pad
 
     Pad(int slots)
     {
-        this.slots = slots      // OK – initialized in constructor
+        this.slots = slots      // OK - initialized in constructor
     }
 
     Pad()
     {
-        // slots is never assigned → reading or mutating it later errors
+        // slots is never assigned, reading or mutating it later errors
     }
 
     void Use()
@@ -137,8 +137,8 @@ class Ticker
 
 ## Diagnostics Summary
 
-- **Uninitialized member mutation** – triggered when incrementing/assigning a member that has not been initialized yet. Generated for both static and instance fields.
-- **Const mutation** – writes outside constructors (or inline initializers) for `const` fields continue to emit `Cannot write to const member ...`.
+- **Uninitialized member mutation** - triggered when incrementing/assigning a member that has not been initialized yet. Generated for both static and instance fields.
+- **Const mutation** - writes outside constructors (or inline initializers) for `const` fields continue to emit `Cannot write to const member ...`.
 - The existing access-control diagnostics (`read-only outside definition`, `Cannot call private member`, etc.) remain unchanged.
 
 These rules keep classes aligned with the modern expectations of type and memory safety. Static fields require initialization before use, and instance fields must be handled in every constructor, but Hybrid strengthens them with explicit compiler tracking so that mistakes surface immediately rather than resulting in default-initialized values at runtime.
@@ -200,6 +200,59 @@ class Player inherits Entity, Drawable
 ```
 
 Attempting to omit an interface member or forget to override an abstract base method results in a compile-time error, keeping derived classes honest.
+
+## Generics
+
+Classes, interfaces, and functions can declare generic type parameters without any compiler switches-the feature is always enabled. You currently **must** provide explicit type arguments because type inference is not yet implemented. The parser performs context-sensitive lookahead so that nested templates such as `Box<List<int>>` and expressions like `left < right >> 1` coexist.
+
+```cs
+class Box<T>
+{
+    T value
+
+    Box(T value)
+    {
+        this.value = value
+    }
+
+    void SwapWith<U>(ref U target, U replacement)
+    {
+        target = replacement
+    }
+}
+
+void Assign<T>(ref T target, T value)
+{
+    target = value
+}
+
+void main()
+{
+    Box<int> ints = Box<int>(7)
+    int number = 0
+    Assign<int>(ref number, 42)
+    ints.SwapWith<int>(ref number, 99)
+}
+```
+
+- Use `class Name<T, U>` to declare generic classes or interfaces.
+- Invoke `Name<int, string>` with explicit `<>` arguments. Omitting them (e.g., `Assign(ref number, 7)`) produces a diagnostic reminding you to add `<T>`.
+- Generic classes can inherit from other generic types: `class List<T> inherits Sequence<T>`.
+- There is no variance or constraint syntax yet-every binding is invariant, so `Box<Derived>` is not assignable to `Box<Base>` unless your own hierarchy makes that conversion legal.
+
+### Runtime representation
+
+Hybrid specializes each instantiation. `Box<int>` and `Box<string>` each receive their own LLVM IR bodies and runtime descriptors. The final mangled name encodes both class-level and method-level bindings (e.g. `Box.SwapWith$RV_void_P2R_int,R_int<T=int,U=int>`), so even methods whose generic parameters only appear inside the body are unique per instantiation. See [Generics Runtime Strategy](generics_runtime.md) for the detailed trade-offs and the caching rules that keep specialization bloat in check.
+
+You can introspect the instantiated metadata at runtime via the new `describeType()` intrinsic:
+
+```cs
+Box<int> ints = Box<int>(3)
+string summary = describeType("Box<int>")
+// summary == "type:Box<int>|args:T=int|base:none|interfaces:none"
+```
+
+The returned string lists the concrete type arguments, base class, implemented interfaces, and any generic method instantiations emitted during the current session. Tests under `test/generics/basic/metadata_dump.hy` pin this behaviour so regressions are caught automatically.
 
 ### Keyword reference
 
@@ -321,15 +374,15 @@ class LoggingButton inherits Button
 
 The compiler surfaces precise errors to keep hierarchies correct. Examples include:
 
-- `Class 'Foo' can only inherit from another class` – triggered when a non-class type appears first in the `inherits` list.
-- `Interface 'Foo' can only inherit from other interfaces` – ensures interfaces do not derive from classes.
-- `Inheritance cycle detected for type 'Foo'` – prevents recursive hierarchies.
-- `Class 'Foo' does not implement interface member 'Interface.Member'` – missing interface implementation.
-- `Class 'Foo' must override abstract member 'Base.Member' defined in 'Base'` – concrete class failed to supply a definition.
-- `Static method 'Foo' cannot be marked override` / `Abstract method 'Foo' cannot be static` – invalid modifier combinations.
-- `Method 'Foo' does not override a base class method` – `override` used without a matching virtual base member.
-- `Protected member 'Bar' ... without inheriting from it` – invalid access from outside the hierarchy.
-- `'base' may only be used inside instance methods` / `Type 'Foo' does not have a base class` – misuse of the `base` expression.
+- `Class 'Foo' can only inherit from another class` - triggered when a non-class type appears first in the `inherits` list.
+- `Interface 'Foo' can only inherit from other interfaces` - ensures interfaces do not derive from classes.
+- `Inheritance cycle detected for type 'Foo'` - prevents recursive hierarchies.
+- `Class 'Foo' does not implement interface member 'Interface.Member'` - missing interface implementation.
+- `Class 'Foo' must override abstract member 'Base.Member' defined in 'Base'` - concrete class failed to supply a definition.
+- `Static method 'Foo' cannot be marked override` / `Abstract method 'Foo' cannot be static` - invalid modifier combinations.
+- `Method 'Foo' does not override a base class method` - `override` used without a matching virtual base member.
+- `Protected member 'Bar' ... without inheriting from it` - invalid access from outside the hierarchy.
+- `'base' may only be used inside instance methods` / `Type 'Foo' does not have a base class` - misuse of the `base` expression.
 
 ## Runtime Polymorphism
 
@@ -343,4 +396,4 @@ Because instances continue to use value semantics, assigning `Derived` into a `B
 
 Virtual calls use the vtable slot recorded during semantic analysis. `base.Method()` and static members bypass the vtable and call the resolved implementation directly. Interface variables obtain their method table by calling a runtime helper (`hybrid_lookup_interface_table`) that walks the descriptor chain; if a class claims an interface but the table is missing, the helper traps so the program does not continue with undefined behaviour.
 
-These runtime mechanics make polymorphic calls predictable while keeping Hybrid’s value semantics and explicit construction guarantees intact.
+These runtime mechanics make polymorphic calls predictable while keeping Hybrid's value semantics and explicit construction guarantees intact.

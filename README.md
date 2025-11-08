@@ -275,6 +275,10 @@ Hybrid/
     - `?[]`
     - `??`
     - `??=`
+- Generics
+    - `class Box<T> { ... }` - generic classes
+    - `void Assign<T>(ref T target, T value)` - generic functions
+    - Explicit invocations such as `Box<int>` and `Assign<int>(ref target, 7)`
 
 **Planned Features**
 - Stuctures
@@ -291,8 +295,6 @@ Hybrid/
     - `weak`
 - Tuples
     - `(type1, type2) var`
-- Generics
-    - `<type>`
 - Type checking
     - `is`
     - `not`

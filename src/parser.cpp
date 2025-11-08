@@ -32,8 +32,8 @@ static void SkipNewlines();
 static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args);
 static std::string ParseCompleteType();
 static bool ParseGenericParameterList(std::vector<std::string> &parameters);
-static bool ParseOptionalGenericArgumentList(std::string &typeSpelling);
-static void splitRightShiftToken();
+static bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
+                                             bool allowDisambiguation = false);
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
 
 class GenericParameterScope {
@@ -54,6 +54,95 @@ public:
 
 private:
   bool active = false;
+};
+
+class TemplateAngleScope {
+public:
+  TemplateAngleScope() : active(true) {
+    currentParser().templateAngleDepth++;
+  }
+
+  TemplateAngleScope(const TemplateAngleScope &) = delete;
+  TemplateAngleScope &operator=(const TemplateAngleScope &) = delete;
+
+  ~TemplateAngleScope() {
+    if (active)
+      currentParser().templateAngleDepth--;
+  }
+
+private:
+  bool active = true;
+};
+
+static std::vector<std::vector<ParserContext::PendingToken> *> &
+tokenCaptureStack() {
+  static std::vector<std::vector<ParserContext::PendingToken> *> stack;
+  return stack;
+}
+
+static ParserContext::PendingToken snapshotCurrentToken() {
+  ParserContext::PendingToken pending;
+  pending.token = currentParser().curTok;
+  pending.location = currentParser().currentTokenLocation;
+  pending.identifier = currentLexer().identifierStr;
+  pending.stringLiteral = currentLexer().stringLiteral;
+  pending.numericLiteral = currentLexer().numericLiteral;
+  pending.charLiteral = currentLexer().charLiteral;
+  return pending;
+}
+
+class TokenReplayScope {
+public:
+  explicit TokenReplayScope(bool enabled)
+      : active(enabled),
+        originalToken(currentParser().curTok),
+        originalLocation(currentParser().currentTokenLocation),
+        originalPreviousToken(currentParser().previousToken),
+        originalPreviousLocation(currentParser().previousTokenLocation) {
+    if (active)
+      tokenCaptureStack().push_back(&capturedTokens);
+  }
+
+  TokenReplayScope(const TokenReplayScope &) = delete;
+  TokenReplayScope &operator=(const TokenReplayScope &) = delete;
+
+  ~TokenReplayScope() {
+    if (active)
+      tokenCaptureStack().pop_back();
+  }
+
+  void rollback() {
+    if (!active)
+      return;
+    ParserContext &parser = currentParser();
+    parser.curTok = originalToken;
+    parser.currentTokenLocation = originalLocation;
+    parser.previousToken = originalPreviousToken;
+    parser.previousTokenLocation = originalPreviousLocation;
+    currentLexer().identifierStr.clear();
+    currentLexer().stringLiteral.clear();
+    currentLexer().numericLiteral = NumericLiteral();
+    currentLexer().charLiteral = 0;
+    for (auto it = capturedTokens.rbegin(); it != capturedTokens.rend(); ++it)
+      parser.pushReplayToken(*it);
+    tokenCaptureStack().pop_back();
+    active = false;
+  }
+
+  void commit() {
+    if (!active)
+      return;
+    tokenCaptureStack().pop_back();
+    active = false;
+  }
+
+private:
+  bool active = false;
+  int originalToken = tok_eof;
+  SourceLocation originalLocation{};
+  int originalPreviousToken = 0;
+  SourceLocation originalPreviousLocation{};
+  std::vector<ParserContext::PendingToken> capturedTokens;
 };
 
 static unsigned parsePointerDepth(const std::string &typeName) {
@@ -264,10 +353,12 @@ int getNextToken() {
     parser.previousToken = prevToken;
     parser.curTok = pending.token;
     parser.currentTokenLocation = pending.location;
-    currentLexer().identifierStr.clear();
-    currentLexer().stringLiteral.clear();
-    currentLexer().numericLiteral = NumericLiteral();
-    currentLexer().charLiteral = 0;
+    currentLexer().identifierStr = pending.identifier;
+    currentLexer().stringLiteral = pending.stringLiteral;
+    currentLexer().numericLiteral = pending.numericLiteral;
+    currentLexer().charLiteral = pending.charLiteral;
+    if (!tokenCaptureStack().empty())
+      tokenCaptureStack().back()->push_back(snapshotCurrentToken());
     return parser.curTok;
   }
   parser.previousTokenLocation = parser.currentTokenLocation;
@@ -275,7 +366,14 @@ int getNextToken() {
   int next = gettok();
   parser.curTok = next;
   parser.currentTokenLocation = currentLexer().tokenStart();
-  return next;
+  if (next == tok_right_shift && parser.templateAngleDepth > 0) {
+    SourceLocation loc = parser.currentTokenLocation;
+    parser.curTok = tok_gt;
+    parser.pushReplayToken(tok_gt, loc);
+  }
+  if (!tokenCaptureStack().empty())
+    tokenCaptureStack().back()->push_back(snapshotCurrentToken());
+  return parser.curTok;
 }
 
 static void SkipNewlines() {
@@ -561,24 +659,13 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
   return true;
 }
 
-static void splitRightShiftToken() {
-  if (CurTok != tok_right_shift)
-    return;
-
-  ParserContext &parser = currentParser();
-  SourceLocation loc = parser.currentTokenLocation;
-  parser.curTok = tok_gt;
-  parser.pushReplayToken(tok_gt, loc);
-  currentLexer().identifierStr.clear();
-  currentLexer().stringLiteral.clear();
-  currentLexer().numericLiteral = NumericLiteral();
-  currentLexer().charLiteral = 0;
-}
-
-static bool ParseOptionalGenericArgumentList(std::string &Type) {
-  ParserContext &parser = currentParser();
-  if (!parser.enableGenerics || CurTok != tok_lt)
+static bool ParseOptionalGenericArgumentList(std::string &Type,
+                                             bool allowDisambiguation) {
+  if (CurTok != tok_lt)
     return true;
+
+  TokenReplayScope replayScope(allowDisambiguation);
+  TemplateAngleScope angleScope;
 
   std::string buffer;
   buffer.push_back('<');
@@ -586,28 +673,28 @@ static bool ParseOptionalGenericArgumentList(std::string &Type) {
   getNextToken(); // eat '<'
   SkipNewlines();
 
+  auto fail = [&](const std::string &message,
+                  std::string_view hint = {}) -> bool {
+    if (allowDisambiguation) {
+      replayScope.rollback();
+      return true;
+    }
+    reportCompilerError(message, hint);
+    return false;
+  };
+
   bool expectArgument = true;
   while (true) {
     if (CurTok == tok_gt) {
-      if (expectArgument) {
-        reportCompilerError("Expected type argument after '<'");
-        return false;
-      }
+      if (expectArgument)
+        return fail("Expected type argument after '<'");
       buffer.push_back('>');
       getNextToken();
       break;
     }
 
-    if (CurTok == tok_right_shift) {
-      if (expectArgument) {
-        reportCompilerError("Expected type argument after '<'");
-        return false;
-      }
-      splitRightShiftToken();
-      buffer.push_back('>');
-      getNextToken();
-      break;
-    }
+    if (CurTok == tok_eof)
+      return fail("Unterminated generic argument list");
 
     if (!expectArgument) {
       if (CurTok == ',') {
@@ -617,34 +704,31 @@ static bool ParseOptionalGenericArgumentList(std::string &Type) {
         expectArgument = true;
         continue;
       }
-      if (CurTok == tok_gt || CurTok == tok_right_shift)
-        continue; // handled at loop start
-
-      reportCompilerError("Expected ',' or '>' in generic argument list");
-      return false;
+      if (CurTok == tok_gt)
+        continue;
+      return fail("Expected ',' or '>' in generic argument list");
     }
 
-    if (!IsValidType()) {
-      reportCompilerError("Expected type argument in generic list");
-      return false;
-    }
+    if (!IsValidType())
+      return fail("Expected type argument in generic list");
 
     std::string argument = ParseCompleteType();
     if (argument.empty())
-      return false;
+      return fail("Failed to parse type argument");
 
     buffer.append(argument);
     SkipNewlines();
     expectArgument = false;
   }
 
+  if (allowDisambiguation)
+    replayScope.commit();
   Type += buffer;
   return true;
 }
 
 static bool ParseGenericParameterList(std::vector<std::string> &parameters) {
-  ParserContext &parser = currentParser();
-  if (!parser.enableGenerics || CurTok != tok_lt)
+  if (CurTok != tok_lt)
     return false;
 
   getNextToken(); // eat '<'
@@ -1114,7 +1198,7 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 
   getNextToken(); // eat identifier.
 
-  if (!ParseOptionalGenericArgumentList(IdName))
+  if (!ParseOptionalGenericArgumentList(IdName, true))
     return nullptr;
   SkipNewlines();
 
@@ -1581,7 +1665,7 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         return nullptr;
       }
       std::string DecoratedName = MemberName;
-      if (!ParseOptionalGenericArgumentList(DecoratedName))
+      if (!ParseOptionalGenericArgumentList(DecoratedName, true))
         return nullptr;
       if (DecoratedName.size() > MemberName.size()) {
         MemberGenericSuffix = DecoratedName.substr(MemberName.size());
@@ -1604,7 +1688,7 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       std::string MemberName = IdentifierStr;
       getNextToken(); // eat member name
       std::string DecoratedName = MemberName;
-      if (!ParseOptionalGenericArgumentList(DecoratedName))
+      if (!ParseOptionalGenericArgumentList(DecoratedName, true))
         return nullptr;
       if (DecoratedName.size() > MemberName.size()) {
         reportCompilerError("Generic arguments are not supported on null-safe member access",
@@ -1627,7 +1711,7 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       getNextToken(); // eat member name
       std::string MemberGenericSuffix;
       std::string DecoratedName = MemberName;
-      if (!ParseOptionalGenericArgumentList(DecoratedName))
+      if (!ParseOptionalGenericArgumentList(DecoratedName, true))
         return nullptr;
       if (DecoratedName.size() > MemberName.size()) {
         MemberGenericSuffix = DecoratedName.substr(MemberName.size());

@@ -2579,9 +2579,6 @@ static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
   if (it != CG.compositeMetadata.end())
     return &it->second;
 
-  if (!currentParser().enableGenerics)
-    return nullptr;
-
   if (name.find('<') == std::string::npos)
     return nullptr;
 
@@ -2663,9 +2660,6 @@ static TypeInfo runtimeTypeFrom(const TypeInfo &declared, RefStorageClass storag
 static bool validateTypeForGenerics(const TypeInfo &info,
                                     const std::string &contextDescription,
                                     const GenericDefinitionInfo *currentDefinition = nullptr) {
-  if (!currentParser().enableGenerics)
-    return true;
-
   bool valid = true;
 
   if (info.isGenericParameter) {

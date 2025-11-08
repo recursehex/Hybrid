@@ -86,11 +86,15 @@ struct ParserContext {
   struct PendingToken {
     int token = 0;
     SourceLocation location{};
+    std::string identifier;
+    NumericLiteral numericLiteral;
+    std::string stringLiteral;
+    uint32_t charLiteral = 0;
   };
   std::vector<PendingToken> tokenReplayBuffer;
   std::vector<std::vector<std::string>> genericParameterStack;
   std::set<std::string> activeGenericParameters;
-  bool enableGenerics = false;
+  int templateAngleDepth = 0;
 
   void reset(bool clearSymbols = true);
   void clearPrecedence();
@@ -98,6 +102,7 @@ struct ParserContext {
   void popGenericParameters();
   bool isGenericParameter(const std::string &name) const;
   void pushReplayToken(int token, SourceLocation location);
+  void pushReplayToken(const PendingToken &token);
   bool hasReplayTokens() const;
   PendingToken popReplayToken();
 };

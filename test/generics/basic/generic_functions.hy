@@ -19,4 +19,8 @@ void main()
     string word = ""
     ChooseRight<string>(ref word, "left", "right")
     assert word == "right"
+
+    bool comparison = number < 128 >> 1 && number << 2 > number
+    AssignIdentity<int>(ref number, number)
+    assert comparison
 }

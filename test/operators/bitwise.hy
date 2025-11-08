@@ -85,6 +85,16 @@ int testBitwiseArrays()
     return values[0] + values[1] + values[2] + values[3]  // 127 + 129 + 191 + 128 = 575
 }
 
+// Ensure comparisons with shifts still parse correctly
+bool testShiftComparisons()
+{
+    int lhs = 8
+    int rhs = 64
+    bool first = lhs < rhs >> 2     // 8 < 16
+    bool second = rhs << 1 > lhs    // 128 > 8
+    return first && second
+}
+
 // Run all tests
 assert testAnd() == 8
 assert testOr() == 14
@@ -93,3 +103,4 @@ assert testLeftShift() == 20
 assert testRightShift() == 5
 assert testCompoundAssignments() == 6
 assert testBitwiseArrays() == 575
+assert testShiftComparisons()
