@@ -21,7 +21,7 @@ Hybrid is a performant, statically-typed programming language that combines the 
 
 #### macOS
 
-Install LLVM and CMake via Homebrew:
+Install LLVM and CMake via [Homebrew](https://brew.sh):
 
 ```bash
 brew install llvm cmake
