@@ -110,6 +110,49 @@ class Ticker
 - `public`, `private`, and `protected` control read/write visibility. For example, `public int opens` allows external code both to read and assign.
 - `const` members may only be assigned in constructors (or at the declaration site for statics). Any later mutation produces `Cannot write to const member ...`.
 
+### `public`
+- **Scope**: Full read and write access from any code
+- **Use case**: When external code needs to modify member directly
+- **Syntax**:
+  ```cs
+  public int count = 10  // Both readable and writable externally
+  ```
+
+### `private`
+- **Scope**: Read and write only within the defining struct/class
+- **Use case**: Complete encapsulation, hidden implementation details
+- **Syntax**:
+  ```cs
+  private int UUID = 123456  // Hidden from external code entirely
+  private void ClearData() { ... }
+  ```
+
+### `protected`
+- **Scope**: Readable and modifiable by the defining struct/class and its subclasses
+- **Use case**: Inheritance hierarchies
+- **Syntax**:
+  ```cs
+  protected int size = 0
+  protected void Save() { ... }
+  ```
+
+### `static`
+- **Scope**: Shared among all instances, callable without instance
+- **Use case**: Utility functions, shared state
+- **Syntax**:
+  ```cs
+  static int max = 16
+  static void QuickSort(ref List<int> list) { ... }
+  ```
+
+### `const`
+- **Scope**: Immutable after initialization
+- **Use case**: Constants, configuration values
+- **Syntax**:
+  ```cs
+  const decimal pi = 3.1415926535897932384626433
+  ```
+
 ## Methods, Static Members, and Formatters
 
 - Methods are public by default. Applying `private` / `protected` restricts call sites according to the access rules above.
