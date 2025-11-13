@@ -447,6 +447,8 @@ static void collectInterfaceAncestors(const std::string &interfaceName,
                                       std::set<std::string> &out);
 llvm::Value *castToType(llvm::Value *value, llvm::Type *targetType,
                         const std::string &targetTypeName);
+static std::string describeAggregateKind(AggregateKind kind);
+static std::string baseCompositeName(const std::string &typeName);
 
 llvm::Value *LogErrorV(const char *Str, std::string_view hint = {});
 llvm::Value *LogErrorV(const std::string &Str, std::string_view hint = {});
@@ -668,6 +670,134 @@ static std::string typeNameFromInfo(const TypeInfo &info) {
   if (info.isNullable)
     result = ensureOuterNullable(result);
   return result;
+}
+
+static std::string joinListOrNone(const std::vector<std::string> &items) {
+  if (items.empty())
+    return "none";
+  std::string result;
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i != 0)
+      result += ",";
+    result += items[i];
+  }
+  return result;
+}
+
+static std::string formatTypeArgumentBindings(
+    const std::map<std::string, TypeInfo> &bindings) {
+  if (bindings.empty())
+    return "none";
+  std::vector<std::string> formatted;
+  formatted.reserve(bindings.size());
+  for (const auto &entry : bindings) {
+    formatted.push_back(entry.first + "=" +
+                        stripNullableAnnotations(
+                            typeNameFromInfo(entry.second)));
+  }
+  std::sort(formatted.begin(), formatted.end());
+  return joinListOrNone(formatted);
+}
+
+static std::string formatGenericMethodInstantiations(
+    const std::string &typeName,
+    const std::map<std::string, std::vector<std::string>> &instantiations) {
+  if (instantiations.empty())
+    return "none";
+  std::string ownerPrefix = baseCompositeName(typeName);
+  size_t anglePos = ownerPrefix.find('<');
+  if (anglePos != std::string::npos)
+    ownerPrefix.erase(anglePos);
+  std::vector<std::string> formatted;
+  formatted.reserve(instantiations.size());
+  for (const auto &entry : instantiations) {
+    if (entry.second.empty())
+      continue;
+    std::string methodName = entry.first;
+    if (methodName.find('.') == std::string::npos && !ownerPrefix.empty())
+      methodName = ownerPrefix + "." + methodName;
+    formatted.push_back(methodName + "=" +
+                        std::to_string(entry.second.size()));
+  }
+  if (formatted.empty())
+    return "none";
+  std::sort(formatted.begin(), formatted.end());
+  std::string result;
+  for (size_t i = 0; i < formatted.size(); ++i) {
+    if (i != 0)
+      result += ",";
+    result += formatted[i];
+  }
+  return result;
+}
+
+static std::string formatBaseClass(std::optional<std::string> base) {
+  if (!base || base->empty())
+    return "none";
+  return *base;
+}
+
+static std::string formatDescribeSummary(const std::string &typeName,
+                                         AggregateKind kind,
+                                         const std::vector<std::string> &interfaces,
+                                         std::optional<std::string> baseClass,
+                                         const std::vector<std::string> &genericParams,
+                                         const std::map<std::string, TypeInfo> &bindings,
+                                         const std::map<std::string, std::vector<std::string>>
+                                             &methodInstantiations) {
+  std::string summary;
+  summary.reserve(128);
+  summary += "type:" + typeName;
+  summary += "|kind:" + describeAggregateKind(kind);
+  summary += "|baseClass:" + formatBaseClass(baseClass);
+  summary += "|interfaces:" + joinListOrNone(interfaces);
+  summary += "|genericParameters:" + joinListOrNone(genericParams);
+  summary += "|typeArgumentBindings:" + formatTypeArgumentBindings(bindings);
+  summary += "|genericMethodInstantiations:" +
+             formatGenericMethodInstantiations(typeName, methodInstantiations);
+  return summary;
+}
+
+static std::string formatTemplateDescribeSummary(const std::string &typeName,
+                                                 const StructAST &templ) {
+  std::vector<std::string> interfaces = templ.getInterfaces();
+  std::optional<std::string> baseClass;
+  if (templ.getBaseClass())
+    baseClass = *templ.getBaseClass();
+  std::map<std::string, TypeInfo> emptyBindings;
+  std::map<std::string, std::vector<std::string>> emptyMethods;
+  return formatDescribeSummary(typeName, templ.getKind(), interfaces,
+                               baseClass, templ.getGenericParameters(),
+                               emptyBindings, emptyMethods);
+}
+
+static std::optional<std::string>
+buildDescribeTypeSummary(const std::string &typeSpelling) {
+  if (typeSpelling.empty()) {
+    reportCompilerError("describeType() requires a type name literal");
+    return std::nullopt;
+  }
+
+  TypeInfo requested = makeTypeInfo(typeSpelling);
+  std::string sanitized =
+      stripNullableAnnotations(typeNameFromInfo(requested));
+  if (sanitized.empty()) {
+    reportCompilerError("describeType() requires a valid type name");
+    return std::nullopt;
+  }
+
+  if (const CompositeTypeInfo *info = lookupCompositeInfo(sanitized)) {
+    return formatDescribeSummary(
+        sanitized, info->kind, info->interfaces, info->baseClass,
+        info->genericParameters, info->typeArgumentBindings,
+        info->genericMethodInstantiations);
+  }
+
+  if (StructAST *templ = FindGenericTemplate(sanitized))
+    return formatTemplateDescribeSummary(sanitized, *templ);
+
+  reportCompilerError("describeType(): unknown type '" + sanitized + "'");
+  return std::nullopt;
 }
 
 static std::string sanitizeForMangle(const std::string &input) {
@@ -1560,9 +1690,10 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
                                                   const std::string &mangledName) {
   std::vector<TypeInfo> paramTypes = gatherParamTypes(proto.getArgs());
   std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
+  TypeInfo boundReturn = applyActiveTypeBindings(proto.getReturnTypeInfo());
 
   FunctionOverload *existing = findRegisteredOverload(
-      proto.getName(), proto.getReturnTypeInfo(), proto.returnsByRef(),
+      proto.getName(), boundReturn, proto.returnsByRef(),
       paramTypes, paramIsRef);
 
   if (existing) {
@@ -1577,7 +1708,7 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
 
   FunctionOverload entry;
   entry.mangledName = mangledName;
-  entry.returnType = proto.getReturnTypeInfo();
+  entry.returnType = boundReturn;
   entry.returnsByRef = proto.returnsByRef();
   entry.parameterTypes = std::move(paramTypes);
   entry.parameterIsRef = std::move(paramIsRef);
@@ -1593,7 +1724,8 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
 static FunctionOverload *lookupFunctionOverload(const PrototypeAST &proto) {
   std::vector<TypeInfo> paramTypes = gatherParamTypes(proto.getArgs());
   std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
-  return findRegisteredOverload(proto.getName(), proto.getReturnTypeInfo(),
+  TypeInfo boundReturn = applyActiveTypeBindings(proto.getReturnTypeInfo());
+  return findRegisteredOverload(proto.getName(), boundReturn,
                                 proto.returnsByRef(), paramTypes, paramIsRef);
 }
 
@@ -1937,6 +2069,19 @@ static std::string resolveCompositeName(const ExprAST *expr) {
   if (!expr)
     return {};
   return baseCompositeName(expr->getTypeName());
+}
+
+static std::string sanitizeCompositeLookupName(const std::string &typeName) {
+  if (typeName.empty())
+    return {};
+  std::string cleaned = stripNullableAnnotations(typeName);
+  size_t atPos = cleaned.find('@');
+  if (atPos != std::string::npos)
+    cleaned.erase(atPos);
+  size_t bracketPos = cleaned.find('[');
+  if (bracketPos != std::string::npos)
+    cleaned.erase(bracketPos);
+  return cleaned;
 }
 
 static std::string makeMemberKey(const std::string &owner, const std::string &member) {
@@ -2544,6 +2689,7 @@ static const CompositeTypeInfo *
 materializeCompositeInstantiation(const TypeInfo &requestedType) {
   std::string constructedName =
       stripNullableAnnotations(typeNameFromInfo(requestedType));
+  std::cerr << "[instantiate] " << constructedName << "\n";
   auto existing = CG.compositeMetadata.find(constructedName);
   if (existing != CG.compositeMetadata.end())
     return &existing->second;
@@ -2568,6 +2714,7 @@ materializeCompositeInstantiation(const TypeInfo &requestedType) {
   if (StructTypes.contains(constructedName))
     return lookupCompositeInfo(constructedName);
 
+  FunctionInstantiationScope reentrantScope;
   if (!templateAst->codegen())
     return nullptr;
 
@@ -2583,6 +2730,7 @@ static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
     return nullptr;
 
   TypeInfo requested = makeTypeInfo(name);
+  requested = applyActiveTypeBindings(requested);
   if (!requested.hasTypeArguments())
     return nullptr;
 
@@ -6814,8 +6962,30 @@ llvm::Value *CallExprAST::codegen() {
   if (!parseExplicitTypeArgumentSuffix(decoratedCallee, baseCallee,
                                        explicitTypeArgs))
     return nullptr;
+  if (decoratedCallee.find('<') != std::string::npos) {
+    TypeInfo boundCallee = applyActiveTypeBindings(makeTypeInfo(decoratedCallee));
+    decoratedCallee = typeNameFromInfo(boundCallee);
+  }
   const auto *functionTemplates =
       lookupGenericFunctionTemplates(baseCallee);
+  if (baseCallee == "describeType" && !hasCalleeExpr()) {
+    if (getArgs().size() != 1) {
+      reportCompilerError("describeType() expects exactly one argument");
+      return nullptr;
+    }
+    auto *literalArg =
+        dynamic_cast<StringExprAST *>(getArgs().front().get());
+    if (!literalArg) {
+      reportCompilerError(
+          "describeType() requires a string literal argument");
+      return nullptr;
+    }
+    auto summary = buildDescribeTypeSummary(literalArg->getValue());
+    if (!summary)
+      return nullptr;
+    setTypeName("string");
+    return emitUTF16StringLiteral(*summary);
+  }
   bool treatAsFunctionGenerics =
       !explicitTypeArgs.empty() &&
       FindGenericTemplate(baseCallee) == nullptr;
@@ -6927,13 +7097,13 @@ llvm::Value *CallExprAST::codegen() {
     lookupCompositeInfo(decoratedCallee);
 
   if (StructTypes.contains(decoratedCallee)) {
-    setTypeName(decoratedCallee);
-
     llvm::Value *ConstructedValue =
         emitResolvedCall(baseCallee, std::move(ArgValues), ArgIsRef,
                          preferGeneric);
     if (!ConstructedValue)
       return nullptr;
+
+    setTypeName(decoratedCallee);
 
     llvm::StructType *StructType = StructTypes[decoratedCallee];
     if (ConstructedValue->getType()->isPointerTy())
@@ -6954,117 +7124,131 @@ llvm::Value *CallExprAST::codegen() {
 
 llvm::Value *CallExprAST::emitResolvedCall(
     const std::string &calleeBase, std::vector<llvm::Value *> ArgValues,
-    const std::vector<bool> &ArgIsRef, bool preferGeneric) {
-  auto overloadIt = CG.functionOverloads.find(calleeBase);
-  if (overloadIt == CG.functionOverloads.end())
-    return LogErrorV(("Unknown function referenced: " + calleeBase).c_str());
-
+    const std::vector<bool> &ArgIsRef, bool preferGeneric,
+    FunctionOverload *forced) {
   struct CandidateResult {
     FunctionOverload *overload = nullptr;
     unsigned conversions = 0;
   };
 
-  std::vector<CandidateResult> viable;
-  viable.reserve(overloadIt->second.size());
+  FunctionOverload *chosen = nullptr;
+  if (forced) {
+    chosen = forced;
+  } else {
+    auto overloadIt = CG.functionOverloads.find(calleeBase);
+    if (overloadIt == CG.functionOverloads.end())
+      return LogErrorV(("Unknown function referenced: " + calleeBase).c_str());
 
-  size_t syntheticArgCount =
-      ArgValues.size() > getArgs().size() ? ArgValues.size() - getArgs().size() : 0;
+    std::vector<CandidateResult> viable;
+    viable.reserve(overloadIt->second.size());
 
-  for (auto &overload : overloadIt->second) {
-    if (overload.parameterTypes.size() != ArgValues.size())
-      continue;
+    size_t syntheticArgCount =
+        ArgValues.size() > getArgs().size() ? ArgValues.size() - getArgs().size()
+                                            : 0;
 
-    llvm::Function *CandidateFunc = overload.function;
-    if (!CandidateFunc)
-      CandidateFunc = TheModule->getFunction(overload.mangledName);
-    if (!CandidateFunc)
-      continue;
-    overload.function = CandidateFunc;
+    for (auto &overload : overloadIt->second) {
+      if (overload.parameterTypes.size() != ArgValues.size())
+        continue;
 
-    bool compatible = true;
-    unsigned conversions = 0;
+      llvm::Function *CandidateFunc = overload.function;
+      if (!CandidateFunc)
+        CandidateFunc = TheModule->getFunction(overload.mangledName);
+      if (!CandidateFunc)
+        continue;
+      overload.function = CandidateFunc;
 
-    for (size_t idx = 0; idx < ArgValues.size(); ++idx) {
-      if (overload.parameterIsRef[idx] != ArgIsRef[idx]) {
+      bool compatible = true;
+      unsigned conversions = 0;
+
+      for (size_t idx = 0; idx < ArgValues.size(); ++idx) {
+        if (overload.parameterIsRef[idx] != ArgIsRef[idx]) {
+          compatible = false;
+          break;
+        }
+
+        const ExprAST *argExpr = nullptr;
+        if (idx >= syntheticArgCount) {
+          size_t exprIndex = idx - syntheticArgCount;
+          if (exprIndex < getArgs().size())
+            argExpr = getArgs()[exprIndex].get();
+        }
+        const ExprAST *coreArg = unwrapRefExpr(argExpr);
+        if (coreArg && !coreArg->getTypeName().empty()) {
+          TypeInfo expectedInfo = overload.parameterTypes[idx];
+          TypeInfo actualInfo =
+              applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+          const bool expectedHasGenerics = !expectedInfo.typeArguments.empty();
+          const bool actualHasGenerics = !actualInfo.typeArguments.empty();
+          if ((expectedHasGenerics || actualHasGenerics) &&
+              !typeInfoEquals(expectedInfo, actualInfo)) {
+            compatible = false;
+            break;
+          }
+        }
+
+        llvm::Type *ExpectedType =
+            CandidateFunc->getFunctionType()->getParamType(idx);
+        llvm::Type *ActualType = ArgValues[idx]->getType();
+
+        if (ActualType == ExpectedType)
+          continue;
+
+        if (areTypesCompatible(ActualType, ExpectedType)) {
+          ++conversions;
+          continue;
+        }
+
         compatible = false;
         break;
       }
 
-      const ExprAST *argExpr = nullptr;
-      if (idx >= syntheticArgCount) {
-        size_t exprIndex = idx - syntheticArgCount;
-        if (exprIndex < getArgs().size())
-          argExpr = getArgs()[exprIndex].get();
-      }
-      const ExprAST *coreArg = unwrapRefExpr(argExpr);
-      if (coreArg && !coreArg->getTypeName().empty()) {
-        TypeInfo expectedInfo = overload.parameterTypes[idx];
-        TypeInfo actualInfo =
-            applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
-        const bool expectedHasGenerics = !expectedInfo.typeArguments.empty();
-        const bool actualHasGenerics = !actualInfo.typeArguments.empty();
-        if ((expectedHasGenerics || actualHasGenerics) &&
-            !typeInfoEquals(expectedInfo, actualInfo)) {
-          compatible = false;
-          break;
-        }
-      }
-
-      llvm::Type *ExpectedType =
-          CandidateFunc->getFunctionType()->getParamType(idx);
-      llvm::Type *ActualType = ArgValues[idx]->getType();
-
-      if (ActualType == ExpectedType)
-        continue;
-
-      if (areTypesCompatible(ActualType, ExpectedType)) {
-        ++conversions;
-        continue;
-      }
-
-      compatible = false;
-      break;
+      if (compatible)
+        viable.push_back({&overload, conversions});
     }
 
-    if (compatible)
-      viable.push_back({&overload, conversions});
-  }
+    if (viable.empty())
+      return LogErrorV(
+          ("No matching overload found for call to '" + calleeBase + "'")
+              .c_str());
 
-  if (viable.empty())
-    return LogErrorV(("No matching overload found for call to '" + calleeBase + "'").c_str());
-
-  if (preferGeneric) {
-    std::vector<CandidateResult> genericViable;
-    genericViable.reserve(viable.size());
-    for (const auto &candidate : viable) {
-      if (candidate.overload->isGenericInstantiation)
-        genericViable.push_back(candidate);
+    if (preferGeneric) {
+      std::vector<CandidateResult> genericViable;
+      genericViable.reserve(viable.size());
+      for (const auto &candidate : viable) {
+        if (candidate.overload->isGenericInstantiation)
+          genericViable.push_back(candidate);
+      }
+      if (!genericViable.empty())
+        viable = std::move(genericViable);
     }
-    if (!genericViable.empty())
-      viable = std::move(genericViable);
+
+    auto bestIt = std::min_element(
+        viable.begin(), viable.end(),
+        [](const CandidateResult &lhs, const CandidateResult &rhs) {
+          return lhs.conversions < rhs.conversions;
+        });
+
+    unsigned bestConversions = bestIt->conversions;
+    unsigned bestCount = static_cast<unsigned>(std::count_if(
+        viable.begin(), viable.end(),
+        [bestConversions](const CandidateResult &candidate) {
+          return candidate.conversions == bestConversions;
+        }));
+
+    if (bestCount > 1)
+      return LogErrorV(("Ambiguous call to '" + calleeBase + "'").c_str());
+
+    chosen = bestIt->overload;
   }
 
-  auto bestIt = std::min_element(
-      viable.begin(), viable.end(),
-      [](const CandidateResult &lhs, const CandidateResult &rhs) {
-        return lhs.conversions < rhs.conversions;
-      });
-
-  unsigned bestConversions = bestIt->conversions;
-  unsigned bestCount = static_cast<unsigned>(std::count_if(
-      viable.begin(), viable.end(),
-      [bestConversions](const CandidateResult &candidate) {
-        return candidate.conversions == bestConversions;
-      }));
-
-  if (bestCount > 1)
-    return LogErrorV(("Ambiguous call to '" + calleeBase + "'").c_str());
-
-  FunctionOverload *chosen = bestIt->overload;
   llvm::Function *CalleeF = chosen->function;
-  if (!CalleeF)
-    return LogErrorV(("Internal error: overload for '" + calleeBase +
-                      "' lacks function definition").c_str());
+  if (!CalleeF) {
+    CalleeF = TheModule->getFunction(chosen->mangledName);
+    if (!CalleeF)
+      return LogErrorV(("Internal error: overload for '" + calleeBase +
+                        "' lacks function definition").c_str());
+    chosen->function = CalleeF;
+  }
 
   std::vector<llvm::Value *> CallArgs;
   CallArgs.reserve(ArgValues.size());
@@ -7097,7 +7281,8 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   llvm::Value *instancePtr = nullptr;
   llvm::Value *instanceValue = nullptr;
 
-  std::string ownerName = baseCompositeName(member.getObject()->getTypeName());
+  std::string ownerName =
+      sanitizeCompositeLookupName(member.getObject()->getTypeName());
 
   if (ownerName.empty()) {
     instancePtr = member.getObject()->codegen_ptr();
@@ -7120,6 +7305,7 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
 
   if (ownerName.empty())
     return LogErrorV("Unable to determine composite type for method call");
+
 
   const CompositeTypeInfo *info = lookupCompositeInfo(ownerName);
   if (!info)
@@ -7175,6 +7361,12 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   const CompositeMemberInfo &memberInfo = methodIt->second;
+  std::cerr << "[member-call] owner=" << ownerName << " method="
+            << member.getMemberName()
+            << " mangled=" << memberInfo.mangledName
+            << " return=" << typeNameFromInfo(memberInfo.returnType)
+            << " direct=" << (memberInfo.directFunction ? "yes" : "no")
+            << "\n";
 
   std::vector<TypeInfo> methodTypeArgs;
   if (member.hasExplicitGenerics()) {
@@ -7367,10 +7559,61 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
                                    ArgIsRef);
   }
 
-  return emitResolvedCall(memberInfo.signature, std::move(ArgValues),
-                          ArgIsRef,
-                          memberInfo.isGenericTemplate &&
-                              member.hasExplicitGenerics());
+  FunctionOverload *forcedOverload = nullptr;
+  if (memberInfo.directFunction) {
+    llvm::Function *DirectFunc = memberInfo.directFunction;
+    for (size_t idx = 0; idx < ArgValues.size(); ++idx) {
+      if (memberInfo.parameterIsRef[idx])
+        continue;
+      const std::string targetTypeName =
+          typeNameFromInfo(memberInfo.parameterTypes[idx]);
+      llvm::Type *ExpectedType =
+          DirectFunc->getFunctionType()->getParamType(idx);
+      ArgValues[idx] = castToType(ArgValues[idx], ExpectedType, targetTypeName);
+    }
+    if (DirectFunc->getReturnType()->isVoidTy()) {
+      llvm::Value *CallValue = Builder->CreateCall(DirectFunc, ArgValues);
+      setTypeName("void");
+      return CallValue;
+    }
+    llvm::Value *CallValue =
+        Builder->CreateCall(DirectFunc, ArgValues, "calltmp");
+    setTypeName(typeNameFromInfo(memberInfo.returnType));
+    return CallValue;
+  }
+
+  if (auto overloadIt = CG.functionOverloads.find(memberInfo.signature);
+      overloadIt != CG.functionOverloads.end()) {
+    for (auto &candidate : overloadIt->second) {
+      if (candidate.parameterTypes.size() !=
+          memberInfo.parameterTypes.size())
+        continue;
+      if (candidate.returnsByRef != memberInfo.returnsByRef)
+        continue;
+      if (!typeInfoEquals(candidate.returnType, memberInfo.returnType))
+        continue;
+      bool match = true;
+      for (size_t idx = 0; idx < candidate.parameterTypes.size(); ++idx) {
+        if (candidate.parameterIsRef[idx] != memberInfo.parameterIsRef[idx] ||
+            !typeInfoEquals(candidate.parameterTypes[idx],
+                            memberInfo.parameterTypes[idx])) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        forcedOverload = &candidate;
+        break;
+      }
+    }
+  }
+
+  std::cerr << "  forcedOverload=" << (forcedOverload ? "yes" : "no") << "\n";
+
+  return emitResolvedCall(
+      memberInfo.signature, std::move(ArgValues), ArgIsRef,
+      memberInfo.isGenericTemplate && member.hasExplicitGenerics(),
+      forcedOverload);
 }
 
 //===----------------------------------------------------------------------===//
@@ -9426,7 +9669,9 @@ llvm::Type *StructAST::codegen() {
         if (CtorProto->getName() != typeKey) {
           std::vector<TypeInfo> ctorParamTypes = gatherParamTypes(CtorProto->getArgs());
           std::vector<bool> ctorParamIsRef = gatherParamRefFlags(CtorProto->getArgs());
-          if (!findRegisteredOverload(typeKey, CtorProto->getReturnTypeInfo(),
+          TypeInfo boundCtorReturn =
+              applyActiveTypeBindings(CtorProto->getReturnTypeInfo());
+          if (!findRegisteredOverload(typeKey, boundCtorReturn,
                                       CtorProto->returnsByRef(), ctorParamTypes,
                                       ctorParamIsRef)) {
             CG.functionOverloads[typeKey].push_back(ctorEntry);
@@ -9574,7 +9819,12 @@ llvm::Type *StructAST::codegen() {
 
     ScopedCompositeContext methodScope(typeKey, MethodDef.getKind(),
                                        MethodDef.isStatic());
-    Method->codegen();
+    llvm::Function *GeneratedFunction = Method->codegen();
+    if (GeneratedFunction) {
+      auto infoIt = metadata.methodInfo.find(MethodDef.getDisplayName());
+      if (infoIt != metadata.methodInfo.end())
+        infoIt->second.directFunction = GeneratedFunction;
+    }
   }
 
   if (metadata.kind == AggregateKind::Interface) {

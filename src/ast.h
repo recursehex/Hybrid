@@ -13,6 +13,7 @@
 #include "numeric_literal.h"
 
 struct SourceLocation;
+struct FunctionOverload;
 
 enum class RefStorageClass {
   None,
@@ -744,7 +745,8 @@ private:
   llvm::Value *emitResolvedCall(const std::string &callee,
                                 std::vector<llvm::Value *> ArgValues,
                                 const std::vector<bool> &ArgIsRef,
-                                bool preferGeneric = false);
+                                bool preferGeneric = false,
+                                FunctionOverload *forced = nullptr);
   llvm::Value *codegenMemberCall(MemberAccessExprAST &member);
 };
 

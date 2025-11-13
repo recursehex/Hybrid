@@ -240,6 +240,13 @@ void main()
 - Generic classes can inherit from other generic types: `class List<T> inherits Sequence<T>`.
 - There is no variance or constraint syntax yet-every binding is invariant, so `Box<Derived>` is not assignable to `Box<Base>` unless your own hierarchy makes that conversion legal.
 
+Nested instantiations are preserved verbatim, so you can freely compose templates:
+
+```cs
+Pair<Pair<int, int>, Pair<int, int>> corners = (Pair<int, int>(1, 2), Pair<int, int>(3, 4))
+int diagonal = corners.first.second + corners.second.first
+```
+
 ### Runtime representation
 
 Hybrid specializes each instantiation. `Box<int>` and `Box<string>` each receive their own LLVM IR bodies and runtime descriptors. The final mangled name encodes both class-level and method-level bindings (e.g. `Box.SwapWith$RV_void_P2R_int,R_int<T=int,U=int>`), so even methods whose generic parameters only appear inside the body are unique per instantiation. See [Generics Runtime Strategy](generics_runtime.md) for the detailed trade-offs and the caching rules that keep specialization bloat in check.

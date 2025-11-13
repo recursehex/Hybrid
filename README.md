@@ -261,6 +261,7 @@ Hybrid/
 - Pointer operators
     - `@` - pointer operator and dereference operator
     - `#` - address operator
+    - `->` - member access through pointer
     - `unsafe` - pointers can only be used within these blocks
 - Reference types
     - `ref type`
@@ -312,6 +313,8 @@ Hybrid/
     - `get`
     - `set`
     - `value`
+- Delegates
+    - `delegate` - function pointer type
 
 
 ## Contributing

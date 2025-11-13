@@ -47,6 +47,7 @@ struct CompositeMemberInfo {
   unsigned vtableSlot = std::numeric_limits<unsigned>::max();
   bool isGenericTemplate = false;
   unsigned genericArity = 0;
+  llvm::Function *directFunction = nullptr;
 };
 
 struct CompositeTypeInfo {

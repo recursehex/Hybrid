@@ -417,9 +417,34 @@ run_multi_unit_tests() {
         local status=$?
         set -e
 
+        local runtime_output=""
+        local runtime_status=0
+        if [ "$expect" = "pass" ] && [ $status -eq 0 ]; then
+            if [ -x "$temp_output" ]; then
+                set +e
+                runtime_output=$("$temp_output" 2>&1)
+                runtime_status=$?
+                set -e
+            else
+                runtime_status=1
+                runtime_output="(binary '$temp_output' is not executable)"
+            fi
+        fi
+
         TOTAL_TESTS=$((TOTAL_TESTS + 1))
 
-        if { [ "$expect" = "pass" ] && [ $status -eq 0 ]; } || { [ "$expect" = "fail" ] && [ $status -ne 0 ]; }; then
+        local passed=0
+        if [ "$expect" = "pass" ]; then
+            if [ $status -eq 0 ] && [ $runtime_status -eq 0 ]; then
+                passed=1
+            fi
+        else
+            if [ $status -ne 0 ]; then
+                passed=1
+            fi
+        fi
+
+        if [ $passed -eq 1 ]; then
             PASSED_TESTS=$((PASSED_TESTS + 1))
             if [ $FAILURES_ONLY -eq 0 ]; then
                 echo -e "${GREEN}✓ PASSED: $test_name${NC}"
@@ -429,12 +454,20 @@ run_multi_unit_tests() {
             ensure_progress_newline
             echo -e "${RED}✗ FAILED: $test_name${NC}"
             if [ "$expect" = "pass" ]; then
-                echo -e "${RED}  Expected success but command failed with status $status${NC}"
+                if [ $status -ne 0 ]; then
+                    echo -e "${RED}  Expected success but compilation failed with status $status${NC}"
+                elif [ $runtime_status -ne 0 ]; then
+                    echo -e "${RED}  Runtime exited with status $runtime_status${NC}"
+                fi
             else
                 echo -e "${RED}  Expected failure but command succeeded${NC}"
             fi
-            echo "--- Output ---"
+            echo "--- Compiler Output ---"
             echo "$output"
+            if [ "$expect" = "pass" ] && [ -n "$runtime_output" ]; then
+                echo "--- Runtime Output ---"
+                echo "$runtime_output"
+            fi
             echo "--------------"
         fi
 

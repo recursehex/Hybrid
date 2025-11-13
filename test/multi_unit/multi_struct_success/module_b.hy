@@ -10,5 +10,5 @@ int main()
     Foo temp = Foo(42)
     int result = readFoo(temp)
     assert result == 42
-    return result
+    return 0
 }
