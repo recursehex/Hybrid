@@ -1,6 +1,7 @@
 #include "ast.h"
 #include <iostream>
 
+#include "analysis/semantics.h"
 #include "compiler_session.h"
 #include "codegen_context.h"
 #include "parser.h"
@@ -9687,6 +9688,8 @@ llvm::Function *FunctionAST::codegen() {
   if (!TheFunction)
     return nullptr;
 
+  currentAnalysis().analyzeFunction(*this);
+
   SemanticGenericParameterScope functionGenerics(getProto()->getGenericParameters());
   FunctionOverload *overloadEntry = lookupFunctionOverload(*getProto());
   if (overloadEntry)
@@ -9873,6 +9876,8 @@ llvm::Type *StructAST::codegen() {
 
   if (!ensureNoDuplicateGenericParameters(GenericParameters, "type '" + typeKey + "'"))
     return nullptr;
+
+  currentAnalysis().analyzeAggregate(*this);
   
   // Save the current insertion point to restore it after generating constructors
   auto SavedInsertBlock = Builder->GetInsertBlock();

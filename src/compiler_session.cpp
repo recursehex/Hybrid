@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "analysis/semantics.h"
 #include "codegen_context.h"
 #include "lexer.h"
 #include "parser.h"
@@ -489,6 +490,11 @@ CodegenContext &CompilerSession::codegen() {
     codegenState = std::make_unique<CodegenContext>();
   return *codegenState;
 }
+analysis::SemanticAnalysis &CompilerSession::analysis() {
+  if (!analysisState)
+    analysisState = std::make_unique<analysis::SemanticAnalysis>();
+  return *analysisState;
+}
 
 void CompilerSession::resetParser() {
   parserState.reset();
@@ -501,11 +507,15 @@ void CompilerSession::resetAll() {
   parserState.clearPrecedence();
   if (codegenState)
     codegenState->reset();
+  if (analysisState)
+    analysisState->reset();
 }
 
 void CompilerSession::beginUnit(bool preserveSymbols) {
   lexerState.reset();
   parserState.reset(!preserveSymbols);
+  if (analysisState)
+    analysisState->reset();
 }
 
 // Session stack helpers --------------------------------------------------------
@@ -538,4 +548,8 @@ ParserContext &currentParser() {
 
 CodegenContext &currentCodegen() {
   return currentCompilerSession().codegen();
+}
+
+analysis::SemanticAnalysis &currentAnalysis() {
+  return currentCompilerSession().analysis();
 }

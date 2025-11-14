@@ -356,6 +356,8 @@ public:
   const std::string &getTypeName() const { return DeclaredType.typeName; }
   const std::string &getVarName() const { return VarName; }
   bool isRef() const { return DeclaredType.declaredRef; }
+  ExprAST *getCollection() const { return Collection.get(); }
+  BlockStmtAST *getBody() const { return Body.get(); }
   
   void print() const;
   llvm::Value *codegen() override;
@@ -386,6 +388,12 @@ public:
   
   void print() const;
   llvm::Value *codegen() override;
+  ExprAST *getInitExpr() const { return InitExpr.get(); }
+  ExprAST *getLimitExpr() const { return LimitExpr.get(); }
+  ExprAST *getCondExpr() const { return CondExpr.get(); }
+  ExprAST *getStepExpr() const { return StepExpr.get(); }
+  BlockStmtAST *getBody() const { return Body.get(); }
+  char getStepOp() const { return StepOp; }
 };
 
 /// IfStmtAST - Statement class for if-else statements.

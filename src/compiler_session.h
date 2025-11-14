@@ -14,6 +14,7 @@
 
 #include "numeric_literal.h"
 #include "codegen_context.h"
+#include "analysis/semantics.h"
 
 struct SourceLocation {
   std::size_t line = 0;
@@ -117,6 +118,7 @@ public:
   LexerContext &lexer();
   ParserContext &parser();
   CodegenContext &codegen();
+  analysis::SemanticAnalysis &analysis();
 
   void resetParser();
   void resetAll();
@@ -126,6 +128,7 @@ private:
   LexerContext lexerState;
   ParserContext parserState;
   std::unique_ptr<CodegenContext> codegenState;
+  std::unique_ptr<analysis::SemanticAnalysis> analysisState;
 };
 
 /// Session stack management -------------------------------------------------
@@ -138,6 +141,7 @@ bool hasCompilerSession();
 LexerContext &currentLexer();
 ParserContext &currentParser();
 CodegenContext &currentCodegen();
+analysis::SemanticAnalysis &currentAnalysis();
 
 std::string describeTokenForDiagnostics(int token);
 void reportCompilerError(const std::string &message, std::string_view hint = {});

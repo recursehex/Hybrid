@@ -9,6 +9,10 @@ set(HYBRID_SOURCES
     runtime_support.cpp
     memory/ref_count.cpp
     runtime/arc.cpp
+    analysis/lifetime.cpp
+    analysis/cycles.cpp
+    analysis/semantics.cpp
+    analysis/smart_pointers.cpp
 )
 
 # Define header files
