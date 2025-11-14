@@ -83,6 +83,8 @@ struct CompositeTypeInfo {
   std::optional<std::string> thisOverride;
   std::map<std::string, TypeInfo> typeArgumentBindings;
   std::map<std::string, std::vector<std::string>> genericMethodInstantiations;
+  bool hasClassDescriptor = false;
+  ClassDescriptor descriptor;
 };
 
 struct GenericsDiagnostics {

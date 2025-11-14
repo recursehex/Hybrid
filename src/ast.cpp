@@ -239,6 +239,10 @@ static bool maybeReportNestedDepthIssues(const TypeInfo &info,
   return true;
 }
 
+
+static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name,
+                                                    bool countHit = true);
+
 static bool isBuiltinValueTypeName(std::string_view baseName) {
   static constexpr std::string_view primitives[] = {
       "void",  "bool", "byte",  "sbyte", "short", "ushort",
@@ -284,6 +288,7 @@ static void rebuildGenericBindingKey(TypeInfo &info) {
 }
 
 static void assignARCEligibility(TypeInfo &info) {
+  info.classDescriptor = nullptr;
   if (info.isSmartPointer()) {
     info.arcManaged = true;
     return;
@@ -303,9 +308,24 @@ static void assignARCEligibility(TypeInfo &info) {
     return;
 
   auto &metadata = currentCodegen().compositeMetadata;
+  const CompositeTypeInfo *meta = nullptr;
   auto it = metadata.find(info.baseTypeName);
-  if (it != metadata.end() && it->second.kind == AggregateKind::Class)
+  if (it != metadata.end()) {
+    meta = &it->second;
+  } else {
+    std::string sanitized = stripNullableAnnotations(typeNameFromInfo(info));
+    auto exactIt = metadata.find(sanitized);
+    if (exactIt != metadata.end())
+      meta = &exactIt->second;
+  }
+
+  if (!meta)
+    return;
+
+  if (meta->kind == AggregateKind::Class)
     info.arcManaged = true;
+  if (meta->hasClassDescriptor)
+    info.classDescriptor = &meta->descriptor;
 }
 
 void finalizeTypeInfoMetadata(TypeInfo &info) {
@@ -661,9 +681,12 @@ static std::vector<TypeInfo> buildGenericArgumentTypeInfos(const std::string &se
 static void populateTypeInfoGenerics(TypeInfo &info);
 
 static void ensureBaseNonNullScope();
+static std::vector<std::string>
+buildInheritanceChain(const std::optional<std::string> &baseClassName);
+static std::optional<std::string>
+buildSmartPointerDescribeSummary(const TypeInfo &requested,
+                                 const std::string &sanitized);
 
-static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name,
-                                                    bool countHit = true);
 static void collectInterfaceAncestors(const std::string &interfaceName,
                                       std::set<std::string> &out);
 llvm::Value *castToType(llvm::Value *value, llvm::Type *targetType,
@@ -993,6 +1016,32 @@ static std::string formatTemplateDescribeSummary(const std::string &typeName,
 }
 
 static std::optional<std::string>
+buildSmartPointerDescribeSummary(const TypeInfo &requested,
+                                 const std::string &sanitized) {
+  SmartPointerKind kind = detectSmartPointerKind(requested.baseTypeName);
+  if (kind == SmartPointerKind::None)
+    return std::nullopt;
+
+  if (!requested.typeArguments.empty() && requested.typeArguments.size() != 1) {
+    reportCompilerError("Smart pointer '" + requested.baseTypeName +
+                        "' expects exactly one type argument");
+    return std::nullopt;
+  }
+
+  std::vector<std::string> interfaces;
+  std::optional<std::string> baseClass;
+  std::vector<std::string> genericParams = {"T"};
+  std::map<std::string, TypeInfo> bindings;
+  if (!requested.typeArguments.empty())
+    bindings.emplace("T", requested.typeArguments.front());
+
+  std::map<std::string, std::vector<std::string>> emptyMethods;
+  return formatDescribeSummary(sanitized, AggregateKind::Class, interfaces,
+                               baseClass, genericParams, bindings,
+                               emptyMethods);
+}
+
+static std::optional<std::string>
 buildDescribeTypeSummary(const std::string &typeSpelling) {
   if (typeSpelling.empty()) {
     reportCompilerError("describeType() requires a type name literal");
@@ -1012,6 +1061,11 @@ buildDescribeTypeSummary(const std::string &typeSpelling) {
         sanitized, info->kind, info->interfaces, info->baseClass,
         info->genericParameters, info->typeArgumentBindings,
         info->genericMethodInstantiations);
+  }
+
+  if (auto smartSummary =
+          buildSmartPointerDescribeSummary(requested, sanitized)) {
+    return smartSummary;
   }
 
   if (StructAST *templ = FindGenericTemplate(sanitized))
@@ -1737,10 +1791,6 @@ static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
   if (lhs.ownership != rhs.ownership)
     return false;
   if (lhs.smartPointerKind != rhs.smartPointerKind)
-    return false;
-  if (lhs.arcManaged != rhs.arcManaged)
-    return false;
-  if (lhs.classDescriptor != rhs.classDescriptor)
     return false;
   if (!genericBindingEquals(lhs.genericKey, rhs.genericKey))
     return false;
@@ -2613,6 +2663,36 @@ static bool hasAccessFlag(MemberAccess access, AccessFlag flag) {
   return static_cast<uint8_t>(access.flags & flag) != 0;
 }
 
+bool ClassDescriptor::isClass() const {
+  return kind == AggregateKind::Class;
+}
+
+bool ClassDescriptor::derivesFrom(const std::string &candidate) const {
+  if (candidate == name)
+    return true;
+  return std::find(inheritanceChain.begin(), inheritanceChain.end(), candidate) !=
+         inheritanceChain.end();
+}
+
+bool ClassDescriptor::implementsInterface(const std::string &iface) const {
+  return std::find(interfaceNames.begin(), interfaceNames.end(), iface) !=
+         interfaceNames.end();
+}
+
+bool ClassDescriptor::hasPublicConstructor() const {
+  return std::any_of(constructors.begin(), constructors.end(),
+                     [](const Constructor &ctor) {
+                       return hasAccessFlag(ctor.access, AccessFlag::ReadPublic);
+                     });
+}
+
+bool ClassDescriptor::hasProtectedConstructor() const {
+  return std::any_of(constructors.begin(), constructors.end(),
+                     [](const Constructor &ctor) {
+                       return hasAccessFlag(ctor.access, AccessFlag::ReadProtected);
+                     });
+}
+
 static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
                                       AccessIntent intent,
                                       const std::string &ownerName,
@@ -2942,6 +3022,25 @@ splitTypeStemAndSuffix(const std::string &typeName) {
   if (suffixPos == std::string::npos)
     return {typeName, std::string()};
   return {typeName.substr(0, suffixPos), typeName.substr(suffixPos)};
+}
+
+static std::vector<std::string>
+buildInheritanceChain(const std::optional<std::string> &baseClassName) {
+  std::vector<std::string> chain;
+  if (!baseClassName || baseClassName->empty())
+    return chain;
+
+  std::string current = *baseClassName;
+  while (!current.empty()) {
+    chain.push_back(current);
+    const CompositeTypeInfo *info = lookupCompositeInfo(current);
+    if (!info || !info->baseClass || info->baseClass->empty())
+      break;
+    if (*info->baseClass == current)
+      break;
+    current = *info->baseClass;
+  }
+  return chain;
 }
 
 static TypeInfo applyTypeWrappers(const TypeInfo &replacement,
@@ -3277,12 +3376,21 @@ static bool validateTypeForGenerics(const TypeInfo &info,
       valid = false;
   }
 
+  if (info.isSmartPointer()) {
+    if (info.hasTypeArguments() && info.typeArguments.size() != 1) {
+      reportCompilerError("Smart pointer '" + info.baseTypeName + "' expects exactly one type argument");
+      valid = false;
+    }
+  }
+
   if (!info.isGenericParameter && !info.hasTypeArguments()) {
     bool known = hasDefinition;
     if (!known) {
       if (lookupTypeInfo(info.baseTypeName))
         known = true;
       else if (getTypeFromString(info.baseTypeName))
+        known = true;
+      else if (info.isSmartPointer())
         known = true;
     }
     if (!known) {
@@ -9796,6 +9904,17 @@ llvm::Type *StructAST::codegen() {
     compositeInfo.typeArgumentBindings = *bindings;
   else
     compositeInfo.typeArgumentBindings.clear();
+  compositeInfo.hasClassDescriptor =
+      (kind == AggregateKind::Class || kind == AggregateKind::Interface);
+  compositeInfo.descriptor.name = typeKey;
+  compositeInfo.descriptor.kind = kind;
+  compositeInfo.descriptor.baseClassName = effectiveBaseClass;
+  compositeInfo.descriptor.interfaceNames = effectiveInterfaces;
+  compositeInfo.descriptor.inheritanceChain =
+      buildInheritanceChain(effectiveBaseClass);
+  compositeInfo.descriptor.isAbstract = IsAbstract;
+  compositeInfo.descriptor.isInterface = (kind == AggregateKind::Interface);
+  compositeInfo.descriptor.constructors.clear();
 
   if (kind == AggregateKind::Class || kind == AggregateKind::Interface) {
     llvm::StructType *TypeDescTy = getTypeDescriptorType();
@@ -9975,6 +10094,12 @@ llvm::Type *StructAST::codegen() {
   // Generate constructor and other methods
   for (auto &MethodDef : Methods) {
     if (MethodDef.getKind() == MethodKind::Constructor) {
+      if (metadata.hasClassDescriptor) {
+        ClassDescriptor::Constructor ctorMeta;
+        ctorMeta.access = MethodDef.getModifiers().access;
+        ctorMeta.isImplicit = false;
+        metadata.descriptor.constructors.push_back(ctorMeta);
+      }
       FunctionAST *Method = MethodDef.get();
       if (!Method)
         continue;

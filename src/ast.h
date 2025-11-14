@@ -14,14 +14,13 @@
 
 struct SourceLocation;
 struct FunctionOverload;
+struct ClassDescriptor;
 
 enum class RefStorageClass {
   None,
   RefValue,
   RefAlias
 };
-
-struct ClassDescriptor;
 
 enum class OwnershipQualifier : uint8_t {
   Strong,
@@ -179,6 +178,29 @@ struct MemberModifiers {
   bool isVirtual = false;
   bool isAbstract = false;
   bool isProperty = false;
+};
+
+struct ClassDescriptor {
+  struct Constructor {
+    MemberAccess access = MemberAccess::PrivateOnly();
+    bool isImplicit = false;
+  };
+
+  std::string name;
+  AggregateKind kind = AggregateKind::Struct;
+  std::optional<std::string> baseClassName;
+  std::vector<std::string> interfaceNames;
+  std::vector<std::string> inheritanceChain;
+  bool isAbstract = false;
+  bool isInterface = false;
+  std::vector<Constructor> constructors;
+
+  bool isClass() const;
+  bool derivesFrom(const std::string &candidate) const;
+  bool implementsInterface(const std::string &iface) const;
+  bool hasPublicConstructor() const;
+  bool hasProtectedConstructor() const;
+  bool hasConstructor() const { return !constructors.empty(); }
 };
 
 // LLVM forward declarations
