@@ -85,6 +85,27 @@ struct CompositeTypeInfo {
   std::map<std::string, std::vector<std::string>> genericMethodInstantiations;
 };
 
+struct GenericsDiagnostics {
+  bool diagnosticsEnabled = false;
+  bool stackDumpEnabled = false;
+  bool heuristicsEnabled = true;
+  uint64_t uniqueCompositeInstantiations = 0;
+  uint64_t uniqueFunctionInstantiations = 0;
+  uint64_t moduleIRBytesBeforePrint = 0;
+  uint64_t moduleIRBytesAfterPrint = 0;
+  unsigned currentBindingDepth = 0;
+  unsigned peakBindingDepth = 0;
+  unsigned maxBindingDepth = 128;
+  uint64_t instantiationBudget = 0;
+  unsigned nestedDepthBudget = 0;
+  unsigned arityWarningThreshold = 8;
+  unsigned nestedDepthWarningThreshold = 4;
+  bool depthLimitHit = false;
+  bool instantiationBudgetExceeded = false;
+  bool nestedBudgetExceeded = false;
+  std::vector<std::string> bindingStack;
+};
+
 struct GenericsMetrics {
   uint64_t typeCacheHits = 0;
   uint64_t typeCacheMisses = 0;
@@ -121,6 +142,7 @@ struct CodegenContext {
 
   std::map<std::string, std::vector<FunctionOverload>> functionOverloads;
   std::set<std::string> instantiatedGenericFunctions;
+  GenericsDiagnostics genericsDiagnostics;
   GenericsMetrics genericsMetrics;
 
   std::vector<llvm::BasicBlock *> loopExitBlocks;
@@ -130,6 +152,9 @@ struct CodegenContext {
   std::vector<std::vector<std::string>> genericParameterStack;
   std::map<std::string, unsigned> activeGenericParameters;
   std::vector<std::map<std::string, TypeInfo>> genericTypeBindingsStack;
+  std::map<std::string, std::string> compositeLayoutCache;
+  std::map<std::string, std::string> compositeMetadataAliases;
+  std::map<std::string, std::string> genericFunctionInstantiationCache;
 
   void reset();
 };
@@ -158,8 +183,30 @@ inline void CodegenContext::reset() {
   activeGenericParameters.clear();
   genericTypeBindingsStack.clear();
   const bool metricsEnabled = genericsMetrics.enabled;
+  const bool diagnosticsEnabled = genericsDiagnostics.diagnosticsEnabled;
+  const bool stackDumpEnabled = genericsDiagnostics.stackDumpEnabled;
+  const bool heuristicsEnabled = genericsDiagnostics.heuristicsEnabled;
+  const unsigned preservedMaxBindingDepth = genericsDiagnostics.maxBindingDepth;
+  const uint64_t preservedInstantiationBudget = genericsDiagnostics.instantiationBudget;
+  const unsigned preservedNestedBudget = genericsDiagnostics.nestedDepthBudget;
+  const unsigned preservedArityThreshold = genericsDiagnostics.arityWarningThreshold;
+  const unsigned preservedNestedWarningThreshold =
+      genericsDiagnostics.nestedDepthWarningThreshold;
   genericsMetrics = {};
   genericsMetrics.enabled = metricsEnabled;
+  genericsDiagnostics = {};
+  genericsDiagnostics.diagnosticsEnabled = diagnosticsEnabled;
+  genericsDiagnostics.stackDumpEnabled = stackDumpEnabled;
+  genericsDiagnostics.heuristicsEnabled = heuristicsEnabled;
+  genericsDiagnostics.maxBindingDepth = preservedMaxBindingDepth;
+  genericsDiagnostics.instantiationBudget = preservedInstantiationBudget;
+  genericsDiagnostics.nestedDepthBudget = preservedNestedBudget;
+  genericsDiagnostics.arityWarningThreshold = preservedArityThreshold;
+  genericsDiagnostics.nestedDepthWarningThreshold =
+      preservedNestedWarningThreshold;
+  compositeLayoutCache.clear();
+  compositeMetadataAliases.clear();
+  genericFunctionInstantiationCache.clear();
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

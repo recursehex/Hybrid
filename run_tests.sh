@@ -69,6 +69,9 @@ VERBOSE_MODE=0
 FAILURES_ONLY=1
 TEST_PATTERN=""
 RUN_MULTI_UNIT_TESTS=1
+EXTRA_COMPILER_ARGS=()
+FORCE_VERBOSE_FROM_ENV=0
+VERBOSE_FROM_ARGS=0
 
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
 echo "==============================="
@@ -93,6 +96,15 @@ else
 fi
 
 echo "Using executable: $HYBRID_EXEC"
+
+if [[ -n "${HYBRID_SHOW_GENERIC_METRICS+x}" ]]; then
+    value=$(printf "%s" "$HYBRID_SHOW_GENERIC_METRICS" | tr -d '[:space:]')
+    lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+    if [[ -z "$lower" || ( "$lower" != "0" && "$lower" != "false" && "$lower" != "off" ) ]]; then
+        EXTRA_COMPILER_ARGS+=("--diagnostics" "generics")
+        FORCE_VERBOSE_FROM_ENV=1
+    fi
+fi
 
 # Create runtime library for test execution if clang is available
 RUNTIME_LIB=""
@@ -170,11 +182,20 @@ echo
 run_test() {
     local test_file="$1"
     local test_name=$(basename "$test_file" .hy)
+    local run_opts=()
+    while IFS= read -r line; do
+        line=${line#"// RUN_OPTS:"}
+        line=$(echo "$line" | sed -e 's/^[[:space:]]*//')
+        if [ -n "$line" ]; then
+            read -r -a parts <<< "$line"
+            run_opts+=("${parts[@]}")
+        fi
+    done < <(grep -E "^// RUN_OPTS:" "$test_file" || true)
     
     # Run the test and capture both output and exit code
     local output
     local exit_code
-    output=$($HYBRID_EXEC < "$test_file" 2>&1)
+    output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" < "$test_file" 2>&1)
     exit_code=$?
     
     # Check for error patterns in output
@@ -413,7 +434,7 @@ run_multi_unit_tests() {
 
         set +e
         local output
-        output=$("$HYBRID_EXEC" "${cmd_files[@]}" "${output_args[@]}" 2>&1)
+        output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${cmd_files[@]}" "${output_args[@]}" 2>&1)
         local status=$?
         set -e
 
@@ -488,6 +509,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -v|--verbose)
             VERBOSE_MODE=1
+            VERBOSE_FROM_ARGS=1
             shift
             ;;
         -f|--full)
@@ -536,6 +558,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ $FORCE_VERBOSE_FROM_ENV -eq 1 ] && [ $VERBOSE_FROM_ARGS -eq 0 ]; then
+    VERBOSE_MODE=1
+fi
 
 # Filter tests if pattern provided
 if [ -n "$TEST_PATTERN" ]; then

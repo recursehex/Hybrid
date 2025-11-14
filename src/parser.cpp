@@ -341,6 +341,21 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
   return info;
 }
 
+static void maybeWarnGenericArity(const std::vector<std::string> &params,
+                                  const std::string &ownerName,
+                                  std::string_view context) {
+  if (params.empty())
+    return;
+  GenericsDiagnostics &diag = currentCodegen().genericsDiagnostics;
+  if (!diag.heuristicsEnabled ||
+      params.size() <= diag.arityWarningThreshold)
+    return;
+  reportCompilerWarning(
+      std::string(context) + " '" + ownerName + "' declares " +
+          std::to_string(params.size()) + " generic parameters",
+      "Consider reducing the number of generic parameters or raising the threshold via --diagnostics generics.");
+}
+
 /// CurTok/getNextToken - Provide a simple token buffer.  CurTok is the current
 /// token the parser is looking at.  getNextToken reads another token from the
 /// lexer and updates CurTok with its results.
@@ -3130,6 +3145,14 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   std::vector<std::string> genericParameters;
   if (ParseGenericParameterList(genericParameters))
     SkipNewlines();
+  if (!genericParameters.empty()) {
+    std::string kindLabel = "Struct";
+    if (kind == AggregateKind::Class)
+      kindLabel = "Class";
+    else if (kind == AggregateKind::Interface)
+      kindLabel = "Interface";
+    maybeWarnGenericArity(genericParameters, compositeName, kindLabel);
+  }
 
   GenericParameterScope compositeGenerics(genericParameters);
 
@@ -3464,6 +3487,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     std::vector<std::string> methodGenericParams;
     if (ParseGenericParameterList(methodGenericParams))
       SkipNewlines();
+    if (!methodGenericParams.empty())
+      maybeWarnGenericArity(methodGenericParams, MemberName, "Method");
 
     if (!methodGenericParams.empty() && CurTok != '(') {
       reportCompilerError("Generic parameter list must be followed by '(' in method declarations");

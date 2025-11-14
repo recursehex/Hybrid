@@ -146,23 +146,144 @@ static TypeInfo makeTypeInfo(std::string typeName,
 static bool ensureNoDuplicateGenericParameters(const std::vector<std::string> &params,
                                                const std::string &contextDescription);
 
+static std::string stripNullableAnnotations(const std::string &typeName);
+static std::string typeNameFromInfo(const TypeInfo &info);
+
+static void dumpGenericBindingStack(const GenericsDiagnostics &diag) {
+  if (diag.bindingStack.empty())
+    return;
+  fprintf(stderr, "[generics-stack] Active bindings:\n");
+  for (std::size_t idx = diag.bindingStack.size(); idx-- > 0;) {
+    fprintf(stderr, "  #%zu %s\n",
+            diag.bindingStack.size() - idx,
+            diag.bindingStack[idx].c_str());
+  }
+}
+
+static bool recordGenericInstantiation(bool isFunction) {
+  GenericsDiagnostics &diag = currentCodegen().genericsDiagnostics;
+  if (isFunction)
+    ++diag.uniqueFunctionInstantiations;
+  else
+    ++diag.uniqueCompositeInstantiations;
+  if (diag.instantiationBudget) {
+    const uint64_t total =
+        diag.uniqueCompositeInstantiations + diag.uniqueFunctionInstantiations;
+    if (total > diag.instantiationBudget) {
+      if (!diag.instantiationBudgetExceeded) {
+        diag.instantiationBudgetExceeded = true;
+        reportCompilerError(
+            "Generic instantiation budget exceeded (limit " +
+                std::to_string(diag.instantiationBudget) + ")",
+            "Increase the limit with --max-generic-instantiations or simplify the generic usage.");
+        if (diag.stackDumpEnabled)
+          dumpGenericBindingStack(diag);
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+static std::string buildGenericFrameLabel(const std::string &name,
+                                          const std::vector<TypeInfo> &args) {
+  if (args.empty())
+    return name;
+  std::string label = name;
+  label += "<";
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    if (i)
+      label += ",";
+    label += stripNullableAnnotations(typeNameFromInfo(args[i]));
+  }
+  label += ">";
+  return label;
+}
+
+static unsigned computeGenericNestingDepth(const TypeInfo &info) {
+  if (info.typeArguments.empty())
+    return 0;
+  unsigned childDepth = 0;
+  for (const auto &arg : info.typeArguments)
+    childDepth = std::max(childDepth, computeGenericNestingDepth(arg));
+  return 1 + childDepth;
+}
+
+static bool maybeReportNestedDepthIssues(const TypeInfo &info,
+                                         const std::string &contextDescription) {
+  GenericsDiagnostics &diag = currentCodegen().genericsDiagnostics;
+  const unsigned depth = computeGenericNestingDepth(info);
+  if (diag.nestedDepthBudget && depth > diag.nestedDepthBudget) {
+    if (!diag.nestedBudgetExceeded) {
+      diag.nestedBudgetExceeded = true;
+      reportCompilerError(
+          "Nested generic depth (" + std::to_string(depth) +
+              ") exceeds configured maximum of " +
+              std::to_string(diag.nestedDepthBudget) + " in " +
+              contextDescription,
+          "Reduce the nesting or raise the limit with --max-nested-generics.");
+      if (diag.stackDumpEnabled)
+        dumpGenericBindingStack(diag);
+    }
+    return false;
+  }
+
+  if (diag.heuristicsEnabled &&
+      depth > diag.nestedDepthWarningThreshold &&
+      diag.nestedDepthWarningThreshold > 0) {
+    reportCompilerWarning(
+        "Nested generic depth of " + std::to_string(depth) + " in " +
+            contextDescription + " may impact compile-time performance",
+        "Flatten the generic shape or introduce helper typedefs.");
+  }
+  return true;
+}
+
 class GenericTypeBindingScope {
 public:
-  explicit GenericTypeBindingScope(const std::map<std::string, TypeInfo> &bindings)
-      : active(true) {
-    currentCodegen().genericTypeBindingsStack.push_back(bindings);
+  explicit GenericTypeBindingScope(const std::map<std::string, TypeInfo> &bindings,
+                                   std::string frameLabel = {})
+      : ctx(currentCodegen()), active(false),
+        label(std::move(frameLabel)) {
+    GenericsDiagnostics &diag = ctx.genericsDiagnostics;
+    if (diag.maxBindingDepth > 0 &&
+        diag.currentBindingDepth >= diag.maxBindingDepth) {
+      diag.depthLimitHit = true;
+      reportCompilerError("Maximum generic binding depth (" +
+                          std::to_string(diag.maxBindingDepth) + ") exceeded");
+      if (diag.stackDumpEnabled)
+        dumpGenericBindingStack(diag);
+      return;
+    }
+    ctx.genericTypeBindingsStack.push_back(bindings);
+    active = true;
+    ++diag.currentBindingDepth;
+    if (diag.currentBindingDepth > diag.peakBindingDepth)
+      diag.peakBindingDepth = diag.currentBindingDepth;
+    if (!label.empty())
+      diag.bindingStack.push_back(label);
   }
 
   GenericTypeBindingScope(const GenericTypeBindingScope &) = delete;
   GenericTypeBindingScope &operator=(const GenericTypeBindingScope &) = delete;
 
   ~GenericTypeBindingScope() {
-    if (active)
-      currentCodegen().genericTypeBindingsStack.pop_back();
+    if (!active)
+      return;
+    ctx.genericTypeBindingsStack.pop_back();
+    GenericsDiagnostics &diag = ctx.genericsDiagnostics;
+    if (!label.empty() && !diag.bindingStack.empty())
+      diag.bindingStack.pop_back();
+    if (diag.currentBindingDepth > 0)
+      --diag.currentBindingDepth;
   }
 
+  bool isActive() const { return active; }
+
 private:
+  CodegenContext &ctx;
   bool active = false;
+  std::string label;
 };
 
 static std::map<std::string, std::unique_ptr<StructAST>> &
@@ -1678,6 +1799,21 @@ static std::vector<bool> gatherParamRefFlags(const std::vector<Parameter> &param
   return flags;
 }
 
+static std::string formatSpecializationSignature(
+    const std::string &name, const TypeInfo &returnType, bool returnsByRef,
+    const std::vector<TypeInfo> &paramTypes,
+    const std::vector<bool> &paramIsRef) {
+  std::string signature = name;
+  signature += "|ret=" + stripNullableAnnotations(typeNameFromInfo(returnType));
+  signature += returnsByRef ? "|retref=1" : "|retref=0";
+  for (std::size_t i = 0; i < paramTypes.size(); ++i) {
+    signature += "|arg" + std::to_string(i) + "=" +
+                 stripNullableAnnotations(typeNameFromInfo(paramTypes[i]));
+    signature += paramIsRef[i] ? "&ref=1" : "&ref=0";
+  }
+  return signature;
+}
+
 static FunctionOverload *findRegisteredOverload(const std::string &name,
                                                 const TypeInfo &returnType,
                                                 bool returnsByRef,
@@ -1847,11 +1983,33 @@ llvm::Function *InstantiateGenericFunction(
     if (duplicateBinding)
       return nullptr;
 
-    GenericTypeBindingScope bindingScope(substitutions);
+    std::string frameLabel =
+        buildGenericFrameLabel(proto->getName(), typeArguments);
+    GenericTypeBindingScope bindingScope(substitutions, frameLabel);
+    if (!bindingScope.isActive())
+      return nullptr;
 
     TypeInfo boundReturn = applyActiveTypeBindings(proto->getReturnTypeInfo());
     std::vector<TypeInfo> boundParams = gatherParamTypes(proto->getArgs());
     std::vector<bool> boundParamIsRef = gatherParamRefFlags(proto->getArgs());
+    std::string instantiationKey =
+        formatSpecializationSignature(proto->getName(), boundReturn,
+                                      proto->returnsByRef(), boundParams,
+                                      boundParamIsRef);
+
+    if (const auto cacheIt =
+            CG.genericFunctionInstantiationCache.find(instantiationKey);
+        cacheIt != CG.genericFunctionInstantiationCache.end()) {
+      if (llvm::Function *cached =
+              TheModule->getFunction(cacheIt->second)) {
+        noteFunctionCacheHit();
+        currentCodegen().instantiatedGenericFunctions.insert(
+            std::string(cached->getName()));
+        if (!primaryResult)
+          primaryResult = cached;
+        continue;
+      }
+    }
 
     if (FunctionOverload *existing =
             findRegisteredOverload(proto->getName(), boundReturn,
@@ -1870,10 +2028,14 @@ llvm::Function *InstantiateGenericFunction(
     }
 
     noteFunctionCacheMiss();
+    if (!recordGenericInstantiation(true))
+      return nullptr;
     FunctionInstantiationScope instantiationScope;
     llvm::Function *instantiated = fn->codegen();
     if (!instantiated)
       return nullptr;
+    CG.genericFunctionInstantiationCache[instantiationKey] =
+        std::string(instantiated->getName());
     currentCodegen().instantiatedGenericFunctions.insert(
         std::string(instantiated->getName()));
     if (!primaryResult)
@@ -2710,11 +2872,38 @@ substituteTypeInfo(const TypeInfo &info,
   return result;
 }
 
+static std::string buildNormalizedCompositeKey(const StructAST &templ,
+                                               const TypeInfo &requestedType) {
+  std::string key = requestedType.baseTypeName;
+  const auto &usage = templ.layoutParameterUsage();
+  if (requestedType.typeArguments.empty())
+    return key;
+  key += "<";
+  for (std::size_t i = 0; i < requestedType.typeArguments.size(); ++i) {
+    if (i)
+      key += ",";
+    bool depends = i < usage.size() ? usage[i] : true;
+    if (!depends) {
+      key += "_";
+    } else {
+      key += stripNullableAnnotations(
+          typeNameFromInfo(requestedType.typeArguments[i]));
+    }
+  }
+  key += ">";
+  return key;
+}
+
 static const CompositeTypeInfo *
 materializeCompositeInstantiation(const TypeInfo &requestedType) {
   std::string constructedName =
       stripNullableAnnotations(typeNameFromInfo(requestedType));
-  std::cerr << "[instantiate] " << constructedName << "\n";
+  if (const auto aliasIt =
+          CG.compositeMetadataAliases.find(constructedName);
+      aliasIt != CG.compositeMetadataAliases.end()) {
+    noteTypeCacheHit();
+    return lookupCompositeInfo(aliasIt->second);
+  }
   auto existing = CG.compositeMetadata.find(constructedName);
   if (existing != CG.compositeMetadata.end()) {
     noteTypeCacheHit();
@@ -2729,7 +2918,22 @@ materializeCompositeInstantiation(const TypeInfo &requestedType) {
       requestedType.typeArguments.size())
     return nullptr;
 
+  std::string normalizedKey =
+      buildNormalizedCompositeKey(*templateAst, requestedType);
+  if (auto reuseIt = CG.compositeLayoutCache.find(normalizedKey);
+      reuseIt != CG.compositeLayoutCache.end()) {
+    const std::string &canonicalName = reuseIt->second;
+    CG.compositeMetadataAliases[constructedName] = canonicalName;
+    if (auto structIt = StructTypes.find(canonicalName);
+        structIt != StructTypes.end())
+      StructTypes[constructedName] = structIt->second;
+    noteTypeCacheHit();
+    return lookupCompositeInfo(canonicalName);
+  }
+
   noteTypeCacheMiss();
+  if (!recordGenericInstantiation(false))
+    return nullptr;
 
   std::map<std::string, TypeInfo> substitutions;
 
@@ -2737,7 +2941,9 @@ materializeCompositeInstantiation(const TypeInfo &requestedType) {
     substitutions.emplace(templateAst->getGenericParameters()[i],
                           requestedType.typeArguments[i]);
 
-  GenericTypeBindingScope bindingScope(substitutions);
+  GenericTypeBindingScope bindingScope(substitutions, constructedName);
+  if (!bindingScope.isActive())
+    return nullptr;
   GenericInstantiationScope instantiationScope(constructedName);
 
   if (StructTypes.contains(constructedName))
@@ -2747,11 +2953,15 @@ materializeCompositeInstantiation(const TypeInfo &requestedType) {
   if (!templateAst->codegen())
     return nullptr;
 
+  CG.compositeLayoutCache[normalizedKey] = constructedName;
   return lookupCompositeInfo(constructedName, /*countHit=*/false);
 }
 
 static const CompositeTypeInfo *
 lookupCompositeInfo(const std::string &name, bool countHit) {
+  if (const auto aliasIt = CG.compositeMetadataAliases.find(name);
+      aliasIt != CG.compositeMetadataAliases.end())
+    return lookupCompositeInfo(aliasIt->second, countHit);
   auto it = CG.compositeMetadata.find(name);
   if (it != CG.compositeMetadata.end()) {
     if (countHit)
@@ -2842,6 +3052,8 @@ static bool validateTypeForGenerics(const TypeInfo &info,
                                     const std::string &contextDescription,
                                     const GenericDefinitionInfo *currentDefinition = nullptr) {
   bool valid = true;
+  if (!maybeReportNestedDepthIssues(info, contextDescription))
+    valid = false;
 
   if (info.isGenericParameter) {
     if (!isActiveGenericParameter(info.baseTypeName)) {
@@ -7394,13 +7606,6 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   const CompositeMemberInfo &memberInfo = methodIt->second;
-  std::cerr << "[member-call] owner=" << ownerName << " method="
-            << member.getMemberName()
-            << " mangled=" << memberInfo.mangledName
-            << " return=" << typeNameFromInfo(memberInfo.returnType)
-            << " direct=" << (memberInfo.directFunction ? "yes" : "no")
-            << "\n";
-
   std::vector<TypeInfo> methodTypeArgs;
   if (member.hasExplicitGenerics()) {
     std::string decoratedMemberName =
@@ -9267,6 +9472,48 @@ llvm::Function *FunctionAST::codegen() {
 //===----------------------------------------------------------------------===//
 // Struct Code Generation
 //===----------------------------------------------------------------------===//
+
+const std::vector<bool> &StructAST::layoutParameterUsage() const {
+  if (LayoutUsageComputed)
+    return LayoutParameterUsage;
+
+  LayoutUsageComputed = true;
+  LayoutParameterUsage.assign(GenericParameters.size(), false);
+  if (GenericParameters.empty())
+    return LayoutParameterUsage;
+
+  SemanticGenericParameterScope typeGenericScope(GenericParameters);
+  std::function<void(const TypeInfo &)> markUsage =
+      [&](const TypeInfo &type) {
+        if (type.isGenericParameter) {
+          auto it = std::find(GenericParameters.begin(),
+                              GenericParameters.end(), type.baseTypeName);
+          if (it != GenericParameters.end())
+            LayoutParameterUsage[it - GenericParameters.begin()] = true;
+        }
+        for (const auto &arg : type.typeArguments)
+          markUsage(arg);
+      };
+
+  for (const auto &field : Fields)
+    markUsage(makeTypeInfo(field->getType()));
+  for (const auto &base : BaseTypes)
+    markUsage(makeTypeInfo(base));
+  if (BaseClass)
+    markUsage(makeTypeInfo(*BaseClass));
+  for (const auto &iface : InterfaceTypes)
+    markUsage(makeTypeInfo(iface));
+  for (const auto &method : Methods) {
+    PrototypeAST *proto = method.getPrototype();
+    if (!proto)
+      continue;
+    markUsage(proto->getReturnTypeInfo());
+    for (const auto &param : proto->getArgs())
+      markUsage(param.DeclaredType);
+  }
+
+  return LayoutParameterUsage;
+}
 
 // Generate code for struct definitions
 llvm::Type *StructAST::codegen() {

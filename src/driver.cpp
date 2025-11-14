@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <string>
 #include <system_error>
 #include <vector>
+#include <limits>
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Module.h"
@@ -94,6 +96,16 @@ void printUsage() {
   fprintf(stderr, "  --emit-llvm        Emit the generated LLVM IR\n");
   fprintf(stderr, "  -o <file>          Write output to <file> (implies --emit-llvm)\n");
   fprintf(stderr, "  -o -               Write LLVM IR to stdout\n");
+  fprintf(stderr, "  --diagnostics generics\n");
+  fprintf(stderr, "                     Print generics diagnostics summary\n");
+  fprintf(stderr, "  --dump-generic-stack\n");
+  fprintf(stderr, "                     Dump the active generic binding stack on overflow\n");
+  fprintf(stderr, "  --max-generic-depth <n>\n");
+  fprintf(stderr, "                     Override the max generic binding depth (default 128)\n");
+  fprintf(stderr, "  --max-generic-instantiations <n>\n");
+  fprintf(stderr, "                     Fail when total generic instantiations exceed <n>\n");
+  fprintf(stderr, "  --max-nested-generics <n>\n");
+  fprintf(stderr, "                     Fail when nested generic depth exceeds <n>\n");
 }
 
 bool shouldEnableGenericsMetrics() {
@@ -116,16 +128,73 @@ bool shouldEnableGenericsMetrics() {
   return true;
 }
 
+bool shouldForceGenericsDiagnostics() {
+  const char *env = std::getenv("HYBRID_SHOW_GENERIC_METRICS");
+  if (!env)
+    return false;
+  while (std::isspace(static_cast<unsigned char>(*env)))
+    ++env;
+  if (*env == '\0')
+    return true;
+
+  std::string lowered;
+  lowered.reserve(std::strlen(env));
+  for (const char *ptr = env; *ptr; ++ptr)
+    lowered.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(*ptr))));
+
+  if (lowered == "0" || lowered == "false" || lowered == "off")
+    return false;
+  return true;
+}
+
+template <typename T>
+bool parseUnsignedValue(const std::string &text, T &out) {
+  if (text.empty())
+    return false;
+  char *end = nullptr;
+  errno = 0;
+  unsigned long long value = std::strtoull(text.c_str(), &end, 10);
+  if (errno != 0 || end == text.c_str() || *end != '\0')
+    return false;
+  if (value > std::numeric_limits<T>::max())
+    return false;
+  out = static_cast<T>(value);
+  return true;
+}
+
 void emitGenericsMetricsSummary(const CodegenContext &context) {
   const auto &metrics = context.genericsMetrics;
-  if (!metrics.enabled)
+  const auto &diag = context.genericsDiagnostics;
+  if (!metrics.enabled && !diag.diagnosticsEnabled)
     return;
-  fprintf(stderr,
-          "[generics-metrics] functions hits:%llu misses:%llu | types hits:%llu misses:%llu\n",
-          static_cast<unsigned long long>(metrics.functionCacheHits),
-          static_cast<unsigned long long>(metrics.functionCacheMisses),
-          static_cast<unsigned long long>(metrics.typeCacheHits),
-          static_cast<unsigned long long>(metrics.typeCacheMisses));
+  if (metrics.enabled) {
+    fprintf(stderr,
+            "[generics-metrics] functions hits:%llu misses:%llu | types hits:%llu misses:%llu\n",
+            static_cast<unsigned long long>(metrics.functionCacheHits),
+            static_cast<unsigned long long>(metrics.functionCacheMisses),
+            static_cast<unsigned long long>(metrics.typeCacheHits),
+            static_cast<unsigned long long>(metrics.typeCacheMisses));
+  }
+  if (diag.diagnosticsEnabled) {
+    fprintf(stderr,
+            "[generics-diag] type-specializations:%llu function-specializations:%llu "
+            "| module-bytes:%llu | depth:%u/%u\n",
+            static_cast<unsigned long long>(diag.uniqueCompositeInstantiations),
+            static_cast<unsigned long long>(diag.uniqueFunctionInstantiations),
+            static_cast<unsigned long long>(diag.moduleIRBytesAfterPrint),
+            diag.peakBindingDepth, diag.maxBindingDepth);
+    if (diag.depthLimitHit)
+      fprintf(stderr, "  note: generic binding depth limit reached\n");
+    if (diag.instantiationBudgetExceeded)
+      fprintf(stderr,
+              "  note: generic instantiation budget exceeded (limit %llu)\n",
+              static_cast<unsigned long long>(diag.instantiationBudget));
+    if (diag.nestedBudgetExceeded)
+      fprintf(stderr,
+              "  note: nested generic depth budget exceeded (limit %u)\n",
+              diag.nestedDepthBudget);
+  }
 }
 
 }
@@ -134,6 +203,13 @@ int main(int argc, char **argv) {
   CompilerSession session;
   session.resetAll();
   pushCompilerSession(session);
+  bool dumpGenericStack = false;
+  bool diagnosticsFlag = false;
+  const bool diagnosticsFromEnv = shouldForceGenericsDiagnostics();
+  uint64_t maxGenericInstantiations = 0;
+  unsigned maxNestedGenerics = 0;
+  unsigned maxGenericDepth = 0;
+
   session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
   bool emitLLVM = false;
@@ -144,6 +220,93 @@ int main(int argc, char **argv) {
     std::string arg = argv[i];
     if (arg == "--emit-llvm") {
       emitLLVM = true;
+    } else if (arg == "--diagnostics") {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --diagnostics requires a value\n");
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+      std::string value = argv[++i];
+      if (value == "generics") {
+        diagnosticsFlag = true;
+      } else {
+        fprintf(stderr, "Error: Unknown diagnostics channel '%s'\n", value.c_str());
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg.rfind("--diagnostics=", 0) == 0) {
+      std::string value = arg.substr(std::strlen("--diagnostics="));
+      if (value == "generics") {
+        diagnosticsFlag = true;
+      } else {
+        fprintf(stderr, "Error: Unknown diagnostics channel '%s'\n", value.c_str());
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg == "--dump-generic-stack") {
+      dumpGenericStack = true;
+    } else if (arg == "--max-generic-depth") {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --max-generic-depth requires a value\n");
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+      if (!parseUnsignedValue(argv[++i], maxGenericDepth)) {
+        fprintf(stderr, "Error: Invalid value for --max-generic-depth\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg.rfind("--max-generic-depth=", 0) == 0) {
+      std::string value = arg.substr(std::strlen("--max-generic-depth="));
+      if (!parseUnsignedValue(value, maxGenericDepth)) {
+        fprintf(stderr, "Error: Invalid value for --max-generic-depth\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg == "--max-generic-instantiations") {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --max-generic-instantiations requires a value\n");
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+      if (!parseUnsignedValue(argv[++i], maxGenericInstantiations)) {
+        fprintf(stderr, "Error: Invalid value for --max-generic-instantiations\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg.rfind("--max-generic-instantiations=", 0) == 0) {
+      std::string value =
+          arg.substr(std::strlen("--max-generic-instantiations="));
+      if (!parseUnsignedValue(value, maxGenericInstantiations)) {
+        fprintf(stderr, "Error: Invalid value for --max-generic-instantiations\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg == "--max-nested-generics") {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --max-nested-generics requires a value\n");
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+      if (!parseUnsignedValue(argv[++i], maxNestedGenerics)) {
+        fprintf(stderr, "Error: Invalid value for --max-nested-generics\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg.rfind("--max-nested-generics=", 0) == 0) {
+      std::string value =
+          arg.substr(std::strlen("--max-nested-generics="));
+      if (!parseUnsignedValue(value, maxNestedGenerics)) {
+        fprintf(stderr, "Error: Invalid value for --max-nested-generics\n");
+        popCompilerSession();
+        return 1;
+      }
     } else if (arg == "-o") {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: -o requires an output path\n");
@@ -161,6 +324,21 @@ int main(int argc, char **argv) {
       sourceFiles.push_back(arg);
     }
   }
+
+  diagnosticsFlag = diagnosticsFlag || diagnosticsFromEnv || dumpGenericStack;
+  CodegenContext &codegenCtx = session.codegen();
+  codegenCtx.genericsMetrics.enabled =
+      codegenCtx.genericsMetrics.enabled || diagnosticsFlag;
+  auto &diagConfig = codegenCtx.genericsDiagnostics;
+  diagConfig.diagnosticsEnabled = diagnosticsFlag;
+  if (dumpGenericStack)
+    diagConfig.stackDumpEnabled = true;
+  if (maxGenericDepth)
+    diagConfig.maxBindingDepth = maxGenericDepth;
+  if (maxGenericInstantiations)
+    diagConfig.instantiationBudget = maxGenericInstantiations;
+  if (maxNestedGenerics)
+    diagConfig.nestedDepthBudget = maxNestedGenerics;
 
   if (!outputPath.empty())
     emitLLVM = emitLLVM || outputPath == "-" || endsWith(outputPath, ".ll") || endsWith(outputPath, ".bc");
@@ -209,7 +387,27 @@ int main(int argc, char **argv) {
       else
         targetOutput = "a.out";
 
+      std::string cachedModuleIR;
+      bool cachedModuleValid = false;
+      auto captureModuleIR = [&]() {
+        if (cachedModuleValid)
+          return;
+        if (!codegenCtx.genericsDiagnostics.diagnosticsEnabled)
+          return;
+        llvm::raw_string_ostream buffer(cachedModuleIR);
+        module->print(buffer, nullptr);
+        buffer.flush();
+        cachedModuleValid = true;
+        codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint =
+            cachedModuleIR.size();
+      };
+
       auto writeModuleIR = [&](llvm::raw_ostream &os) {
+        if (codegenCtx.genericsDiagnostics.diagnosticsEnabled) {
+          captureModuleIR();
+          os << cachedModuleIR;
+          return;
+        }
         module->print(os, nullptr);
       };
 
@@ -236,6 +434,9 @@ int main(int argc, char **argv) {
           if (!emitTextFile(targetOutput))
             hadFailure = true;
         }
+        if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
+          codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
+              codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
       } else {
         llvm::SmallString<128> tempPath;
         int tempFD;
@@ -248,6 +449,9 @@ int main(int argc, char **argv) {
             llvm::raw_fd_ostream tempStream(tempFD, true);
             writeModuleIR(tempStream);
           }
+          if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
+            codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
+                codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
 
           std::string command = "clang \"" + tempPathStr + "\" -o \"" + targetOutput + "\"";
           int status = std::system(command.c_str());

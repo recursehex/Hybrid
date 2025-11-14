@@ -304,6 +304,18 @@ string summary = describeType("Box<int>")
 
 The returned string lists the concrete type arguments, base class, implemented interfaces, and any generic method instantiations emitted during the current session. Tests under `test/generics/basic/metadata_dump.hy` pin this behaviour so regressions are caught automatically.
 
+### Generic Diagnostics & Limits
+
+- Hybrid warns when a declaration introduces more than eight generic parameters or when a type literal nests more than four `<>` pairs. These heuristics keep APIs readable without banning legitimate high-arity cases.
+- Pass `--diagnostics generics` (or set `HYBRID_SHOW_GENERIC_METRICS=1` when using `run_tests.sh`) to print aggregate metrics: total type/function specialisations emitted, cache hit rates, peak binding depth, and the exact byte-size of the generated LLVM module.
+- `--dump-generic-stack` prints the active binding frames whenever the compiler aborts due to excessive instantiation recursion, making it easier to spot cyclical constraints.
+- The following hard limits are configurable per build:
+  - `--max-generic-depth <n>`: cap the recursive binding stack (defaults to 128).
+  - `--max-generic-instantiations <n>`: stop emitting new specialisations once the total unique type/function bindings exceed `<n>`.
+  - `--max-nested-generics <n>`: reject individual type spellings whose nesting depth exceeds `<n>`.
+
+Together these switches provide early feedback for pathological templates without penalising everyday generic code.
+
 ### Keyword reference
 
 | Keyword | Applies to | Meaning |

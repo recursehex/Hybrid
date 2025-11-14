@@ -18,3 +18,12 @@ Specialization can inflate the module if a template is instantiated for dozens o
 All diagnostics flow through `reportCompilerError(...)`, and the parser relies on the `TemplateAngleScope` lookahead to decide when `<...>` denotes type arguments versus comparisons or shifts.
 
 The combination of these changes gives us the safety of C#/Java-style syntax with the predictable codegen of C++ templates.
+
+## Troubleshooting & Telemetry
+
+- `--diagnostics generics` prints a one-line summary covering cache hits, the number of unique type/function specialisations, peak binding depth, and the size of the generated LLVM module. Set `HYBRID_SHOW_GENERIC_METRICS=1` when running `run_tests.sh` to enable this automatically.
+- `--dump-generic-stack` dumps the active binding frames when the compiler aborts because the recursive instantiation depth (`--max-generic-depth`, default 128) is exceeded.
+- `--max-generic-instantiations` and `--max-nested-generics` offer hard caps on total specialisations emitted and individual type-expression depth, respectively. They complement the default heuristics that warn about >8 generic parameters or >4 nested `<>` segments.
+- If a particular template expands faster than expected, call `describeType()` for the bound type and inspect the `genericMethodInstantiations` field to see which members are triggering new LLVM bodies.
+
+These diagnostics keep large codebases honest while preserving the zero-cost model that specialisation provides.

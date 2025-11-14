@@ -958,6 +958,8 @@ class StructAST {
   std::optional<TypeInfo> BaseClassInfo;
   std::vector<TypeInfo> InterfaceTypeInfos;
   bool IsAbstract = false;
+  mutable bool LayoutUsageComputed = false;
+  mutable std::vector<bool> LayoutParameterUsage;
 
 public:
   StructAST(AggregateKind Kind,
@@ -987,6 +989,7 @@ public:
   bool isAbstract() const { return IsAbstract; }
   bool isInterface() const { return Kind == AggregateKind::Interface; }
   bool isGenericTemplate() const { return !GenericParameters.empty(); }
+  const std::vector<bool> &layoutParameterUsage() const;
 
   void setBaseClass(std::optional<std::string> Base) { BaseClass = std::move(Base); }
   void setBaseClassInfo(std::optional<TypeInfo> Info) { BaseClassInfo = std::move(Info); }
