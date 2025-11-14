@@ -5,6 +5,12 @@
 
 set -e  # Exit on any error
 
+START_TIME=$(date +%s)
+TIMED_DURATION=0
+TIMED_TESTS=0
+
+START_TIME=$(date +%s)
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -182,6 +188,11 @@ echo
 run_test() {
     local test_file="$1"
     local test_name=$(basename "$test_file" .hy)
+    local test_wall_start=$(date +%s)
+    local counts_for_timing=1
+    if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+        counts_for_timing=0
+    fi
     local run_opts=()
     while IFS= read -r line; do
         line=${line#"// RUN_OPTS:"}
@@ -396,6 +407,13 @@ run_test() {
     fi
     
     mark_test_completed
+
+    local test_wall_end=$(date +%s)
+    local test_elapsed=$((test_wall_end - test_wall_start))
+    if [ $counts_for_timing -eq 1 ]; then
+        TIMED_DURATION=$((TIMED_DURATION + test_elapsed))
+        TIMED_TESTS=$((TIMED_TESTS + 1))
+    fi
 }
 
 run_multi_unit_tests() {
@@ -413,9 +431,14 @@ run_multi_unit_tests() {
         [ -d "$dir" ] || continue
 
         local test_name=$(basename "$dir")
+        local suite_start=$(date +%s)
         local expect="pass"
         if [ -f "${dir}/EXPECT_FAIL" ] || [[ "$test_name" == *_fail ]]; then
             expect="fail"
+        fi
+        local counts_for_timing=0
+        if [ "$expect" = "pass" ]; then
+            counts_for_timing=1
         fi
 
         local cmd_files=()
@@ -497,6 +520,13 @@ run_multi_unit_tests() {
         if [ $FAILURES_ONLY -eq 1 ]; then
             PROGRESS_COUNT=$((PROGRESS_COUNT + 1))
             update_progress_display
+        fi
+
+        local suite_end=$(date +%s)
+        local suite_elapsed=$((suite_end - suite_start))
+        if [ $counts_for_timing -eq 1 ]; then
+            TIMED_DURATION=$((TIMED_DURATION + suite_elapsed))
+            TIMED_TESTS=$((TIMED_TESTS + 1))
         fi
     done
 }
@@ -641,6 +671,22 @@ echo -e "Failed:       ${RED}$FAILED_TESTS${NC}"
 # Add note about failures-only mode
 if [ $FAILURES_ONLY -eq 1 ] && [ $FAILED_TESTS -eq 0 ]; then
     echo -e "${GREEN}(No failures shown - all tests passed)${NC}"
+fi
+
+if [ $TIMED_TESTS -gt 0 ]; then
+    AVG_TIME=$(awk "BEGIN { printf \"%.2f\", $TIMED_DURATION / $TIMED_TESTS }")
+else
+    AVG_TIME="n/a"
+fi
+
+echo
+echo "Timing (runtime tests only):"
+if [ $TIMED_TESTS -gt 0 ]; then
+    printf "  Counted tests: %d\n" "$TIMED_TESTS"
+    printf "  Total elapsed: %ds\n" "$TIMED_DURATION"
+    printf "  Avg per test: %ss\n" "$AVG_TIME"
+else
+    echo "  No runtime tests were timed."
 fi
 
 if [ $FAILED_TESTS -eq 0 ]; then
