@@ -256,6 +256,20 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("unsafe");
     case tok_ref:
       return makeKeyword("ref");
+    case tok_weak:
+      return makeKeyword("weak");
+    case tok_unowned:
+      return makeKeyword("unowned");
+    case tok_unique:
+      return makeKeyword("unique");
+    case tok_shared:
+      return makeKeyword("shared");
+    case tok_autoreleasepool:
+      return makeKeyword("@autoreleasepool");
+    case tok_new:
+      return makeKeyword("new");
+    case tok_free:
+      return makeKeyword("free");
     case tok_lambda:
       return makeOperator("=>");
     case tok_eq:

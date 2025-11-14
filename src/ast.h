@@ -58,6 +58,7 @@ struct TypeInfo {
   bool declaredRef = false;       // whether declared via `ref`
   bool isGenericParameter = false; // true when the type refers to a generic parameter
   OwnershipQualifier ownership = OwnershipQualifier::Strong;
+  bool hasExplicitOwnership = false;
   SmartPointerKind smartPointerKind = SmartPointerKind::None;
   bool arcManaged = false;
   const ClassDescriptor *classDescriptor = nullptr;
@@ -180,6 +181,13 @@ struct MemberModifiers {
   bool isProperty = false;
 };
 
+struct ClassInheritanceMetadata {
+  std::optional<std::string> baseClassName;
+  std::vector<std::string> interfaceNames;
+  MemberAccess defaultMemberAccess = MemberAccess::None();
+  std::vector<MemberAccess> constructorAccesses;
+};
+
 struct ClassDescriptor {
   struct Constructor {
     MemberAccess access = MemberAccess::PrivateOnly();
@@ -217,6 +225,9 @@ void FinalizeTopLevelExecution();
 class ExprAST {
 protected:
   mutable std::string TypeName; // The type name of this expression (e.g. "int", "byte", "float")
+  bool TemporaryValue = false;
+  GenericBindingKey BoundGenericKey;
+  bool HasBoundGenericKey = false;
   
 public:
   virtual ~ExprAST() = default;
@@ -228,6 +239,20 @@ public:
   
   // Set the type name (used during codegen)
   void setTypeName(const std::string &TN) const { TypeName = TN; }
+  bool isTemporary() const { return TemporaryValue; }
+  void markTemporary(bool value = true) { TemporaryValue = value; }
+  bool hasGenericBindingKey() const { return HasBoundGenericKey; }
+  const GenericBindingKey &getGenericBindingKey() const {
+    return BoundGenericKey;
+  }
+  void setGenericBindingKey(GenericBindingKey key) {
+    BoundGenericKey = std::move(key);
+    HasBoundGenericKey = !BoundGenericKey.empty();
+  }
+  void clearGenericBindingKey() {
+    BoundGenericKey = {};
+    HasBoundGenericKey = false;
+  }
 };
 
 /// StmtAST - Base class for all statement nodes.
@@ -269,11 +294,23 @@ class VariableDeclarationStmtAST : public StmtAST {
   std::string Name;
   std::unique_ptr<ExprAST> Initializer;
   bool IsRef;
+  OwnershipQualifier DeclaredOwnership = OwnershipQualifier::Strong;
+  bool HasExplicitOwnership = false;
+  GenericBindingKey DeclaredGenericBinding;
+  bool HasDeclaredGenericBinding = false;
 
 public:
   VariableDeclarationStmtAST(TypeInfo DeclaredType, const std::string &Name,
                              std::unique_ptr<ExprAST> Initializer, bool IsRef = false)
-      : DeclaredType(std::move(DeclaredType)), Name(Name), Initializer(std::move(Initializer)), IsRef(IsRef) {}
+      : DeclaredType(std::move(DeclaredType)), Name(Name),
+        Initializer(std::move(Initializer)), IsRef(IsRef) {
+    DeclaredOwnership = this->DeclaredType.ownership;
+    HasExplicitOwnership = this->DeclaredType.hasExplicitOwnership;
+    if (!this->DeclaredType.genericKey.empty()) {
+      DeclaredGenericBinding = this->DeclaredType.genericKey;
+      HasDeclaredGenericBinding = true;
+    }
+  }
 
   llvm::Value *codegen() override;
   const std::string &getType() const { return DeclaredType.typeName; }
@@ -281,6 +318,12 @@ public:
   [[nodiscard]] const std::string &getName() const { return Name; }
   ExprAST *getInitializer() const { return Initializer.get(); }
   bool isRef() const { return IsRef; }
+  OwnershipQualifier getOwnershipQualifier() const { return DeclaredOwnership; }
+  bool hasExplicitOwnershipQualifier() const { return HasExplicitOwnership; }
+  bool hasDeclaredGenericBinding() const { return HasDeclaredGenericBinding; }
+  const GenericBindingKey &getDeclaredGenericBinding() const {
+    return DeclaredGenericBinding;
+  }
 };
 
 /// ExpressionStmtAST - Statement class for expression statements.
@@ -775,6 +818,28 @@ public:
   ExprAST *getOperand() const { return Operand.get(); }
 };
 
+class RetainExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  explicit RetainExprAST(std::unique_ptr<ExprAST> Operand)
+      : Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+};
+
+class ReleaseExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  explicit ReleaseExprAST(std::unique_ptr<ExprAST> Operand)
+      : Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+};
+
 class MemberAccessExprAST;
 
 /// CallExprAST - Expression class for function calls.
@@ -869,21 +934,39 @@ public:
 /// FieldAST - Represents a field in a struct.
 class FieldAST {
   std::string Type;
+  TypeInfo DeclaredTypeInfo;
   std::string Name;
   MemberModifiers Modifiers;
   std::unique_ptr<ExprAST> Initializer;
 
 public:
   FieldAST(std::string Type,
+           TypeInfo DeclaredTypeInfo,
            std::string Name,
            MemberModifiers Modifiers,
            std::unique_ptr<ExprAST> Initializer = nullptr)
       : Type(std::move(Type)),
+        DeclaredTypeInfo(std::move(DeclaredTypeInfo)),
         Name(std::move(Name)),
         Modifiers(Modifiers),
-        Initializer(std::move(Initializer)) {}
+        Initializer(std::move(Initializer)) {
+    this->Type = this->DeclaredTypeInfo.typeName;
+  }
   
   const std::string &getType() const { return Type; }
+  const TypeInfo &getTypeInfo() const { return DeclaredTypeInfo; }
+  OwnershipQualifier getOwnershipQualifier() const {
+    return DeclaredTypeInfo.ownership;
+  }
+  bool hasExplicitOwnership() const {
+    return DeclaredTypeInfo.hasExplicitOwnership;
+  }
+  bool hasDeclaredGenericBinding() const {
+    return !DeclaredTypeInfo.genericKey.empty();
+  }
+  const GenericBindingKey &getDeclaredGenericBinding() const {
+    return DeclaredTypeInfo.genericKey;
+  }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const MemberModifiers &getModifiers() const { return Modifiers; }
   bool hasInitializer() const { return static_cast<bool>(Initializer); }
@@ -1017,6 +1100,7 @@ class StructAST {
   bool IsAbstract = false;
   mutable bool LayoutUsageComputed = false;
   mutable std::vector<bool> LayoutParameterUsage;
+  ClassInheritanceMetadata InheritanceMetadata;
 
 public:
   StructAST(AggregateKind Kind,
@@ -1043,6 +1127,9 @@ public:
   const std::optional<TypeInfo> &getBaseClassInfo() const { return BaseClassInfo; }
   const std::vector<std::string> &getInterfaces() const { return InterfaceTypes; }
   const std::vector<TypeInfo> &getInterfaceTypeInfos() const { return InterfaceTypeInfos; }
+  const ClassInheritanceMetadata &getInheritanceMetadata() const {
+    return InheritanceMetadata;
+  }
   bool isAbstract() const { return IsAbstract; }
   bool isInterface() const { return Kind == AggregateKind::Interface; }
   bool isGenericTemplate() const { return !GenericParameters.empty(); }
@@ -1056,6 +1143,9 @@ public:
   void appendBaseTypes(std::vector<std::string> bases) { BaseTypes = std::move(bases); }
   void setBaseTypeInfos(std::vector<TypeInfo> Infos) { BaseTypeInfos = std::move(Infos); }
   void setGenericParameters(std::vector<std::string> Generics) { GenericParameters = std::move(Generics); }
+  void setInheritanceMetadata(ClassInheritanceMetadata metadata) {
+    InheritanceMetadata = std::move(metadata);
+  }
 };
 
 // Initialize LLVM module

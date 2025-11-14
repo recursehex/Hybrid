@@ -472,6 +472,18 @@ int gettok() {
       return tok_unsafe;
     if (lex.identifierStr == "ref")
       return tok_ref;
+    if (lex.identifierStr == "weak")
+      return tok_weak;
+    if (lex.identifierStr == "unowned")
+      return tok_unowned;
+    if (lex.identifierStr == "unique")
+      return tok_unique;
+    if (lex.identifierStr == "shared")
+      return tok_shared;
+    if (lex.identifierStr == "new")
+      return tok_new;
+    if (lex.identifierStr == "free")
+      return tok_free;
     if (lex.identifierStr == "abstract")
       return tok_abstract;
     if (lex.identifierStr == "inherits")
@@ -1003,9 +1015,30 @@ char_literal_end:
     return tok_dot;
   }
 
-  // Check for @ (dereference/pointer type)
+  // Check for @ (dereference/pointer type or autoreleasepool)
   if (LastChar == '@') {
     SourceLocation start = lex.lastCharLocation();
+    int NextChar = lex.consumeChar();
+    if (std::isalpha(static_cast<unsigned char>(NextChar)) || NextChar == '_') {
+      std::string ident;
+      ident.push_back(static_cast<char>(NextChar));
+      int ch = lex.consumeChar();
+      while (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_') {
+        ident.push_back(static_cast<char>(ch));
+        ch = lex.consumeChar();
+      }
+      if (ident == "autoreleasepool") {
+        lex.identifierStr = ident;
+        LastChar = ch;
+        lex.setTokenStart(start);
+        return tok_autoreleasepool;
+      }
+      lex.unconsumeChar(ch);
+      for (auto it = ident.rbegin(); it != ident.rend(); ++it)
+        lex.unconsumeChar(*it);
+    } else {
+      lex.unconsumeChar(NextChar);
+    }
     LastChar = lex.consumeChar();
     lex.setTokenStart(start);
     return tok_at;

@@ -155,6 +155,15 @@ enum Token {
   tok_null_coalescing = -98,        // ?? (null-coalescing operator)
   tok_null_coalescing_assign = -99, // ??= (null-coalescing assignment)
 
+  // ARC / ownership keywords
+  tok_weak = -101,             // weak ownership qualifier or smart pointer
+  tok_unowned = -102,          // unowned ownership qualifier
+  tok_unique = -103,           // unique<T> smart pointer helper
+  tok_shared = -104,           // shared<T> smart pointer helper
+  tok_autoreleasepool = -105,  // @autoreleasepool
+  tok_new = -106,              // new keyword (reserved)
+  tok_free = -107,             // free keyword (reserved)
+
   // error token
   tok_error = -100            // error during lexing
 };

@@ -2251,14 +2251,49 @@ struct ParsedTypeDescriptor {
 
 static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
   ParsedTypeDescriptor desc;
+  std::string_view working(typeName);
+
+  auto trimLeadingWhitespace = [&]() {
+    while (!working.empty() &&
+           std::isspace(static_cast<unsigned char>(working.front())))
+      working.remove_prefix(1);
+  };
+
+  trimLeadingWhitespace();
+
+  auto stripOwnershipQualifier = [&]() {
+    auto tryConsume = [&](std::string_view keyword) -> bool {
+      if (working.size() < keyword.size())
+        return false;
+      if (working.substr(0, keyword.size()) != keyword)
+        return false;
+      if (working.size() > keyword.size()) {
+        unsigned char next =
+            static_cast<unsigned char>(working[keyword.size()]);
+        if (!std::isspace(next))
+          return false;
+      }
+      working.remove_prefix(keyword.size());
+      trimLeadingWhitespace();
+      return true;
+    };
+
+    if (tryConsume("weak"))
+      return;
+    tryConsume("unowned");
+  };
+
+  stripOwnershipQualifier();
+
+  std::string normalized(working.begin(), working.end());
   std::string sanitized;
-  sanitized.reserve(typeName.size());
+  sanitized.reserve(normalized.size());
 
   bool pendingNullable = false;
   bool arraySeen = false;
 
-  for (size_t i = 0; i < typeName.size(); ++i) {
-    char c = typeName[i];
+  for (size_t i = 0; i < normalized.size(); ++i) {
+    char c = normalized[i];
 
     if (c == '?') {
       pendingNullable = true;
@@ -2268,8 +2303,9 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
     if (c == '@') {
       sanitized.push_back(c);
       ++i;
-      while (i < typeName.size() && std::isdigit(static_cast<unsigned char>(typeName[i]))) {
-        sanitized.push_back(typeName[i]);
+      while (i < normalized.size() &&
+             std::isdigit(static_cast<unsigned char>(normalized[i]))) {
+        sanitized.push_back(normalized[i]);
         ++i;
       }
       if (i > 0)
@@ -2282,17 +2318,17 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
     }
 
     if (c == '[') {
-      size_t close = typeName.find(']', i);
+      size_t close = normalized.find(']', i);
       if (close == std::string::npos)
         break;
 
       unsigned rank = 1;
       for (size_t j = i + 1; j < close; ++j) {
-        if (typeName[j] == ',')
+        if (normalized[j] == ',')
           ++rank;
       }
 
-      sanitized.append(typeName, i, close - i + 1);
+      sanitized.append(normalized, i, close - i + 1);
       desc.arrayRanks.push_back(rank);
       arraySeen = true;
       if (pendingNullable) {
@@ -3244,10 +3280,6 @@ static TypeInfo applyActiveTypeBindings(const TypeInfo &info) {
   if (const auto *bindings = currentTypeBindings())
     return substituteTypeInfo(info, *bindings);
   return info;
-}
-
-static std::string applyActiveTypeBindingsToName(const std::string &typeName) {
-  return typeNameFromInfo(applyActiveTypeBindings(makeTypeInfo(typeName)));
 }
 
 static std::vector<TypeInfo>
@@ -7439,6 +7471,44 @@ llvm::Value *RefExprAST::codegen() {
   }
 }
 
+llvm::Value *RetainExprAST::codegen() {
+  llvm::Value *value = Operand->codegen();
+  if (!value)
+    return nullptr;
+
+  if (!value->getType()->isPointerTy()) {
+    return LogErrorV("retain expressions require pointer-compatible operands");
+  }
+
+  auto *opaquePtrTy = pointerType();
+  llvm::Value *castValue =
+      Builder->CreateBitCast(value, opaquePtrTy, "arc.retain.cast");
+  llvm::Value *retained =
+      Builder->CreateCall(getHybridRetainFunction(), {castValue},
+                          "arc.retain.call");
+  llvm::Value *result =
+      Builder->CreateBitCast(retained, value->getType(), "arc.retain.result");
+  setTypeName(getOperand()->getTypeName());
+  return result;
+}
+
+llvm::Value *ReleaseExprAST::codegen() {
+  llvm::Value *value = Operand->codegen();
+  if (!value)
+    return nullptr;
+
+  if (!value->getType()->isPointerTy()) {
+    return LogErrorV("release expressions require pointer-compatible operands");
+  }
+
+  auto *opaquePtrTy = pointerType();
+  llvm::Value *castValue =
+      Builder->CreateBitCast(value, opaquePtrTy, "arc.release.cast");
+  Builder->CreateCall(getHybridReleaseFunction(), {castValue});
+  setTypeName(getOperand()->getTypeName());
+  return value;
+}
+
 static bool parseExplicitTypeArgumentSuffix(const std::string &text,
                                             std::string &baseName,
                                             std::vector<TypeInfo> &typeArguments) {
@@ -9975,9 +10045,9 @@ llvm::Type *StructAST::codegen() {
 
   FieldIndices.reserve(FieldIndices.size() + Fields.size());
   for (const auto &Field : Fields) {
-    const std::string &originalFieldTypeName = Field->getType();
-    std::string FieldTypeName =
-        applyActiveTypeBindingsToName(originalFieldTypeName);
+    TypeInfo fieldTypeInfo = Field->getTypeInfo();
+    fieldTypeInfo = applyActiveTypeBindings(fieldTypeInfo);
+    std::string FieldTypeName = typeNameFromInfo(fieldTypeInfo);
     ParsedTypeDescriptor FieldDesc = parseTypeString(FieldTypeName);
     if (FieldDesc.sanitized == typeKey && FieldDesc.pointerDepth == 0 &&
         !FieldDesc.isNullable && !FieldDesc.isArray) {
@@ -9989,8 +10059,6 @@ llvm::Type *StructAST::codegen() {
       return nullptr;
     }
 
-    TypeInfo fieldTypeInfo = makeTypeInfo(FieldTypeName);
-    fieldTypeInfo = applyActiveTypeBindings(fieldTypeInfo);
     if (!validateTypeForGenerics(fieldTypeInfo,
                                  "field '" + Field->getName() + "' of type '" + typeKey + "'",
                                  &currentTypeDefinition)) {

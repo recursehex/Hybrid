@@ -35,7 +35,6 @@ static bool ParseGenericParameterList(std::vector<std::string> &parameters);
 static bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
                                              bool allowDisambiguation = false);
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
-
 class GenericParameterScope {
 public:
   explicit GenericParameterScope(const std::vector<std::string> &params)
@@ -236,16 +235,52 @@ static bool parseGenericArgumentSegment(const std::string &segment,
 
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef) {
   TypeInfo info;
+  std::string_view working(typeName);
+
+  auto trimLeadingWhitespace = [&]() {
+    while (!working.empty() &&
+           std::isspace(static_cast<unsigned char>(working.front())))
+      working.remove_prefix(1);
+  };
+
+  trimLeadingWhitespace();
+
+  OwnershipQualifier parsedOwnership = OwnershipQualifier::Strong;
+  bool hasOwnershipQualifier = false;
+
+  auto tryConsumeQualifier = [&](std::string_view keyword,
+                                 OwnershipQualifier qualifier) -> bool {
+    if (working.size() < keyword.size())
+      return false;
+    if (working.substr(0, keyword.size()) != keyword)
+      return false;
+    if (working.size() > keyword.size()) {
+      unsigned char next =
+          static_cast<unsigned char>(working[keyword.size()]);
+      if (!std::isspace(next))
+        return false;
+    }
+    working.remove_prefix(keyword.size());
+    trimLeadingWhitespace();
+    parsedOwnership = qualifier;
+    hasOwnershipQualifier = true;
+    return true;
+  };
+
+  tryConsumeQualifier("weak", OwnershipQualifier::Weak) ||
+      tryConsumeQualifier("unowned", OwnershipQualifier::Unowned);
+
+  std::string normalized(working.begin(), working.end());
   std::string sanitized;
-  sanitized.reserve(typeName.size());
+  sanitized.reserve(normalized.size());
 
   bool pendingNullable = false;
   bool arraySeen = false;
   bool explicitNullable = false;
   std::vector<unsigned> arrayRanks;
 
-  for (size_t i = 0; i < typeName.size(); ++i) {
-    char c = typeName[i];
+  for (size_t i = 0; i < normalized.size(); ++i) {
+    char c = normalized[i];
 
     if (c == '?') {
       pendingNullable = true;
@@ -255,8 +290,9 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
     if (c == '@') {
       sanitized.push_back(c);
       ++i;
-      while (i < typeName.size() && std::isdigit(static_cast<unsigned char>(typeName[i]))) {
-        sanitized.push_back(typeName[i]);
+      while (i < normalized.size() &&
+             std::isdigit(static_cast<unsigned char>(normalized[i]))) {
+        sanitized.push_back(normalized[i]);
         ++i;
       }
       --i; // compensate for extra increment in while loop
@@ -268,17 +304,17 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
     }
 
     if (c == '[') {
-      size_t close = typeName.find(']', i);
+      size_t close = normalized.find(']', i);
       if (close == std::string::npos)
         break;
 
       unsigned rank = 1;
       for (size_t j = i + 1; j < close; ++j) {
-        if (typeName[j] == ',')
+        if (normalized[j] == ',')
           ++rank;
       }
 
-      sanitized.append(typeName, i, close - i + 1);
+      sanitized.append(normalized, i, close - i + 1);
       arrayRanks.push_back(rank);
       arraySeen = true;
       if (pendingNullable) {
@@ -339,6 +375,9 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
   info.isMutable = true;
   info.declaredRef = declaredRef;
   finalizeTypeInfoMetadata(info);
+  info.hasExplicitOwnership = hasOwnershipQualifier;
+  if (hasOwnershipQualifier)
+    info.ownership = parsedOwnership;
   return info;
 }
 
@@ -442,13 +481,19 @@ static bool IsActiveClassName(const std::string &name) {
 /// Helper function to check if current token is a valid type (built-in or struct)
 bool IsValidType()
 {
-  return IsBuiltInType() ||
-         (CurTok == tok_identifier &&
-          (StructNames.contains(IdentifierStr) ||
-           ClassNames.contains(IdentifierStr) ||
-           IsActiveStructName(IdentifierStr) ||
-           IsActiveClassName(IdentifierStr) ||
-           currentParser().isGenericParameter(IdentifierStr)));
+  if (IsBuiltInType())
+    return true;
+
+  if (CurTok == tok_unique || CurTok == tok_shared ||
+      CurTok == tok_weak || CurTok == tok_unowned)
+    return true;
+
+  return CurTok == tok_identifier &&
+         (StructNames.contains(IdentifierStr) ||
+          ClassNames.contains(IdentifierStr) ||
+          IsActiveStructName(IdentifierStr) ||
+          IsActiveClassName(IdentifierStr) ||
+          currentParser().isGenericParameter(IdentifierStr));
 }
 
 enum class AccessSpecifier {
@@ -787,8 +832,44 @@ static bool ParseGenericParameterList(std::vector<std::string> &parameters) {
 
 /// Helper function to parse a complete type including array and pointer modifiers
 /// Returns the full type string (e.g. "int@", "int@2", "int[]", "float@[]")
+static bool weakTokenStartsSmartPointer() {
+  if (CurTok != tok_weak)
+    return false;
+
+  TokenReplayScope replay(true);
+  getNextToken();
+  while (CurTok == tok_newline)
+    getNextToken();
+  bool startsSmartPointer = (CurTok == tok_lt);
+  replay.rollback();
+  return startsSmartPointer;
+}
+
 std::string ParseCompleteType()
 {
+  OwnershipQualifier ownership = OwnershipQualifier::Strong;
+  bool hasOwnershipQualifier = false;
+
+  auto consumeOwnershipQualifier = [&]() {
+    if (CurTok == tok_unowned) {
+      ownership = OwnershipQualifier::Unowned;
+      hasOwnershipQualifier = true;
+      getNextToken();
+      SkipNewlines();
+      return true;
+    }
+    if (CurTok == tok_weak && !weakTokenStartsSmartPointer()) {
+      ownership = OwnershipQualifier::Weak;
+      hasOwnershipQualifier = true;
+      getNextToken();
+      SkipNewlines();
+      return true;
+    }
+    return false;
+  };
+
+  consumeOwnershipQualifier();
+
   if (!IsValidType())
     return "";
 
@@ -804,6 +885,12 @@ std::string ParseCompleteType()
 
   if (!AppendTypeSuffix(Type, pointerSeen))
     return "";
+
+  if (hasOwnershipQualifier) {
+    const char *prefix =
+        (ownership == OwnershipQualifier::Weak) ? "weak " : "unowned ";
+    Type.insert(0, prefix);
+  }
 
   return Type;
 }
@@ -1467,6 +1554,10 @@ std::unique_ptr<ExprAST> ParsePrimary() {
       getNextToken(); // consume the string literal
       return std::move(Result);
     }
+  case tok_new:
+    getNextToken(); // consume 'new'
+    return LogError("The 'new' keyword is reserved for upcoming ARC support",
+                    "Automatic allocation will be enabled once ARC lowering is implemented.");
   case tok_interpolated_string_start:
     return ParseInterpolatedStringExpr();
   case tok_char_literal:
@@ -2800,6 +2891,31 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseSwitchStatement();
   case tok_unsafe:
     return ParseUnsafeBlock();
+  case tok_autoreleasepool: {
+    getNextToken(); // eat '@autoreleasepool'
+    while (CurTok == tok_newline)
+      getNextToken();
+    if (CurTok == '{') {
+      auto Body = ParseBlock();
+      if (!Body)
+        return nullptr;
+    }
+    return LogErrorS("'@autoreleasepool' is reserved for upcoming ARC support",
+                     "Autorelease pools will lower to runtime helpers in a later ARC phase.");
+  }
+  case tok_free: {
+    getNextToken(); // eat 'free'
+    while (CurTok == tok_newline)
+      getNextToken();
+    if (CurTok != tok_newline && CurTok != ';' && CurTok != '}' &&
+        CurTok != tok_eof) {
+      auto Expr = ParseExpression();
+      if (!Expr)
+        return nullptr;
+    }
+    return LogErrorS("The 'free' keyword is reserved for upcoming ARC support",
+                     "Manual release statements will be added alongside ARC runtime hooks.");
+  }
   case tok_ref:
     // Handle ref variable declarations
     getNextToken(); // eat 'ref'
@@ -3562,7 +3678,10 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
                             "Assign non-static members inside constructors instead");
         return nullptr;
       }
-      auto Field = std::make_unique<FieldAST>(Type, MemberName, modifiers, std::move(MemberInitializer));
+      TypeInfo fieldInfo = buildDeclaredTypeInfo(Type, false);
+      auto Field = std::make_unique<FieldAST>(Type, std::move(fieldInfo),
+                                              MemberName, modifiers,
+                                              std::move(MemberInitializer));
       Fields.push_back(std::move(Field));
     }
   }
@@ -3599,6 +3718,19 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   Result->setBaseClassInfo(std::move(baseClassInfo));
   Result->setInterfaceTypeInfos(std::move(interfaceTypeInfos));
   Result->setAbstract(isAbstractComposite);
+  ClassInheritanceMetadata inheritance;
+  inheritance.baseClassName = Result->getBaseClass();
+  inheritance.interfaceNames = Result->getInterfaces();
+  if (kind == AggregateKind::Struct) {
+    inheritance.defaultMemberAccess = MemberAccess::PublicReadWrite();
+  } else {
+    inheritance.defaultMemberAccess = MemberAccess::ReadPublicWritePrivate();
+  }
+  for (const auto &method : Result->getMethods()) {
+    if (method.getKind() == MethodKind::Constructor)
+      inheritance.constructorAccesses.push_back(method.getModifiers().access);
+  }
+  Result->setInheritanceMetadata(std::move(inheritance));
   return Result;
 }
 // Evaluate constant expressions at compile time
