@@ -85,6 +85,14 @@ struct CompositeTypeInfo {
   std::map<std::string, std::vector<std::string>> genericMethodInstantiations;
 };
 
+struct GenericsMetrics {
+  uint64_t typeCacheHits = 0;
+  uint64_t typeCacheMisses = 0;
+  uint64_t functionCacheHits = 0;
+  uint64_t functionCacheMisses = 0;
+  bool enabled = false;
+};
+
 struct ActiveCompositeContext {
   std::string name;
   MethodKind kind = MethodKind::Regular;
@@ -113,6 +121,7 @@ struct CodegenContext {
 
   std::map<std::string, std::vector<FunctionOverload>> functionOverloads;
   std::set<std::string> instantiatedGenericFunctions;
+  GenericsMetrics genericsMetrics;
 
   std::vector<llvm::BasicBlock *> loopExitBlocks;
   std::vector<llvm::BasicBlock *> loopContinueBlocks;
@@ -148,6 +157,9 @@ inline void CodegenContext::reset() {
   genericParameterStack.clear();
   activeGenericParameters.clear();
   genericTypeBindingsStack.clear();
+  const bool metricsEnabled = genericsMetrics.enabled;
+  genericsMetrics = {};
+  genericsMetrics.enabled = metricsEnabled;
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

@@ -104,6 +104,30 @@ static bool convertUTF8LiteralToUTF16(const std::string &input,
 #define LoopContinueBlocks (CG.loopContinueBlocks)
 #define NonNullFacts (CG.nonNullFactsStack)
 
+static void noteTypeCacheHit() {
+  auto &metrics = CG.genericsMetrics;
+  if (metrics.enabled)
+    ++metrics.typeCacheHits;
+}
+
+static void noteTypeCacheMiss() {
+  auto &metrics = CG.genericsMetrics;
+  if (metrics.enabled)
+    ++metrics.typeCacheMisses;
+}
+
+static void noteFunctionCacheHit() {
+  auto &metrics = CG.genericsMetrics;
+  if (metrics.enabled)
+    ++metrics.functionCacheHits;
+}
+
+static void noteFunctionCacheMiss() {
+  auto &metrics = CG.genericsMetrics;
+  if (metrics.enabled)
+    ++metrics.functionCacheMisses;
+}
+
 static llvm::PointerType *pointerType(unsigned addressSpace = 0) {
   return llvm::PointerType::get(*TheContext, addressSpace);
 }
@@ -442,7 +466,8 @@ static void populateTypeInfoGenerics(TypeInfo &info);
 
 static void ensureBaseNonNullScope();
 
-static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name);
+static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name,
+                                                    bool countHit = true);
 static void collectInterfaceAncestors(const std::string &interfaceName,
                                       std::set<std::string> &out);
 llvm::Value *castToType(llvm::Value *value, llvm::Type *targetType,
@@ -1832,6 +1857,7 @@ llvm::Function *InstantiateGenericFunction(
             findRegisteredOverload(proto->getName(), boundReturn,
                                    proto->returnsByRef(), boundParams,
                                    boundParamIsRef)) {
+      noteFunctionCacheHit();
       if (!existing->function)
         existing->function =
             TheModule->getFunction(existing->mangledName);
@@ -1843,6 +1869,7 @@ llvm::Function *InstantiateGenericFunction(
       continue;
     }
 
+    noteFunctionCacheMiss();
     FunctionInstantiationScope instantiationScope;
     llvm::Function *instantiated = fn->codegen();
     if (!instantiated)
@@ -1939,8 +1966,6 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
 }
 
 enum class AccessIntent : uint8_t { Read, Write, Call };
-
-static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name);
 
 static std::string describeAggregateKind(AggregateKind kind) {
   switch (kind) {
@@ -2691,8 +2716,10 @@ materializeCompositeInstantiation(const TypeInfo &requestedType) {
       stripNullableAnnotations(typeNameFromInfo(requestedType));
   std::cerr << "[instantiate] " << constructedName << "\n";
   auto existing = CG.compositeMetadata.find(constructedName);
-  if (existing != CG.compositeMetadata.end())
+  if (existing != CG.compositeMetadata.end()) {
+    noteTypeCacheHit();
     return &existing->second;
+  }
 
   StructAST *templateAst = FindGenericTemplate(requestedType.baseTypeName);
   if (!templateAst)
@@ -2701,6 +2728,8 @@ materializeCompositeInstantiation(const TypeInfo &requestedType) {
   if (templateAst->getGenericParameters().size() !=
       requestedType.typeArguments.size())
     return nullptr;
+
+  noteTypeCacheMiss();
 
   std::map<std::string, TypeInfo> substitutions;
 
@@ -2718,13 +2747,17 @@ materializeCompositeInstantiation(const TypeInfo &requestedType) {
   if (!templateAst->codegen())
     return nullptr;
 
-  return lookupCompositeInfo(constructedName);
+  return lookupCompositeInfo(constructedName, /*countHit=*/false);
 }
 
-static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name) {
+static const CompositeTypeInfo *
+lookupCompositeInfo(const std::string &name, bool countHit) {
   auto it = CG.compositeMetadata.find(name);
-  if (it != CG.compositeMetadata.end())
+  if (it != CG.compositeMetadata.end()) {
+    if (countHit)
+      noteTypeCacheHit();
     return &it->second;
+  }
 
   if (name.find('<') == std::string::npos)
     return nullptr;

@@ -3,6 +3,8 @@
 #include "ast.h"
 #include "compiler_session.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -94,12 +96,45 @@ void printUsage() {
   fprintf(stderr, "  -o -               Write LLVM IR to stdout\n");
 }
 
+bool shouldEnableGenericsMetrics() {
+  const char *env = std::getenv("HYBRID_GENERICS_METRICS");
+  if (!env)
+    return false;
+  while (std::isspace(static_cast<unsigned char>(*env)))
+    ++env;
+  if (*env == '\0')
+    return true;
+
+  std::string lowered;
+  lowered.reserve(std::strlen(env));
+  for (const char *ptr = env; *ptr; ++ptr)
+    lowered.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(*ptr))));
+
+  if (lowered == "0" || lowered == "false" || lowered == "off")
+    return false;
+  return true;
+}
+
+void emitGenericsMetricsSummary(const CodegenContext &context) {
+  const auto &metrics = context.genericsMetrics;
+  if (!metrics.enabled)
+    return;
+  fprintf(stderr,
+          "[generics-metrics] functions hits:%llu misses:%llu | types hits:%llu misses:%llu\n",
+          static_cast<unsigned long long>(metrics.functionCacheHits),
+          static_cast<unsigned long long>(metrics.functionCacheMisses),
+          static_cast<unsigned long long>(metrics.typeCacheHits),
+          static_cast<unsigned long long>(metrics.typeCacheMisses));
+}
+
 }
 
 int main(int argc, char **argv) {
   CompilerSession session;
   session.resetAll();
   pushCompilerSession(session);
+  session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
   bool emitLLVM = false;
   std::string outputPath;
@@ -246,6 +281,7 @@ int main(int argc, char **argv) {
     }
   }
 
+  emitGenericsMetricsSummary(session.codegen());
   popCompilerSession();
 
   return exitCode;
