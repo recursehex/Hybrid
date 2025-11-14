@@ -7,6 +7,8 @@ set(HYBRID_SOURCES
     toplevel.cpp
     compiler_session.cpp
     runtime_support.cpp
+    memory/ref_count.cpp
+    runtime/arc.cpp
 )
 
 # Define header files

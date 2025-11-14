@@ -21,6 +21,28 @@ enum class RefStorageClass {
   RefAlias
 };
 
+struct ClassDescriptor;
+
+enum class OwnershipQualifier : uint8_t {
+  Strong,
+  Weak,
+  Unowned
+};
+
+enum class SmartPointerKind : uint8_t {
+  None,
+  Unique,
+  Shared,
+  Weak
+};
+
+struct GenericBindingKey {
+  std::string typeName;
+  std::vector<std::string> typeArguments;
+
+  bool empty() const { return typeName.empty() && typeArguments.empty(); }
+};
+
 struct TypeInfo {
   std::string typeName;           // canonical language-visible type
   std::string baseTypeName;       // base identifier without generic arguments or suffixes
@@ -36,12 +58,25 @@ struct TypeInfo {
   bool isMutable = true;
   bool declaredRef = false;       // whether declared via `ref`
   bool isGenericParameter = false; // true when the type refers to a generic parameter
+  OwnershipQualifier ownership = OwnershipQualifier::Strong;
+  SmartPointerKind smartPointerKind = SmartPointerKind::None;
+  bool arcManaged = false;
+  const ClassDescriptor *classDescriptor = nullptr;
+  GenericBindingKey genericKey;
 
   bool isReference() const { return refStorage != RefStorageClass::None; }
   bool ownsStorage() const { return refStorage == RefStorageClass::RefValue; }
   bool isAlias() const { return refStorage == RefStorageClass::RefAlias; }
   bool hasTypeArguments() const { return !typeArguments.empty(); }
+  bool isSmartPointer() const { return smartPointerKind != SmartPointerKind::None; }
+  bool participatesInARC() const { return arcManaged; }
+  bool requiresARC() const {
+    return participatesInARC() && ownership == OwnershipQualifier::Strong;
+  }
+  const GenericBindingKey &bindingKey() const { return genericKey; }
 };
+
+void finalizeTypeInfoMetadata(TypeInfo &info);
 
 enum class AggregateKind : uint8_t {
   Struct,

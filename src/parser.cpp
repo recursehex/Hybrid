@@ -338,6 +338,7 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
   info.refStorage = declaredRef ? RefStorageClass::RefValue : RefStorageClass::None;
   info.isMutable = true;
   info.declaredRef = declaredRef;
+  finalizeTypeInfoMetadata(info);
   return info;
 }
 

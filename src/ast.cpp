@@ -239,6 +239,81 @@ static bool maybeReportNestedDepthIssues(const TypeInfo &info,
   return true;
 }
 
+static bool isBuiltinValueTypeName(std::string_view baseName) {
+  static constexpr std::string_view primitives[] = {
+      "void",  "bool", "byte",  "sbyte", "short", "ushort",
+      "int",   "uint", "long",  "ulong", "float", "double",
+      "char",  "char16", "char32", "string"};
+  for (std::string_view candidate : primitives) {
+    if (candidate == baseName)
+      return true;
+  }
+  return false;
+}
+
+static SmartPointerKind detectSmartPointerKind(const std::string &baseName) {
+  if (baseName == "unique")
+    return SmartPointerKind::Unique;
+  if (baseName == "shared")
+    return SmartPointerKind::Shared;
+  if (baseName == "weak")
+    return SmartPointerKind::Weak;
+  return SmartPointerKind::None;
+}
+
+static void applySmartPointerSemantics(TypeInfo &info) {
+  const SmartPointerKind kind = detectSmartPointerKind(info.baseTypeName);
+  info.smartPointerKind = kind;
+  if (kind == SmartPointerKind::Weak) {
+    info.ownership = OwnershipQualifier::Weak;
+  } else {
+    info.ownership = OwnershipQualifier::Strong;
+  }
+  if (kind != SmartPointerKind::None)
+    info.arcManaged = true;
+}
+
+static void rebuildGenericBindingKey(TypeInfo &info) {
+  info.genericKey.typeName = stripNullableAnnotations(info.baseTypeName);
+  info.genericKey.typeArguments.clear();
+  info.genericKey.typeArguments.reserve(info.typeArguments.size());
+  for (const auto &arg : info.typeArguments) {
+    info.genericKey.typeArguments.push_back(
+        stripNullableAnnotations(typeNameFromInfo(arg)));
+  }
+}
+
+static void assignARCEligibility(TypeInfo &info) {
+  if (info.isSmartPointer()) {
+    info.arcManaged = true;
+    return;
+  }
+
+  info.arcManaged = false;
+  if (info.pointerDepth > 0 || info.isArray)
+    return;
+
+  if (info.baseTypeName.empty())
+    return;
+
+  if (isBuiltinValueTypeName(info.baseTypeName))
+    return;
+
+  if (!hasCompilerSession())
+    return;
+
+  auto &metadata = currentCodegen().compositeMetadata;
+  auto it = metadata.find(info.baseTypeName);
+  if (it != metadata.end() && it->second.kind == AggregateKind::Class)
+    info.arcManaged = true;
+}
+
+void finalizeTypeInfoMetadata(TypeInfo &info) {
+  applySmartPointerSemantics(info);
+  rebuildGenericBindingKey(info);
+  assignARCEligibility(info);
+}
+
 class GenericTypeBindingScope {
 public:
   explicit GenericTypeBindingScope(const std::map<std::string, TypeInfo> &bindings,
@@ -1574,6 +1649,64 @@ static llvm::Function *getInterfaceLookupFunction() {
   return fn;
 }
 
+static llvm::Type *getSizeType() {
+  if (sizeof(void *) == 4)
+    return llvm::Type::getInt32Ty(*TheContext);
+  return llvm::Type::getInt64Ty(*TheContext);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridRetainFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(voidPtrTy, {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_retain", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridReleaseFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), {voidPtrTy},
+                              false);
+  return TheModule->getOrInsertFunction("hybrid_release", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridAutoreleaseFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(voidPtrTy, {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_autorelease", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridDeallocFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), {voidPtrTy},
+                              false);
+  return TheModule->getOrInsertFunction("hybrid_dealloc", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridAllocObjectFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *sizeTy = getSizeType();
+  auto *typeDescPtrTy = pointerType(getTypeDescriptorType());
+  auto *fnType =
+      llvm::FunctionType::get(voidPtrTy, {sizeTy, typeDescPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_alloc_object", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridAllocArrayFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *sizeTy = getSizeType();
+  auto *typeDescPtrTy = pointerType(getTypeDescriptorType());
+  auto *fnType = llvm::FunctionType::get(
+      voidPtrTy, {sizeTy, sizeTy, typeDescPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_alloc_array", fnType);
+}
+
+static bool genericBindingEquals(const GenericBindingKey &lhs,
+                                 const GenericBindingKey &rhs) {
+  return lhs.typeName == rhs.typeName &&
+         lhs.typeArguments == rhs.typeArguments;
+}
+
 static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
   if (lhs.typeName != rhs.typeName)
     return false;
@@ -1600,6 +1733,16 @@ static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs) {
   if (lhs.declaredRef != rhs.declaredRef)
     return false;
   if (lhs.isGenericParameter != rhs.isGenericParameter)
+    return false;
+  if (lhs.ownership != rhs.ownership)
+    return false;
+  if (lhs.smartPointerKind != rhs.smartPointerKind)
+    return false;
+  if (lhs.arcManaged != rhs.arcManaged)
+    return false;
+  if (lhs.classDescriptor != rhs.classDescriptor)
+    return false;
+  if (!genericBindingEquals(lhs.genericKey, rhs.genericKey))
     return false;
   if (lhs.typeArguments.size() != rhs.typeArguments.size())
     return false;
@@ -2749,6 +2892,7 @@ static TypeInfo makeTypeInfo(std::string typeName,
   info.isMutable = isMutable;
   info.declaredRef = declaredRef;
   populateTypeInfoGenerics(info);
+  finalizeTypeInfoMetadata(info);
   return info;
 }
 
@@ -2815,6 +2959,11 @@ static TypeInfo applyTypeWrappers(const TypeInfo &replacement,
   result.refStorage = pattern.refStorage;
   result.isMutable = pattern.isMutable;
   result.declaredRef = pattern.declaredRef;
+  result.ownership = replacement.ownership;
+  result.smartPointerKind = replacement.smartPointerKind;
+  result.arcManaged = replacement.arcManaged;
+  result.classDescriptor = replacement.classDescriptor;
+  result.genericKey = replacement.genericKey;
   return result;
 }
 
@@ -2869,6 +3018,11 @@ substituteTypeInfo(const TypeInfo &info,
   result.refStorage = info.refStorage;
   result.isMutable = info.isMutable;
   result.declaredRef = info.declaredRef;
+  result.ownership = info.ownership;
+  result.smartPointerKind = info.smartPointerKind;
+  result.arcManaged = info.arcManaged;
+  result.classDescriptor = info.classDescriptor;
+  rebuildGenericBindingKey(result);
   return result;
 }
 
