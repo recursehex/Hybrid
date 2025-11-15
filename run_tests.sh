@@ -206,7 +206,7 @@ run_test() {
     # Run the test and capture both output and exit code
     local output
     local exit_code
-    output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" < "$test_file" 2>&1)
+    output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" --emit-llvm -o - "$test_file" 2>&1)
     exit_code=$?
     
     # Check for error patterns in output
@@ -240,34 +240,36 @@ run_test() {
         # Check if clang is available and we have runtime library
         if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
             # Extract the final complete LLVM module (after "=== Final Generated LLVM IR ===")
-            local module_start=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
+            local module_marker=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
+            local module_start=""
+            if [ -n "$module_marker" ]; then
+                module_start=$((module_marker + 1))
+            else
+                module_start=$(echo "$output" | grep -n "^; ModuleID" | head -1 | cut -d: -f1)
+            fi
+
             if [ -n "$module_start" ]; then
-                # Start from the line after "=== Final Generated..."
-                module_start=$((module_start + 1))
                 local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated")
 
-                # Create temporary files
                 local temp_ir=$(mktemp /tmp/hybrid_test.XXXXXX)
                 mv "$temp_ir" "${temp_ir}.ll"
                 temp_ir="${temp_ir}.ll"
                 local temp_bin=$(mktemp /tmp/hybrid_bin.XXXXXX)
                 echo "$clean_ir" > "$temp_ir"
 
-                # Compile IR to binary with clang, linking with runtime library
                 if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
-                    # Execute the binary and capture exit code properly
-                    set +e  # Temporarily disable exit on error
+                    set +e
                     runtime_output=$("$temp_bin" 2>&1)
                     runtime_exit_code=$?
-                    set -e  # Re-enable exit on error
+                    set -e
 
-                    # Treat any non-zero exit as a failure. 134 (SIGABRT) is a common assert signal.
                     if [ $runtime_exit_code -ne 0 ]; then
                         has_errors=1
                     fi
+                else
+                    has_errors=1
                 fi
 
-                # Clean up temporary files
                 rm -f "$temp_ir" "$temp_bin"
             fi
         fi
@@ -278,9 +280,15 @@ run_test() {
     if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
         if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
             if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
-                local module_start=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
+                local module_marker=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
+                local module_start=""
+                if [ -n "$module_marker" ]; then
+                    module_start=$((module_marker + 1))
+                else
+                    module_start=$(echo "$output" | grep -n "^; ModuleID" | head -1 | cut -d: -f1)
+                fi
+
                 if [ -n "$module_start" ]; then
-                    module_start=$((module_start + 1))
                     local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated")
 
                     local temp_ir=$(mktemp /tmp/hybrid_test_fail.XXXXXX)
@@ -298,6 +306,8 @@ run_test() {
                         if [ $runtime_exit_code -ne 0 ]; then
                             has_errors=1
                         fi
+                    else
+                        has_errors=1
                     fi
 
                     rm -f "$temp_ir" "$temp_bin"

@@ -13,5 +13,6 @@ void HandleSwitchStatement();
 void HandleAssertStatement();
 void MainLoop();
 void SetInteractiveMode(bool enabled);
+bool IsInteractiveMode();
 
 #endif // TOPLEVEL_H

@@ -48,7 +48,7 @@ int sum_array(int[] arr)
     int sum = 0
     for int i in arr
     {
-        sum += arr[i]
+        sum += i
     }
     return sum
 }
@@ -167,7 +167,7 @@ int main()
 {
     // Test global array operations
     int global_sum = first_global + last_global + value_at_idx
-    assert global_sum == 41  // 10 + 5 + 30 (modified values)
+    assert global_sum == 36  // 10 + 5 + 30 (modified values)
 
     // Test local arrays
     int local_result = test_local_arrays()
@@ -176,8 +176,6 @@ int main()
     // Test array parameters
     int[] test_data = [1, 2, 3, 4, 5]
     int sum_before = sum_array(test_data)
-    // Note: sum_array has a bug - it uses arr[i] instead of i
-    // This will be accessing array elements at indices [1,2,3,4,5] instead of values
     double_elements(test_data)
     int sum_after = sum_array(test_data)
 

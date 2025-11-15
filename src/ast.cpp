@@ -704,6 +704,7 @@ static llvm::Function *TopLevelExecFunction = nullptr;
 static llvm::Function *ScriptMainFunction = nullptr;
 static bool ScriptMainIsSynthetic = false;
 static llvm::BasicBlock *TopLevelInsertBlock = nullptr;
+static llvm::BasicBlock *GlobalInitializerInsertBlock = nullptr;
 
 static llvm::Function *ensureTopLevelExecFunction() {
   if (!TopLevelExecFunction) {
@@ -799,6 +800,65 @@ static void prepareTopLevelStatementContext() {
   ensureBaseNonNullScope();
 }
 
+void NoteTopLevelStatementEmitted() {
+  if (!Builder)
+    return;
+
+  llvm::Function *TopFunc = TopLevelExecFunction;
+  if (!TopFunc)
+    TopFunc = ensureTopLevelExecFunction();
+  if (!TopFunc)
+    return;
+
+  llvm::BasicBlock *InsertBlock = Builder->GetInsertBlock();
+  if (!InsertBlock)
+    return;
+
+  if (InsertBlock->getParent() == TopFunc)
+    TopLevelInsertBlock = InsertBlock;
+}
+
+class GlobalInitializerScope {
+public:
+  GlobalInitializerScope() {
+    Guard.emplace(*Builder);
+    Func = TheModule->getFunction("__anon_var_decl");
+    if (!Func) {
+      auto *FT = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+      Func = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
+                                    "__anon_var_decl", TheModule.get());
+      GlobalInitializerInsertBlock = nullptr;
+    }
+
+    if (!GlobalInitializerInsertBlock ||
+        GlobalInitializerInsertBlock->getParent() != Func) {
+      if (Func->empty())
+        GlobalInitializerInsertBlock =
+            llvm::BasicBlock::Create(*TheContext, "entry", Func);
+      else
+        GlobalInitializerInsertBlock = &Func->back();
+    }
+
+    Builder->SetInsertPoint(GlobalInitializerInsertBlock,
+                            GlobalInitializerInsertBlock->end());
+  }
+
+  ~GlobalInitializerScope() {
+    if (!Builder || !Func)
+      return;
+    if (llvm::BasicBlock *InsertBlock = Builder->GetInsertBlock()) {
+      if (InsertBlock->getParent() == Func)
+        GlobalInitializerInsertBlock = InsertBlock;
+    }
+  }
+
+  llvm::Function *function() const { return Func; }
+
+private:
+  std::optional<llvm::IRBuilderBase::InsertPointGuard> Guard;
+  llvm::Function *Func = nullptr;
+};
+
 void FinalizeTopLevelExecution() {
   if (!TopLevelExecFunction || !TheContext)
     return;
@@ -812,6 +872,30 @@ void FinalizeTopLevelExecution() {
     InsertBlock = TopLevelInsertBlock;
   } else if (!TopLevelExecFunction->empty()) {
     InsertBlock = &TopLevelExecFunction->back();
+  }
+
+  if (!InsertBlock || InsertBlock->getTerminator())
+    return;
+
+  llvm::IRBuilder<> TmpBuilder(*TheContext);
+  TmpBuilder.SetInsertPoint(InsertBlock);
+  TmpBuilder.CreateRetVoid();
+}
+
+void FinalizeGlobalInitializers() {
+  llvm::Function *InitFunc = TheModule->getFunction("__anon_var_decl");
+  if (!InitFunc || InitFunc->empty())
+    return;
+
+  llvm::BasicBlock *InsertBlock = nullptr;
+  if (Builder && Builder->GetInsertBlock() &&
+      Builder->GetInsertBlock()->getParent() == InitFunc) {
+    InsertBlock = Builder->GetInsertBlock();
+  } else if (GlobalInitializerInsertBlock &&
+             GlobalInitializerInsertBlock->getParent() == InitFunc) {
+    InsertBlock = GlobalInitializerInsertBlock;
+  } else {
+    InsertBlock = &InitFunc->back();
   }
 
   if (!InsertBlock || InsertBlock->getTerminator())
@@ -8348,29 +8432,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     return dims;
   };
 
-  std::optional<llvm::IRBuilderBase::InsertPointGuard> GlobalIPGuard;
+  std::optional<GlobalInitializerScope> GlobalInitScope;
   auto enterGlobalInitializer = [&]() -> llvm::Function * {
-    GlobalIPGuard.emplace(*Builder);
-    llvm::Function *InitFunc = TheModule->getFunction("__anon_var_decl");
-    if (!InitFunc) {
-      llvm::FunctionType *FT = llvm::FunctionType::get(
-          llvm::Type::getVoidTy(*TheContext), false);
-      InitFunc = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
-                                        "__anon_var_decl", TheModule.get());
-    }
-
-    if (InitFunc->empty()) {
-      llvm::BasicBlock *BB =
-          llvm::BasicBlock::Create(*TheContext, "entry", InitFunc);
-      Builder->SetInsertPoint(BB);
-    } else {
-      llvm::BasicBlock &EntryBB = InitFunc->getEntryBlock();
-      if (llvm::Instruction *Term = EntryBB.getTerminator())
-        Builder->SetInsertPoint(Term);
-      else
-        Builder->SetInsertPoint(&EntryBB, EntryBB.end());
-    }
-    return InitFunc;
+    GlobalInitScope.emplace();
+    return GlobalInitScope->function();
   };
 
   // Check if at global scope
@@ -9503,6 +9568,39 @@ llvm::Value *AssertStmtAST::codegen() {
   // Generate failure block - call abort() to terminate program
   Builder->SetInsertPoint(FailBB);
 
+  auto emitAssertMessage = [&]() {
+    llvm::Type *Int32Ty = llvm::Type::getInt32Ty(*TheContext);
+    llvm::Type *Int8PtrTy = llvm::PointerType::get(*TheContext, 0);
+    llvm::FunctionType *PrintfTy =
+        llvm::FunctionType::get(Int32Ty, {Int8PtrTy}, true);
+    llvm::FunctionCallee PrintfFunc =
+        TheModule->getOrInsertFunction("printf", PrintfTy);
+
+    std::string message = "[assert] failed";
+    if (getLine() > 0) {
+      message += " at line %u";
+      if (getColumn() > 0)
+        message += ", column %u";
+      else
+        message += ", column ?";
+    }
+    message.push_back('\n');
+
+    llvm::Value *fmt =
+        Builder->CreateGlobalString(message, "__hybrid_assert_fmt");
+    std::vector<llvm::Value *> args;
+    args.push_back(fmt);
+    if (getLine() > 0) {
+      args.push_back(
+          llvm::ConstantInt::get(Int32Ty, static_cast<uint32_t>(getLine())));
+      if (getColumn() > 0)
+        args.push_back(llvm::ConstantInt::get(
+            Int32Ty, static_cast<uint32_t>(getColumn())));
+    }
+
+    Builder->CreateCall(PrintfFunc, args);
+  };
+
   // Declare abort() function if not already declared
   llvm::Function *AbortFunc = TheModule->getFunction("abort");
   if (!AbortFunc) {
@@ -9510,6 +9608,7 @@ llvm::Value *AssertStmtAST::codegen() {
     AbortFunc = llvm::Function::Create(AbortType, llvm::Function::ExternalLinkage, "abort", TheModule.get());
   }
 
+  emitAssertMessage();
   // Call abort() and create unreachable instruction
   Builder->CreateCall(AbortFunc);
   Builder->CreateUnreachable();

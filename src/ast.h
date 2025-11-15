@@ -9,6 +9,7 @@
 #include <map>
 #include <optional>
 #include <utility>
+#include <cstddef>
 #include "concepts.h"
 #include "numeric_literal.h"
 
@@ -220,6 +221,11 @@ namespace llvm {
 #include "llvm/IR/Value.h"
 
 void FinalizeTopLevelExecution();
+void FinalizeGlobalInitializers();
+
+// Records that a top-level statement emitted code so subsequent statements
+// resume insertion at the correct basic block inside __hybrid_top_level.
+void NoteTopLevelStatementEmitted();
 
 /// ExprAST - Base class for all expression nodes.
 class ExprAST {
@@ -449,13 +455,19 @@ public:
 /// AssertStmtAST - Statement class for assert statements.
 class AssertStmtAST : public StmtAST {
   std::unique_ptr<ExprAST> Condition;
+  std::size_t Line = 0;
+  std::size_t Column = 0;
 
 public:
-  AssertStmtAST(std::unique_ptr<ExprAST> Condition)
-      : Condition(std::move(Condition)) {}
+  AssertStmtAST(std::unique_ptr<ExprAST> Condition,
+                std::size_t Line = 0,
+                std::size_t Column = 0)
+      : Condition(std::move(Condition)), Line(Line), Column(Column) {}
 
   llvm::Value *codegen() override;
   ExprAST *getCondition() const { return Condition.get(); }
+  std::size_t getLine() const { return Line; }
+  std::size_t getColumn() const { return Column; }
 };
 
 /// UnsafeBlockStmtAST - Statement class for unsafe blocks.

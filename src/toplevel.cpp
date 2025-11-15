@@ -22,6 +22,10 @@ void SetInteractiveMode(bool enabled) {
   gInteractiveMode = enabled;
 }
 
+bool IsInteractiveMode() {
+  return gInteractiveMode;
+}
+
 void HandleDefinition() {
   if (auto FnAST = ParseDefinition()) {
     if (!FnAST->getProto()->getGenericParameters().empty()) {
@@ -60,17 +64,20 @@ void HandleExtern() {
 }
 
 void HandleTopLevelExpression() {
-  // Evaluate a top-level expression into an anonymous function.
-  if (auto FnAST = ParseTopLevelExpr()) {
-    if (auto FnIR = FnAST->codegen()) {
-      if (gInteractiveMode) fprintf(stderr, "Generated top-level expression IR:\n");
-      FnIR->print(llvm::errs());
-      if (gInteractiveMode) fprintf(stderr, "\n");
-    }
-  }
- else {
-    // Skip token for error recovery.
+  auto Expr = ParseExpression();
+  if (!Expr) {
     getNextToken();
+    return;
+  }
+
+  auto Stmt = std::make_unique<ExpressionStmtAST>(std::move(Expr));
+  if (auto Value = Stmt->codegen()) {
+    NoteTopLevelStatementEmitted();
+    if (gInteractiveMode) {
+      fprintf(stderr, "Generated top-level expression IR:\n");
+      Value->print(llvm::errs());
+      fprintf(stderr, "\n");
+    }
   }
 }
 
@@ -80,6 +87,7 @@ void HandleVariableDeclaration() {
       if (gInteractiveMode) fprintf(stderr, "Generated variable declaration IR:\n");
       VarIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
+      NoteTopLevelStatementEmitted();
     }
   }
  else {
@@ -102,6 +110,7 @@ void HandleAssertStatement() {
   auto Assert = ParseAssertStatement();
   if (Assert) {
     if (auto AssertIR = Assert->codegen()) {
+      NoteTopLevelStatementEmitted();
       if (gInteractiveMode) fprintf(stderr, "Generated top-level assert IR:\n");
       AssertIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
@@ -213,6 +222,7 @@ void HandleSwitchStatement() {
   if (auto SwitchAST = ParseSwitchStatement()) {
     if (gInteractiveMode) fprintf(stderr, "Parsed switch statement successfully, generating code...\n");
     if (auto SwitchIR = SwitchAST->codegen()) {
+      NoteTopLevelStatementEmitted();
       if (gInteractiveMode) fprintf(stderr, "Generated switch statement IR:\n");
       SwitchIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");

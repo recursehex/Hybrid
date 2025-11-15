@@ -32,7 +32,6 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LH
 std::unique_ptr<ExprAST> ParseExpression();
 std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe = false);
 std::unique_ptr<FunctionAST> ParseDefinition();
-std::unique_ptr<FunctionAST> ParseTopLevelExpr();
 std::unique_ptr<PrototypeAST> ParseExtern();
 
 // Statement parsing functions

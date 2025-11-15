@@ -1,6 +1,7 @@
 #include "parser.h"
 #include "lexer.h"
 #include "compiler_session.h"
+#include "toplevel.h"
 #include <cstdio>
 #include <cmath>
 #include <cctype>
@@ -1992,25 +1993,6 @@ std::unique_ptr<FunctionAST> ParseDefinition() {
   return std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
 }
 
-/// toplevelexpr ::= expression
-std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
-  if (auto E = ParseExpression()) {
-    // Make an anonymous proto.
-    TypeInfo anonReturn = buildDeclaredTypeInfo("void", false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(anonReturn), "__anon_expr",
-                                                std::vector<Parameter>());
-    
-    // Wrap the expression in a return statement and block
-    auto ReturnStmt = std::make_unique<ReturnStmtAST>(std::move(E));
-    std::vector<std::unique_ptr<StmtAST>> Statements;
-    Statements.push_back(std::move(ReturnStmt));
-    auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
-    
-    return std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-  }
-  return nullptr;
-}
-
 /// external ::= 'extern' prototype
 std::unique_ptr<PrototypeAST> ParseExtern() {
   getNextToken(); // eat extern.
@@ -2308,6 +2290,7 @@ std::unique_ptr<SkipStmtAST> ParseSkipStatement() {
 
 /// assertstmt ::= 'assert' expression
 std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
+  SourceLocation assertLoc = currentLexer().tokenStart();
   getNextToken(); // eat 'assert'
 
   // Skip newlines after 'assert'
@@ -2346,7 +2329,9 @@ std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
     }
   }
 
-  return std::make_unique<AssertStmtAST>(std::move(Condition));
+  return std::make_unique<AssertStmtAST>(std::move(Condition),
+                                         assertLoc.line,
+                                         assertLoc.column);
 }
 
 /// unsafeblock ::= 'unsafe' block
@@ -3198,25 +3183,21 @@ bool ParseTypeIdentifier(bool isRef) {
     // Code generation will be handled by HandleVariableDeclaration in toplevel.cpp
     auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 
-    // Need to wrap it in a function for top-level variable declarations
-    TypeInfo anonVarReturn = buildDeclaredTypeInfo("void", false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(anonVarReturn), "__anon_var_decl",
-                                                std::vector<Parameter>());
+    if (IsInteractiveMode())
+      fprintf(stderr, "Parsed variable declaration, generating code...\n");
 
-    // Wrap the variable declaration in a block (no additional return needed)
-    std::vector<std::unique_ptr<StmtAST>> Statements;
-    Statements.push_back(std::move(VarDecl));
-    auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
-    
-    auto Func = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-    fprintf(stderr, "Parsed variable declaration, generating code...\n");
-    
-    if (auto FnIR = Func->codegen()) {
-      fprintf(stderr, "Generated variable declaration IR:\n");
-      FnIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+    if (auto VarIR = VarDecl->codegen()) {
+      (void)VarIR;
+      NoteTopLevelStatementEmitted();
+      if (IsInteractiveMode()) {
+        fprintf(stderr, "Generated variable declaration IR:\n");
+        if (auto *InitFunc = getModule()->getFunction("__anon_var_decl"))
+          InitFunc->print(llvm::errs());
+        fprintf(stderr, "\n");
+      }
     } else {
       fprintf(stderr, "Error: Failed to generate IR for variable declaration\n");
+      return false;
     }
     return true;
   } else {
