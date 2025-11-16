@@ -14,5 +14,10 @@ int main()
 {
     Identity<int> a = (1)
     Identity<int> b = (2)
-    return a.value + b.value
+    int sum = a.value + b.value
+    if sum != 3
+    {
+        return 1
+    }
+    return 0
 }

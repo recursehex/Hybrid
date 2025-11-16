@@ -4347,6 +4347,15 @@ static llvm::FunctionCallee getConcatStringsFunction() {
   return TheModule->getOrInsertFunction("__hybrid_concat_strings", fnType);
 }
 
+static llvm::FunctionCallee getStringEqualsFunction() {
+  llvm::Type *boolTy = llvm::Type::getInt1Ty(*TheContext);
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  llvm::FunctionType *fnType = llvm::FunctionType::get(boolTy,
+                                                       {stringPtrTy, stringPtrTy},
+                                                       false);
+  return TheModule->getOrInsertFunction("__hybrid_string_equals", fnType);
+}
+
 static llvm::FunctionCallee getIntToStringFunction() {
   llvm::Type *stringPtrTy = getTypeFromString("string");
   llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
@@ -5231,7 +5240,8 @@ llvm::Value *VariableExprAST::codegen_ptr() {
       if (!needsLoad) {
         if (const CompositeTypeInfo *comp =
                 lookupCompositeInfo(info->typeName)) {
-          needsLoad = comp->kind == AggregateKind::Class;
+          needsLoad = comp->kind == AggregateKind::Class ||
+                      comp->kind == AggregateKind::Interface;
         }
       }
       if (needsLoad) {
@@ -5251,7 +5261,8 @@ llvm::Value *VariableExprAST::codegen_ptr() {
       if (!needsLoad) {
         if (const CompositeTypeInfo *comp =
                 lookupCompositeInfo(info->typeName)) {
-          needsLoad = comp->kind == AggregateKind::Class;
+          needsLoad = comp->kind == AggregateKind::Class ||
+                      comp->kind == AggregateKind::Interface;
         }
       }
       if (needsLoad) {
@@ -6037,8 +6048,43 @@ llvm::Value *BinaryExprAST::codegen() {
   // Get type names from operands after potential regeneration
   std::string rawLeftTypeName = getLHS()->getTypeName();
   std::string rawRightTypeName = getRHS()->getTypeName();
+
+  if (Op == "+" && rawLeftTypeName == "string" && rawRightTypeName == "string") {
+    llvm::Type *stringPtrTy = getTypeFromString("string");
+    llvm::ArrayType *arrayTy = llvm::ArrayType::get(stringPtrTy, 2);
+    llvm::AllocaInst *arrayAlloca = Builder->CreateAlloca(arrayTy, nullptr, "str.add.tmp");
+
+    llvm::Value *zeroIdx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+    llvm::Value *lhsPtr = Builder->CreateInBoundsGEP(arrayTy, arrayAlloca,
+        {zeroIdx, zeroIdx}, "str.add.lhs");
+    Builder->CreateStore(L, lhsPtr);
+
+    llvm::Value *oneIdx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 1);
+    llvm::Value *rhsPtr = Builder->CreateInBoundsGEP(arrayTy, arrayAlloca,
+        {zeroIdx, oneIdx}, "str.add.rhs");
+    Builder->CreateStore(R, rhsPtr);
+
+    llvm::Value *basePtr = Builder->CreateInBoundsGEP(arrayTy, arrayAlloca,
+        {zeroIdx, zeroIdx}, "str.add.base");
+    llvm::Value *countVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 2);
+    llvm::FunctionCallee concatFn = getConcatStringsFunction();
+    llvm::Value *result = Builder->CreateCall(concatFn, {basePtr, countVal}, "str.addtmp");
+    setTypeName("string");
+    return result;
+  }
+
   ParsedTypeDescriptor leftDesc = parseTypeString(rawLeftTypeName);
   ParsedTypeDescriptor rightDesc = parseTypeString(rawRightTypeName);
+
+  if ((Op == "==" || Op == "!=") &&
+      rawLeftTypeName == "string" && rawRightTypeName == "string") {
+    llvm::FunctionCallee equalsFn = getStringEqualsFunction();
+    llvm::Value *cmp = Builder->CreateCall(equalsFn, {L, R}, "str.eqcall");
+    if (Op == "!=")
+      cmp = Builder->CreateNot(cmp, "str.neqcall");
+    setTypeName("bool");
+    return Builder->CreateZExt(cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
+  }
 
   if ((Op == "+" || Op == "-") &&
       (isPointerTypeDescriptor(leftDesc) || isPointerTypeDescriptor(rightDesc))) {
@@ -7892,6 +7938,13 @@ llvm::Value *CallExprAST::emitResolvedCall(
   } else {
     CallValue = Builder->CreateCall(CalleeF, CallArgs, "calltmp");
     setTypeName(typeNameFromInfo(chosen->returnType));
+
+    if (chosen->returnsByRef) {
+      llvm::Type *valueType = getTypeFromString(typeNameFromInfo(chosen->returnType));
+      if (!valueType)
+        return LogErrorV("Unable to determine ref return type for call");
+      CallValue = Builder->CreateLoad(valueType, CallValue, "refcalltmp");
+    }
   }
 
   return CallValue;
@@ -8260,6 +8313,23 @@ llvm::Value *ReturnStmtAST::codegen() {
 
     if (!Val)
       return nullptr;
+
+    llvm::Function *currentFunction = nullptr;
+    if (auto *currentBlock = Builder->GetInsertBlock())
+      currentFunction = currentBlock->getParent();
+
+    if (!isRef()) {
+      if (currentFunction) {
+        llvm::Type *expectedType = currentFunction->getReturnType();
+        if (expectedType && !expectedType->isVoidTy() &&
+            Val->getType() != expectedType) {
+          Val = castToType(Val, expectedType);
+          if (!Val)
+            return nullptr;
+        }
+      }
+    }
+
     Builder->CreateRet(Val);
   } else {
     // Void return
@@ -11594,9 +11664,12 @@ llvm::Value *SwitchExprAST::codegen() {
         return LogErrorV("All switch expression cases must return the same type");
       }
     }
-    
-    PhiValues.push_back({CaseResult, CaseBB});
-    Builder->CreateBr(ExitBB);
+
+    llvm::BasicBlock *completedCaseBB = Builder->GetInsertBlock();
+    PhiValues.push_back({CaseResult, completedCaseBB});
+
+    if (!completedCaseBB->getTerminator())
+      Builder->CreateBr(ExitBB);
   }
   
   // Add exit block and create PHI node

@@ -1028,7 +1028,6 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
       }
 
       if (CurTok == tok_interpolated_string_end) {
-        segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
         getNextToken(); // consume end token
         break;
       }
@@ -1042,7 +1041,6 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
     }
 
     if (CurTok == tok_interpolated_string_end) {
-      segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
       getNextToken(); // consume end token
       break;
     }
@@ -3124,9 +3122,9 @@ bool ParseTypeIdentifier(bool isRef) {
     }
     
     // Create prototype
-    TypeInfo returnInfo = buildDeclaredTypeInfo(Type, false);
+    TypeInfo returnInfo = buildDeclaredTypeInfo(Type, isRef);
     auto Proto = std::make_unique<PrototypeAST>(std::move(returnInfo), Name,
-                                                std::move(Args), false, false,
+                                                std::move(Args), false, isRef,
                                                 std::move(genericParams));
     
     // Parse the body

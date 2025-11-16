@@ -453,7 +453,13 @@ int main(int argc, char **argv) {
             codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
                 codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
 
+#ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
+          std::string command = "clang \"" + tempPathStr + "\" \"" +
+                                std::string(HYBRID_RUNTIME_SUPPORT_SOURCE) +
+                                "\" -o \"" + targetOutput + "\"";
+#else
           std::string command = "clang \"" + tempPathStr + "\" -o \"" + targetOutput + "\"";
+#endif
           int status = std::system(command.c_str());
           if (status != 0) {
             fprintf(stderr, "Error: clang failed when generating '%s' (exit code %d)\n",

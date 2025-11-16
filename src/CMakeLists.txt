@@ -28,6 +28,9 @@ set(HYBRID_HEADERS
 # Create the executable
 add_executable(hybrid ${HYBRID_SOURCES} ${HYBRID_HEADERS})
 
+target_compile_definitions(hybrid PRIVATE
+    HYBRID_RUNTIME_SUPPORT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/runtime_support.cpp")
+
 # Link LLVM libraries
 target_link_libraries(hybrid PRIVATE ${llvm_libs})
 
