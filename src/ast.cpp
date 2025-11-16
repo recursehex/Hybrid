@@ -704,7 +704,14 @@ static llvm::Function *TopLevelExecFunction = nullptr;
 static llvm::Function *ScriptMainFunction = nullptr;
 static bool ScriptMainIsSynthetic = false;
 static llvm::BasicBlock *TopLevelInsertBlock = nullptr;
-static llvm::BasicBlock *GlobalInitializerInsertBlock = nullptr;
+
+static llvm::AllocaInst *createEntryAlloca(llvm::Function *Fn,
+                                          llvm::Type *Ty,
+                                          const std::string &Name) {
+  llvm::IRBuilder<> EntryBuilder(
+      &Fn->getEntryBlock(), Fn->getEntryBlock().begin());
+  return EntryBuilder.CreateAlloca(Ty, nullptr, Name);
+}
 
 static llvm::Function *ensureTopLevelExecFunction() {
   if (!TopLevelExecFunction) {
@@ -752,34 +759,26 @@ static void ensureSyntheticMainCalls(llvm::Function *TopFunc) {
     Term = TmpBuilder.CreateRet(llvm::ConstantInt::get(Int32Ty, 0));
   }
 
-  llvm::Function *InitFunc = TheModule->getFunction("__anon_var_decl");
-  llvm::CallInst *TopCallInst = nullptr;
-  llvm::CallInst *InitCallInst = nullptr;
-
   for (auto &Inst : EntryBB) {
     if (auto *Call = llvm::dyn_cast<llvm::CallInst>(&Inst)) {
-      if (Call->getCalledFunction() == TopFunc) {
-        TopCallInst = Call;
-      } else if (InitFunc && Call->getCalledFunction() == InitFunc) {
-        InitCallInst = Call;
-      }
+      if (Call->getCalledFunction() == TopFunc)
+        return;
     }
   }
 
-  if (!InitCallInst && InitFunc && !InitFunc->empty()) {
-    llvm::IRBuilder<> TmpBuilder(*TheContext);
-    if (TopCallInst)
-      TmpBuilder.SetInsertPoint(TopCallInst);
-    else
-      TmpBuilder.SetInsertPoint(Term);
-    TmpBuilder.CreateCall(InitFunc);
-  }
+  llvm::IRBuilder<> TmpBuilder(*TheContext);
+  TmpBuilder.SetInsertPoint(Term);
+  TmpBuilder.CreateCall(TopFunc);
+}
 
-  if (!TopCallInst) {
-    llvm::IRBuilder<> TmpBuilder(*TheContext);
-    TmpBuilder.SetInsertPoint(EntryBB.getTerminator());
-    TmpBuilder.CreateCall(TopFunc);
-  }
+static bool builderInTopLevelContext() {
+  if (!Builder)
+    return true;
+  llvm::BasicBlock *insertBlock = Builder->GetInsertBlock();
+  if (!insertBlock)
+    return true;
+  llvm::Function *parent = insertBlock->getParent();
+  return !parent || parent->getName() == "__hybrid_top_level";
 }
 
 static void prepareTopLevelStatementContext() {
@@ -792,7 +791,14 @@ static void prepareTopLevelStatementContext() {
   if (!TopLevelInsertBlock || TopLevelInsertBlock->getParent() != TopFunc) {
     TopLevelInsertBlock = &TopFunc->getEntryBlock();
   }
-  Builder->SetInsertPoint(TopLevelInsertBlock);
+
+  if (TopLevelInsertBlock->getTerminator()) {
+    TopLevelInsertBlock =
+        llvm::BasicBlock::Create(*TheContext, "toplevel.cont", TopFunc);
+  }
+
+  Builder->SetInsertPoint(TopLevelInsertBlock,
+                          TopLevelInsertBlock->end());
 
   NamedValues.clear();
   LocalTypes.clear();
@@ -818,47 +824,6 @@ void NoteTopLevelStatementEmitted() {
     TopLevelInsertBlock = InsertBlock;
 }
 
-class GlobalInitializerScope {
-public:
-  GlobalInitializerScope() {
-    Guard.emplace(*Builder);
-    Func = TheModule->getFunction("__anon_var_decl");
-    if (!Func) {
-      auto *FT = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
-      Func = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
-                                    "__anon_var_decl", TheModule.get());
-      GlobalInitializerInsertBlock = nullptr;
-    }
-
-    if (!GlobalInitializerInsertBlock ||
-        GlobalInitializerInsertBlock->getParent() != Func) {
-      if (Func->empty())
-        GlobalInitializerInsertBlock =
-            llvm::BasicBlock::Create(*TheContext, "entry", Func);
-      else
-        GlobalInitializerInsertBlock = &Func->back();
-    }
-
-    Builder->SetInsertPoint(GlobalInitializerInsertBlock,
-                            GlobalInitializerInsertBlock->end());
-  }
-
-  ~GlobalInitializerScope() {
-    if (!Builder || !Func)
-      return;
-    if (llvm::BasicBlock *InsertBlock = Builder->GetInsertBlock()) {
-      if (InsertBlock->getParent() == Func)
-        GlobalInitializerInsertBlock = InsertBlock;
-    }
-  }
-
-  llvm::Function *function() const { return Func; }
-
-private:
-  std::optional<llvm::IRBuilderBase::InsertPointGuard> Guard;
-  llvm::Function *Func = nullptr;
-};
-
 void FinalizeTopLevelExecution() {
   if (!TopLevelExecFunction || !TheContext)
     return;
@@ -872,30 +837,6 @@ void FinalizeTopLevelExecution() {
     InsertBlock = TopLevelInsertBlock;
   } else if (!TopLevelExecFunction->empty()) {
     InsertBlock = &TopLevelExecFunction->back();
-  }
-
-  if (!InsertBlock || InsertBlock->getTerminator())
-    return;
-
-  llvm::IRBuilder<> TmpBuilder(*TheContext);
-  TmpBuilder.SetInsertPoint(InsertBlock);
-  TmpBuilder.CreateRetVoid();
-}
-
-void FinalizeGlobalInitializers() {
-  llvm::Function *InitFunc = TheModule->getFunction("__anon_var_decl");
-  if (!InitFunc || InitFunc->empty())
-    return;
-
-  llvm::BasicBlock *InsertBlock = nullptr;
-  if (Builder && Builder->GetInsertBlock() &&
-      Builder->GetInsertBlock()->getParent() == InitFunc) {
-    InsertBlock = Builder->GetInsertBlock();
-  } else if (GlobalInitializerInsertBlock &&
-             GlobalInitializerInsertBlock->getParent() == InitFunc) {
-    InsertBlock = GlobalInitializerInsertBlock;
-  } else {
-    InsertBlock = &InitFunc->back();
   }
 
   if (!InsertBlock || InsertBlock->getTerminator())
@@ -4805,15 +4746,18 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   llvm::Function *CurrentFunction = nullptr;
   if (auto *CurrentBB = Builder->GetInsertBlock()) {
     CurrentFunction = CurrentBB->getParent();
-    if (CurrentFunction && CurrentFunction->getName() == "__anon_var_decl") {
+    if (CurrentFunction && CurrentFunction->getName() == "__hybrid_top_level")
       useGlobalStorage = true;
-    }
   }
 
   llvm::Value *ArrayDataPtr = nullptr;
   llvm::ArrayType *ArrayMemType = llvm::ArrayType::get(ElemType, ArraySize);
 
   static unsigned GlobalArrayLiteralCounter = 0;
+
+  llvm::Function *ContainingFunction =
+      Builder->GetInsertBlock() ? Builder->GetInsertBlock()->getParent()
+                                 : nullptr;
 
   if (ArraySize == 0) {
     ArrayDataPtr = llvm::ConstantPointerNull::get(llvm::PointerType::get(*TheContext, 0));
@@ -4827,8 +4771,12 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     ArrayDataPtr = Builder->CreateInBoundsGEP(
         ArrayMemType, GlobalArray, {Zero, Zero}, GlobalName + ".ptr");
   } else {
-    ArrayDataPtr = Builder->CreateAlloca(
-        ElemType, llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize)), "arraytmp");
+    llvm::ArrayType *LocalArrayTy = llvm::ArrayType::get(ElemType, ArraySize);
+    llvm::Value *LocalArray = createEntryAlloca(ContainingFunction, LocalArrayTy,
+                                               "arraytmp");
+    llvm::Value *Zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+    ArrayDataPtr = Builder->CreateInBoundsGEP(
+        LocalArrayTy, LocalArray, {Zero, Zero}, "arraytmp.ptr");
   }
 
   // Store each element
@@ -4856,32 +4804,41 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   }
 
   llvm::StructType *ArrayStructType = getArrayStructType(ElemType, outerRank);
-  llvm::AllocaInst *ArrayStruct = Builder->CreateAlloca(ArrayStructType, nullptr, "arrayStruct");
+  llvm::Value *ArrayValue = llvm::UndefValue::get(ArrayStructType);
 
-  // Store pointer (field 0)
-  llvm::Value *PtrField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 0, "ptrField");
   llvm::Value *ArrayPtrForStruct =
       Builder->CreateBitCast(ArrayDataPtr, llvm::PointerType::get(*TheContext, 0), "array.ptrcast");
-  Builder->CreateStore(ArrayPtrForStruct, PtrField);
+  ArrayValue = Builder->CreateInsertValue(ArrayValue, ArrayPtrForStruct, {0});
 
-  // Store total element count (field 1)
-  llvm::Value *SizeField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 1, "sizeField");
   llvm::Value *SizeVal = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, ArraySize));
-  Builder->CreateStore(SizeVal, SizeField);
+  ArrayValue = Builder->CreateInsertValue(ArrayValue, SizeVal, {1});
 
-  // Store per-dimension lengths (field 2)
   unsigned dimsCount = std::max(1u, outerRank);
   if (dimensionSizes.size() < dimsCount)
     dimensionSizes.resize(dimsCount, 0);
 
-  llvm::Value *DimsField = Builder->CreateStructGEP(ArrayStructType, ArrayStruct, 2, "dimsField");
-  auto *DimsArrayType = llvm::cast<llvm::ArrayType>(ArrayStructType->getElementType(2));
   for (unsigned i = 0; i < dimsCount; ++i) {
-    llvm::Value *Idx0 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
-    llvm::Value *Idx1 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), i);
-    llvm::Value *DimPtr = Builder->CreateInBoundsGEP(DimsArrayType, DimsField, {Idx0, Idx1}, "dimptr");
-    llvm::Value *DimVal = llvm::ConstantInt::get(*TheContext, llvm::APInt(32, dimensionSizes[i]));
-    Builder->CreateStore(DimVal, DimPtr);
+    llvm::Value *DimVal =
+        llvm::ConstantInt::get(*TheContext, llvm::APInt(32, dimensionSizes[i]));
+    ArrayValue = Builder->CreateInsertValue(ArrayValue, DimVal, {2u, i});
+  }
+
+  llvm::Value *ArrayStructPtr = nullptr;
+  if (useGlobalStorage) {
+    static unsigned GlobalArrayStructCounter = 0;
+    std::string StructName =
+        "__array_struct_" + std::to_string(GlobalArrayStructCounter++);
+    auto *GlobalStruct = new llvm::GlobalVariable(
+        *TheModule, ArrayStructType, false, llvm::GlobalValue::PrivateLinkage,
+        llvm::ConstantAggregateZero::get(ArrayStructType), StructName);
+    Builder->CreateStore(ArrayValue, GlobalStruct);
+    ArrayStructPtr = GlobalStruct;
+  } else {
+    if (!ContainingFunction)
+      return LogErrorV("array literal requires function context");
+    ArrayStructPtr =
+        createEntryAlloca(ContainingFunction, ArrayStructType, "arrayStruct");
+    Builder->CreateStore(ArrayValue, ArrayStructPtr);
   }
 
   if (DeclaredArrayInfo) {
@@ -4893,19 +4850,20 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     setTypeName(arrayTypeName);
   }
 
-  return Builder->CreateLoad(ArrayStructType, ArrayStruct, "arrayStructVal");
+  return Builder->CreateLoad(ArrayStructType, ArrayStructPtr,
+                             "arrayStructVal");
 }
 
 llvm::Value *ArrayExprAST::codegen() {
   return codegen_with_element_target(nullptr, getElementType());
 }
 
-struct ArrayElementAccessInfo {
-  llvm::Value *elementPtr;
-  llvm::Type *elementLLVMType;
-  std::string elementTypeName;
-  bool elementNullable;
-};
+  struct ArrayElementAccessInfo {
+    llvm::Value *elementPtr;
+    llvm::Type *elementLLVMType;
+    std::string elementTypeName;
+    bool elementNullable;
+  };
 
 static std::optional<ArrayElementAccessInfo>
 computeArrayElementAccess(ArrayIndexExprAST *node) {
@@ -8432,25 +8390,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     return dims;
   };
 
-  std::optional<GlobalInitializerScope> GlobalInitScope;
-  auto enterGlobalInitializer = [&]() -> llvm::Function * {
-    GlobalInitScope.emplace();
-    return GlobalInitScope->function();
-  };
-
   // Check if at global scope
-  bool isGlobal = false;
-
-  if (Builder->GetInsertBlock()) {
-    llvm::Function *ParentFunction = Builder->GetInsertBlock()->getParent();
-    if (ParentFunction->getName() == "__anon_var_decl" ||
-        ParentFunction->getName() == "__hybrid_top_level") {
-      isGlobal = true;
-    }
-  } else {
-    // No insertion point means at top level
-    isGlobal = true;
-  }
+  bool isGlobal = builderInTopLevelContext();
+  if (isGlobal)
+    prepareTopLevelStatementContext();
 
   if (isGlobal) {
     if (GlobalValues.count(getName()) || lookupGlobalTypeInfo(getName())) {
@@ -8462,11 +8405,6 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     }
   }
 
-  if (isGlobal) {
-    enterGlobalInitializer();
-  }
-  
-  
   if (isGlobal) {
     if (isRefVar) {
       // Check if initializer is a RefExprAST (linking to another variable)
@@ -8808,8 +8746,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
 // Generate code for expression statements
 llvm::Value *ExpressionStmtAST::codegen() {
-  if (!Builder->GetInsertBlock() ||
-      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+  if (builderInTopLevelContext())
     prepareTopLevelStatementContext();
 
   // Generate code for the expression
@@ -9024,6 +8961,176 @@ llvm::Value *ForEachStmtAST::codegen() {
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
+static llvm::Value *coerceLoopConditionToBool(llvm::Value *CondV,
+                                              const char *label) {
+  if (!CondV)
+    return nullptr;
+
+  llvm::Type *CondType = CondV->getType();
+  if (CondType->isIntegerTy(1))
+    return CondV;
+
+  if (CondType->isIntegerTy()) {
+    return Builder->CreateICmpNE(
+        CondV, llvm::ConstantInt::get(CondType, 0), label);
+  }
+
+  if (CondType->isFloatingPointTy()) {
+    return Builder->CreateFCmpONE(
+        CondV, llvm::ConstantFP::get(CondType, 0.0), label);
+  }
+
+  if (CondType->isPointerTy()) {
+    return Builder->CreateICmpNE(
+        CondV,
+        llvm::ConstantPointerNull::get(
+            llvm::cast<llvm::PointerType>(CondType)),
+        label);
+  }
+
+  return LogErrorV(
+      "For loop condition must evaluate to a numeric, boolean, or pointer type");
+}
+
+static const ExprAST *stripLoopConditionWrappers(const ExprAST *expr) {
+  const ExprAST *current = expr;
+  while (current) {
+    if (const auto *Ref = dynamic_cast<const RefExprAST *>(current)) {
+      current = Ref->getOperand();
+      continue;
+    }
+    if (const auto *Cast = dynamic_cast<const CastExprAST *>(current)) {
+      current = Cast->getOperand();
+      continue;
+    }
+    if (const auto *Paren = dynamic_cast<const ParenExprAST *>(current)) {
+      if (!Paren->isTuple() && Paren->size() == 1) {
+        current = Paren->getElement(0);
+        continue;
+      }
+    }
+    break;
+  }
+  return current;
+}
+
+static bool conditionUsesLoopVariable(const ExprAST *expr,
+                                      const std::string &varName) {
+  if (!expr)
+    return false;
+
+  expr = stripLoopConditionWrappers(expr);
+  if (!expr)
+    return false;
+
+  if (const auto *Var = dynamic_cast<const VariableExprAST *>(expr))
+    return Var->getName() == varName;
+
+  if (const auto *Binary = dynamic_cast<const BinaryExprAST *>(expr))
+    return conditionUsesLoopVariable(Binary->getLHS(), varName) ||
+           conditionUsesLoopVariable(Binary->getRHS(), varName);
+
+  if (const auto *Unary = dynamic_cast<const UnaryExprAST *>(expr))
+    return conditionUsesLoopVariable(Unary->getOperand(), varName);
+
+  if (const auto *Call = dynamic_cast<const CallExprAST *>(expr)) {
+    if (Call->hasCalleeExpr() &&
+        conditionUsesLoopVariable(Call->getCalleeExpr(), varName))
+      return true;
+    for (const auto &Arg : Call->getArgs()) {
+      if (conditionUsesLoopVariable(Arg.get(), varName))
+        return true;
+    }
+    return false;
+  }
+
+  if (const auto *ArrayAccess = dynamic_cast<const ArrayIndexExprAST *>(expr)) {
+    if (conditionUsesLoopVariable(ArrayAccess->getArray(), varName))
+      return true;
+    for (size_t i = 0; i < ArrayAccess->getIndexCount(); ++i) {
+      if (conditionUsesLoopVariable(ArrayAccess->getIndex(i), varName))
+        return true;
+    }
+    return false;
+  }
+
+  if (const auto *NullSafeElem =
+          dynamic_cast<const NullSafeElementAccessExprAST *>(expr)) {
+    return conditionUsesLoopVariable(NullSafeElem->getArray(), varName) ||
+           conditionUsesLoopVariable(NullSafeElem->getIndex(), varName);
+  }
+
+  if (const auto *Member = dynamic_cast<const MemberAccessExprAST *>(expr))
+    return conditionUsesLoopVariable(Member->getObject(), varName);
+
+  if (const auto *NullSafeMember =
+          dynamic_cast<const NullSafeAccessExprAST *>(expr))
+    return conditionUsesLoopVariable(NullSafeMember->getObject(), varName);
+
+  if (const auto *Retain = dynamic_cast<const RetainExprAST *>(expr))
+    return conditionUsesLoopVariable(Retain->getOperand(), varName);
+
+  if (const auto *Release = dynamic_cast<const ReleaseExprAST *>(expr))
+    return conditionUsesLoopVariable(Release->getOperand(), varName);
+
+  if (const auto *Cast = dynamic_cast<const CastExprAST *>(expr))
+    return conditionUsesLoopVariable(Cast->getOperand(), varName);
+
+  if (const auto *Ref = dynamic_cast<const RefExprAST *>(expr))
+    return conditionUsesLoopVariable(Ref->getOperand(), varName);
+
+  if (const auto *Paren = dynamic_cast<const ParenExprAST *>(expr)) {
+    for (size_t i = 0; i < Paren->size(); ++i) {
+      if (conditionUsesLoopVariable(Paren->getElement(i), varName))
+        return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
+static std::optional<bool>
+inferLoopDirectionFromCondition(const ExprAST *expr,
+                                const std::string &varName) {
+  expr = stripLoopConditionWrappers(expr);
+  if (!expr)
+    return std::nullopt;
+
+  if (const auto *Binary = dynamic_cast<const BinaryExprAST *>(expr)) {
+    const std::string &Op = Binary->getOp();
+    if (Op == "&&" || Op == "||") {
+      if (auto dir = inferLoopDirectionFromCondition(Binary->getLHS(), varName))
+        return dir;
+      return inferLoopDirectionFromCondition(Binary->getRHS(), varName);
+    }
+
+    if (Op == "<" || Op == "<=" || Op == ">" || Op == ">=") {
+      const ExprAST *lhs = stripLoopConditionWrappers(Binary->getLHS());
+      const ExprAST *rhs = stripLoopConditionWrappers(Binary->getRHS());
+      bool lhsIsVar = false;
+      bool rhsIsVar = false;
+      if (const auto *Var = dynamic_cast<const VariableExprAST *>(lhs))
+        lhsIsVar = Var->getName() == varName;
+      if (const auto *Var = dynamic_cast<const VariableExprAST *>(rhs))
+        rhsIsVar = Var->getName() == varName;
+
+      if (lhsIsVar == rhsIsVar)
+        return std::nullopt;
+
+      const bool opIndicatesAscending = (Op == "<" || Op == "<=");
+      if (lhsIsVar)
+        return opIndicatesAscending;
+      return !opIndicatesAscending;
+    }
+  } else if (const auto *Unary = dynamic_cast<const UnaryExprAST *>(expr)) {
+    if (Unary->getOp() == "!")
+      return inferLoopDirectionFromCondition(Unary->getOperand(), varName);
+  }
+
+  return std::nullopt;
+}
+
 // Generate code for for loops with 'to' syntax
 llvm::Value *ForLoopStmtAST::codegen() {
   // Evaluate the initial value
@@ -9043,6 +9150,34 @@ llvm::Value *ForLoopStmtAST::codegen() {
   llvm::Type *VarType = getTypeFromString(Type);
   if (!VarType)
     return LogErrorV("Unknown type in for loop");
+
+  llvm::Constant *MinFloatLoopEps = nullptr;
+  llvm::Constant *FloatZero = nullptr;
+  if (VarType->isFloatingPointTy()) {
+    MinFloatLoopEps = llvm::ConstantFP::get(VarType, 1e-6);
+    FloatZero = llvm::ConstantFP::get(VarType, 0.0);
+  }
+  bool useHalfStepEpsilon = true;
+
+  auto quantizeLoopValue = [&](llvm::Value *Value) -> llvm::Value * {
+    if (!VarType->isFloatingPointTy())
+      return Value;
+    double quantScale = VarType->isDoubleTy() ? 100.0 : 10.0;
+    llvm::Value *ScaleConst =
+        llvm::ConstantFP::get(VarType, quantScale);
+    llvm::Value *ScaledVal =
+        Builder->CreateFMul(Value, ScaleConst, "loop.quantize.mul");
+    llvm::Type *QuantIntTy =
+        VarType->isDoubleTy()
+            ? llvm::Type::getInt64Ty(*TheContext)
+            : llvm::Type::getInt32Ty(*TheContext);
+    llvm::Value *ScaledInt =
+        Builder->CreateFPToSI(ScaledVal, QuantIntTy, "loop.quantize.toint");
+    llvm::Value *ScaledFP =
+        Builder->CreateSIToFP(ScaledInt, VarType, "loop.quantize.tofp");
+    return Builder->CreateFDiv(ScaledFP, ScaleConst,
+                               "loop.quantize.value");
+  };
   
   // Ensure values match the variable type
   if (VarType->isFloatingPointTy()) {
@@ -9079,7 +9214,13 @@ llvm::Value *ForLoopStmtAST::codegen() {
       }
     }
   }
-  
+
+  ExprAST *ConditionExpr = this->getCondExpr();
+  const bool hasConditionExpr = ConditionExpr != nullptr;
+  const bool conditionNeedsLoopVarBinding =
+      hasConditionExpr &&
+      conditionUsesLoopVariable(ConditionExpr, VarName);
+
   llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
   
   // Create blocks for the loop
@@ -9091,8 +9232,8 @@ llvm::Value *ForLoopStmtAST::codegen() {
   
   // Create an alloca for the loop variable
   llvm::AllocaInst *VarAlloca = Builder->CreateAlloca(VarType, nullptr, VarName);
-  Builder->CreateStore(InitVal, VarAlloca);
-  
+  llvm::AllocaInst *StepMagnitudeAlloca = nullptr;
+
   // Determine if incrementing or decrementing based on init vs limit
   bool isIncrementing = true;
   if (LimitVal) {
@@ -9106,57 +9247,107 @@ llvm::Value *ForLoopStmtAST::codegen() {
       }
     }
   }
+
+  if (!LimitVal && hasConditionExpr) {
+    if (auto inferredDirection =
+            inferLoopDirectionFromCondition(ConditionExpr, VarName))
+      isIncrementing = *inferredDirection;
+  }
+
+  const bool isMultiplicativeStep =
+      StepExpr && (StepOp == '*' || StepOp == '/' || StepOp == '%');
+  if (isMultiplicativeStep && !isIncrementing)
+    useHalfStepEpsilon = false;
+
+  bool trackFloatMagnitude =
+      VarType->isFloatingPointTy() && !isIncrementing;
+  if (LimitVal && trackFloatMagnitude) {
+    StepMagnitudeAlloca =
+        Builder->CreateAlloca(VarType, nullptr, VarName + ".stepmag");
+    if (MinFloatLoopEps)
+      Builder->CreateStore(MinFloatLoopEps, StepMagnitudeAlloca);
+  }
+
+  Builder->CreateStore(InitVal, VarAlloca);
   
   // Jump to the condition check
   Builder->CreateBr(CondBB);
   
   // Emit the condition check
   Builder->SetInsertPoint(CondBB);
-  llvm::Value *VarVal = Builder->CreateLoad(VarType, VarAlloca, VarName);
-  llvm::Value *CondV;
+  llvm::Value *CondV = nullptr;
+  llvm::Value *VarVal = nullptr;
   
-  if (CondExpr) {
-    // Use the custom condition expression
-    // First, make sure the loop variable is available for the condition
-    llvm::Value *OldVal = NamedValues[VarName];
-    NamedValues[VarName] = VarAlloca;
-    
-    CondV = CondExpr->codegen();
-    
-    // Restore old value (in case it shadows something)
-    if (OldVal)
-      NamedValues[VarName] = OldVal;
-    
+  if (hasConditionExpr) {
+    llvm::Value *SavedVal = nullptr;
+    bool hadSavedVal = false;
+    if (conditionNeedsLoopVarBinding) {
+      auto NamedIt = NamedValues.find(VarName);
+      hadSavedVal = NamedIt != NamedValues.end();
+      if (hadSavedVal)
+        SavedVal = NamedIt->second;
+
+      NamedValues[VarName] = VarAlloca;
+    }
+
+    CondV = ConditionExpr->codegen();
+
+    if (conditionNeedsLoopVarBinding) {
+      if (hadSavedVal)
+        NamedValues[VarName] = SavedVal;
+      else
+        NamedValues.erase(VarName);
+    }
+
     if (!CondV)
       return nullptr;
-    
-    // Convert to boolean if needed
-    if (!CondV->getType()->isIntegerTy(1)) {
-      if (CondV->getType()->isIntegerTy(8)) {
-        // For i8 bool, compare with 0
-        CondV = Builder->CreateICmpNE(CondV, 
-          llvm::ConstantInt::get(CondV->getType(), 0), "loopcond");
-      } else if (CondV->getType()->isFloatingPointTy()) {
-        CondV = Builder->CreateFCmpONE(CondV,
-          llvm::ConstantFP::get(CondV->getType(), 0.0), "loopcond");
-      } else if (CondV->getType()->isIntegerTy()) {
-        CondV = Builder->CreateICmpNE(CondV,
-          llvm::ConstantInt::get(CondV->getType(), 0), "loopcond");
-      }
-    }
+
+    CondV = coerceLoopConditionToBool(CondV, "loopcond");
+    if (!CondV)
+      return nullptr;
   } else if (LimitVal) {
-    // Use the standard limit-based condition
+    VarVal = Builder->CreateLoad(VarType, VarAlloca, VarName);
     if (VarType->isFloatingPointTy()) {
+      llvm::Value *Epsilon =
+          MinFloatLoopEps ? MinFloatLoopEps
+                          : llvm::ConstantFP::get(VarType, 1e-6);
+      if (StepMagnitudeAlloca) {
+        llvm::Value *StoredMag =
+            Builder->CreateLoad(VarType, StepMagnitudeAlloca,
+                                VarName + ".stepmag");
+        double scale = useHalfStepEpsilon ? 0.5 : 5.0;
+        llvm::Value *EffectiveMag = Builder->CreateFMul(
+            StoredMag, llvm::ConstantFP::get(VarType, scale),
+            "loop.stepmag.scaled");
+        llvm::Value *NeedsMin =
+            Builder->CreateFCmpOLT(EffectiveMag, MinFloatLoopEps,
+                                   "loop.stepmag.needsmin");
+        Epsilon =
+            Builder->CreateSelect(NeedsMin, MinFloatLoopEps, EffectiveMag,
+                                  "loop.stepmag.eps");
+      }
+      llvm::Value *SignedEps =
+          isIncrementing
+              ? Epsilon
+              : Builder->CreateFNeg(Epsilon, "loop.stepmag.negeps");
+      llvm::Value *AdjustedLimit =
+          Builder->CreateFAdd(LimitVal, SignedEps, "loop.limit_eps");
       if (isIncrementing) {
-        CondV = Builder->CreateFCmpOLE(VarVal, LimitVal, "loopcond");
+        CondV = Builder->CreateFCmpOLE(VarVal, AdjustedLimit, "loopcond");
       } else {
-        CondV = Builder->CreateFCmpOGE(VarVal, LimitVal, "loopcond");
+        CondV = Builder->CreateFCmpOGE(VarVal, AdjustedLimit, "loopcond");
       }
     } else {
       if (isIncrementing) {
         CondV = Builder->CreateICmpSLE(VarVal, LimitVal, "loopcond");
       } else {
         CondV = Builder->CreateICmpSGE(VarVal, LimitVal, "loopcond");
+        if (isMultiplicativeStep) {
+          llvm::Value *One = llvm::ConstantInt::get(VarType, 1);
+          llvm::Value *Fallback =
+              Builder->CreateICmpSGE(VarVal, One, "loop.minbound");
+          CondV = Builder->CreateOr(CondV, Fallback, "loopcond.ext");
+        }
       }
     }
   } else {
@@ -9213,10 +9404,18 @@ llvm::Value *ForLoopStmtAST::codegen() {
     
     // Ensure step has same type as variable
     if (StepVal->getType() != VarType) {
-      if (VarType->isFloatingPointTy() && StepVal->getType()->isIntegerTy()) {
-        StepVal = Builder->CreateSIToFP(StepVal, VarType, "stepcast");
-      } else if (VarType->isIntegerTy() && StepVal->getType()->isDoubleTy()) {
-        StepVal = Builder->CreateFPToSI(StepVal, VarType, "stepcast");
+      if (VarType->isFloatingPointTy()) {
+        if (StepVal->getType()->isIntegerTy()) {
+          StepVal = Builder->CreateSIToFP(StepVal, VarType, "stepcast");
+        } else if (StepVal->getType()->isFloatingPointTy()) {
+          StepVal = Builder->CreateFPCast(StepVal, VarType, "stepcast");
+        }
+      } else if (VarType->isIntegerTy()) {
+        if (StepVal->getType()->isFloatingPointTy()) {
+          StepVal = Builder->CreateFPToSI(StepVal, VarType, "stepcast");
+        } else {
+          StepVal = Builder->CreateIntCast(StepVal, VarType, true, "stepcast");
+        }
       }
     }
     
@@ -9269,6 +9468,32 @@ llvm::Value *ForLoopStmtAST::codegen() {
       llvm::Value *Step = llvm::ConstantInt::get(VarType, isIncrementing ? 1 : -1);
       NextVal = Builder->CreateAdd(VarVal, Step, "nextval");
     }
+  }
+
+  if (VarType->isFloatingPointTy() && isMultiplicativeStep)
+    NextVal = quantizeLoopValue(NextVal);
+
+
+  if (StepMagnitudeAlloca && trackFloatMagnitude) {
+    llvm::Value *StepDelta =
+        Builder->CreateFSub(NextVal, VarVal, "loop.stepdelta");
+    llvm::Value *IsNegative =
+        Builder->CreateFCmpOLT(
+            StepDelta,
+            FloatZero ? FloatZero : llvm::ConstantFP::get(VarType, 0.0),
+            "loop.stepdelta.isneg");
+    llvm::Value *NegatedDelta =
+        Builder->CreateFNeg(StepDelta, "loop.stepdelta.neg");
+    llvm::Value *AbsDelta =
+        Builder->CreateSelect(IsNegative, NegatedDelta, StepDelta,
+                              "loop.stepdelta.abs");
+    llvm::Value *NeedsMin =
+        Builder->CreateFCmpOLT(AbsDelta, MinFloatLoopEps,
+                               "loop.stepdelta.needsmin");
+    llvm::Value *StoredMag =
+        Builder->CreateSelect(NeedsMin, MinFloatLoopEps, AbsDelta,
+                              "loop.stepmag.next");
+    Builder->CreateStore(StoredMag, StepMagnitudeAlloca);
   }
   
   Builder->CreateStore(NextVal, VarAlloca);
@@ -9530,9 +9755,14 @@ llvm::Value *SkipStmtAST::codegen() {
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
 }
 
+static bool conditionUsesLoopVariable(const ExprAST *expr,
+                                      const std::string &varName);
+static std::optional<bool>
+inferLoopDirectionFromCondition(const ExprAST *expr,
+                                const std::string &varName);
+
 llvm::Value *AssertStmtAST::codegen() {
-  if (!Builder->GetInsertBlock() ||
-      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+  if (builderInTopLevelContext())
     prepareTopLevelStatementContext();
 
   // Generate code for the condition expression
@@ -9853,16 +10083,6 @@ llvm::Function *FunctionAST::codegen() {
           rememberLocalType("this", std::move(thisInfo));
           markKnownNonNull("this");
         }
-      }
-    }
-  }
-
-  static bool InitializedGlobalsEmitted = false;
-  if (!InitializedGlobalsEmitted && isSourceMain) {
-    if (auto *InitFunc = TheModule->getFunction("__anon_var_decl")) {
-      if (!InitFunc->empty()) {
-        Builder->CreateCall(InitFunc);
-        InitializedGlobalsEmitted = true;
       }
     }
   }
@@ -11178,8 +11398,7 @@ llvm::Value *BaseExprAST::codegen_ptr() {
 
 // Generate code for switch statements
 llvm::Value *SwitchStmtAST::codegen() {
-  if (!Builder->GetInsertBlock() ||
-      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+  if (builderInTopLevelContext())
     prepareTopLevelStatementContext();
 
   // Evaluate the switch condition
@@ -11270,8 +11489,7 @@ llvm::Value *SwitchStmtAST::codegen() {
 
 // Generate code for switch expressions
 llvm::Value *SwitchExprAST::codegen() {
-  if (!Builder->GetInsertBlock() ||
-      Builder->GetInsertBlock()->getParent()->getName() == "__anon_var_decl")
+  if (builderInTopLevelContext())
     prepareTopLevelStatementContext();
 
   // Evaluate the switch condition

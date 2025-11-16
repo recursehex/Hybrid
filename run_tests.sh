@@ -206,7 +206,7 @@ run_test() {
     # Run the test and capture both output and exit code
     local output
     local exit_code
-    output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" --emit-llvm -o - "$test_file" 2>&1)
+    output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" < "$test_file" 2>&1)
     exit_code=$?
     
     # Check for error patterns in output
@@ -244,8 +244,6 @@ run_test() {
             local module_start=""
             if [ -n "$module_marker" ]; then
                 module_start=$((module_marker + 1))
-            else
-                module_start=$(echo "$output" | grep -n "^; ModuleID" | head -1 | cut -d: -f1)
             fi
 
             if [ -n "$module_start" ]; then
@@ -284,8 +282,6 @@ run_test() {
                 local module_start=""
                 if [ -n "$module_marker" ]; then
                     module_start=$((module_marker + 1))
-                else
-                    module_start=$(echo "$output" | grep -n "^; ModuleID" | head -1 | cut -d: -f1)
                 fi
 
                 if [ -n "$module_start" ]; then

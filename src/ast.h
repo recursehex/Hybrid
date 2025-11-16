@@ -221,7 +221,6 @@ namespace llvm {
 #include "llvm/IR/Value.h"
 
 void FinalizeTopLevelExecution();
-void FinalizeGlobalInitializers();
 
 // Records that a top-level statement emitted code so subsequent statements
 // resume insertion at the correct basic block inside __hybrid_top_level.

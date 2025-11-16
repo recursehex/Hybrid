@@ -377,7 +377,6 @@ int main(int argc, char **argv) {
 
     if (!hadFailure) {
       FinalizeTopLevelExecution();
-      FinalizeGlobalInitializers();
       llvm::Module *module = getModule();
 
       std::string targetOutput;

@@ -3191,8 +3191,8 @@ bool ParseTypeIdentifier(bool isRef) {
       NoteTopLevelStatementEmitted();
       if (IsInteractiveMode()) {
         fprintf(stderr, "Generated variable declaration IR:\n");
-        if (auto *InitFunc = getModule()->getFunction("__anon_var_decl"))
-          InitFunc->print(llvm::errs());
+        if (auto *TopFunc = getModule()->getFunction("__hybrid_top_level"))
+          TopFunc->print(llvm::errs());
         fprintf(stderr, "\n");
       }
     } else {
