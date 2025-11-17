@@ -138,6 +138,11 @@ static llvm::PointerType *pointerType(llvm::Type * /*elementType*/,
   return llvm::PointerType::get(*TheContext, addressSpace);
 }
 
+static llvm::FunctionCallee getSharedControlCreateFunction();
+static llvm::FunctionCallee getSharedControlRetainWeakFunction();
+static llvm::StructType *
+getOrCreateSharedControlBlockType(const std::string &constructedName,
+                                  llvm::Type *payloadTy);
 static TypeInfo applyActiveTypeBindings(const TypeInfo &info);
 static TypeInfo makeTypeInfo(std::string typeName,
                              RefStorageClass storage = RefStorageClass::None,
@@ -243,6 +248,8 @@ static bool maybeReportNestedDepthIssues(const TypeInfo &info,
 
 static const CompositeTypeInfo *lookupCompositeInfo(const std::string &name,
                                                     bool countHit = true);
+static const CompositeTypeInfo *
+materializeCompositeInstantiation(const TypeInfo &requestedType);
 
 static bool isBuiltinValueTypeName(std::string_view baseName) {
   static constexpr std::string_view primitives[] = {
@@ -1781,6 +1788,39 @@ static llvm::Type *getSizeType() {
   return TheModule->getOrInsertFunction("hybrid_alloc_array", fnType);
 }
 
+static llvm::FunctionCallee getSharedControlCreateFunction() {
+  auto *opaquePtrTy = pointerType();
+  auto *fnType =
+      llvm::FunctionType::get(opaquePtrTy, {opaquePtrTy}, false);
+  return TheModule->getOrInsertFunction(
+      "__hybrid_shared_control_create", fnType);
+}
+
+static llvm::FunctionCallee getSharedControlRetainWeakFunction() {
+  auto *opaquePtrTy = pointerType();
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {opaquePtrTy}, false);
+  return TheModule->getOrInsertFunction(
+      "__hybrid_shared_control_retain_weak", fnType);
+}
+
+static llvm::StructType *
+getOrCreateSharedControlBlockType(const std::string &constructedName,
+                                  llvm::Type *payloadTy) {
+  std::string controlName =
+      "__HybridSharedControl$" + sanitizeForMangle(constructedName);
+  auto it = StructTypes.find(controlName);
+  if (it != StructTypes.end() && it->second)
+    return it->second;
+  llvm::StructType *controlTy =
+      llvm::StructType::create(*TheContext, controlName);
+  StructTypes[controlName] = controlTy;
+  auto *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  std::vector<llvm::Type *> body = {int32Ty, int32Ty, payloadTy};
+  controlTy->setBody(body);
+  return controlTy;
+}
+
 static bool genericBindingEquals(const GenericBindingKey &lhs,
                                  const GenericBindingKey &rhs) {
   return lhs.typeName == rhs.typeName &&
@@ -3209,10 +3249,551 @@ static std::string buildNormalizedCompositeKey(const StructAST &templ,
   return key;
 }
 
+static const InstanceFieldInfo *
+findInstanceField(const CompositeTypeInfo &metadata,
+                  std::string_view fieldName) {
+  for (const auto &field : metadata.instanceFields) {
+    if (field.name == fieldName)
+      return &field;
+  }
+  return nullptr;
+}
+
+static bool registerSmartPointerOverload(const std::string &baseName,
+                                         const std::string &constructedName,
+                                         llvm::Function *fn,
+                                         const std::vector<TypeInfo> &params) {
+  if (!fn)
+    return false;
+  FunctionOverload entry;
+  TypeInfo returnInfo = makeTypeInfo(constructedName);
+  finalizeTypeInfoMetadata(returnInfo);
+  entry.mangledName = fn->getName().str();
+  entry.returnType = std::move(returnInfo);
+  entry.returnsByRef = false;
+  entry.parameterTypes = params;
+  entry.parameterIsRef.assign(params.size(), false);
+  entry.function = fn;
+  entry.isGenericInstantiation = true;
+  currentCodegen().functionOverloads[baseName].push_back(std::move(entry));
+  return true;
+}
+
+static llvm::Function *
+createSmartPointerCtorFunction(const std::string &constructedName,
+                               const std::string &suffix,
+                               llvm::StructType *structTy,
+                               const std::vector<llvm::Type *> &paramTypes,
+                               const std::vector<std::string> &argNames) {
+  std::string fnName = "__hybrid_smart_" + sanitizeForMangle(constructedName) +
+                       "$" + suffix;
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(structTy, paramTypes, false);
+  llvm::Function *fn = llvm::Function::Create(
+      fnType, llvm::Function::ExternalLinkage, fnName, TheModule.get());
+  unsigned idx = 0;
+  for (auto &arg : fn->args()) {
+    if (idx < argNames.size() && !argNames[idx].empty())
+      arg.setName(argNames[idx]);
+    else
+      arg.setName("arg" + std::to_string(idx));
+    ++idx;
+  }
+  return fn;
+}
+
+static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
+                                         llvm::StructType *structTy,
+                                         CompositeTypeInfo &metadata,
+                                         SmartPointerKind kind,
+                                         const TypeInfo &payloadInfo,
+                                         llvm::Type *payloadTy) {
+  if (!structTy || kind == SmartPointerKind::None)
+    return true;
+
+  const std::string constructedName =
+      stripNullableAnnotations(typeNameFromInfo(requestedType));
+  const std::string baseName = requestedType.baseTypeName;
+
+  auto *savedBlock = Builder->GetInsertBlock();
+  llvm::BasicBlock::iterator savedPoint;
+  const bool hadInsertPoint = savedBlock != nullptr;
+  if (hadInsertPoint)
+    savedPoint = Builder->GetInsertPoint();
+
+  const InstanceFieldInfo *valueField =
+      findInstanceField(metadata, "value");
+  const InstanceFieldInfo *flagField =
+      findInstanceField(metadata, "hasValue");
+  const InstanceFieldInfo *payloadField =
+      findInstanceField(metadata, "payload");
+  const InstanceFieldInfo *controlField =
+      findInstanceField(metadata,
+                        kind == SmartPointerKind::Weak ? "weakControl"
+                                                        : "control");
+
+  auto getFieldLLVMType = [&](const InstanceFieldInfo *field) -> llvm::Type * {
+    if (!field)
+      return nullptr;
+    return getTypeFromString(typeNameFromInfo(field->type));
+  };
+
+  auto buildCtor =
+      [&](const std::string &suffix,
+          const std::vector<TypeInfo> &paramInfos,
+          const std::vector<llvm::Type *> &paramLLVMTypes,
+          const std::vector<std::string> &argNames,
+          llvm::function_ref<bool(llvm::Function *, llvm::AllocaInst *)> body)
+      -> bool {
+    llvm::Function *fn = createSmartPointerCtorFunction(
+        constructedName, suffix, structTy, paramLLVMTypes, argNames);
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", fn);
+    Builder->SetInsertPoint(entry);
+
+    llvm::AllocaInst *storage =
+        Builder->CreateAlloca(structTy, nullptr, "smart.alloca");
+    if (!body(fn, storage)) {
+      fn->eraseFromParent();
+      if (hadInsertPoint)
+        Builder->SetInsertPoint(savedBlock, savedPoint);
+      else
+        Builder->ClearInsertionPoint();
+      return false;
+    }
+
+    llvm::Value *result =
+        Builder->CreateLoad(structTy, storage, "smart.result");
+    Builder->CreateRet(result);
+    llvm::verifyFunction(*fn);
+
+    if (!registerSmartPointerOverload(baseName, constructedName, fn,
+                                      paramInfos))
+      return false;
+    return true;
+  };
+
+  auto storeBoolField = [&](llvm::AllocaInst *storage, bool value) {
+    llvm::Type *flagTy = getFieldLLVMType(flagField);
+    if (!flagField || !flagTy)
+      return false;
+    llvm::Value *flagPtr = Builder->CreateStructGEP(
+        structTy, storage, flagField->index, "smart.flag.ptr");
+    llvm::Value *constant =
+        llvm::ConstantInt::get(flagTy, value ? 1 : 0);
+    Builder->CreateStore(constant, flagPtr);
+    return true;
+  };
+
+  bool success = true;
+  switch (kind) {
+  case SmartPointerKind::Unique: {
+    if (!valueField || !flagField) {
+      success = false;
+      break;
+    }
+    llvm::Type *storedType = getFieldLLVMType(valueField);
+    if (!storedType) {
+      success = false;
+      break;
+    }
+
+    if (!buildCtor(
+            "unique.default", {}, {}, {},
+            [&](llvm::Function *, llvm::AllocaInst *storage) {
+              llvm::Value *valuePtr = Builder->CreateStructGEP(
+                  structTy, storage, valueField->index, "smart.value.ptr");
+              Builder->CreateStore(
+                  llvm::Constant::getNullValue(storedType), valuePtr);
+              return storeBoolField(storage, false);
+            }))
+      success = false;
+
+    std::vector<TypeInfo> params{payloadInfo};
+    std::vector<llvm::Type *> llvmParams{payloadTy};
+    if (!buildCtor(
+            "unique.payload", params, llvmParams, {"payload"},
+            [&](llvm::Function *fn, llvm::AllocaInst *storage) {
+              llvm::Argument &payloadArg = *fn->arg_begin();
+              llvm::Value *valuePtr = Builder->CreateStructGEP(
+                  structTy, storage, valueField->index, "smart.value.ptr");
+              auto *opaquePtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+              llvm::Value *opaquePayload = Builder->CreateBitCast(
+                  &payloadArg, opaquePtrTy, "smart.unique.payload.cast");
+              llvm::Value *retainedOpaque = Builder->CreateCall(
+                  getHybridRetainFunction(), {opaquePayload},
+                  "smart.unique.payload.retain");
+              llvm::Value *retained =
+                  Builder->CreateBitCast(retainedOpaque, storedType,
+                                         "smart.unique.payload.value");
+              Builder->CreateStore(retained, valuePtr);
+              return storeBoolField(storage, true);
+            }))
+      success = false;
+    break;
+  }
+  case SmartPointerKind::Shared: {
+    if (!payloadField || !controlField) {
+      success = false;
+      break;
+    }
+    llvm::Type *payloadFieldTy = getFieldLLVMType(payloadField);
+    llvm::Type *controlTy = getFieldLLVMType(controlField);
+    if (!payloadFieldTy || !controlTy) {
+      success = false;
+      break;
+    }
+
+    if (!buildCtor(
+            "shared.default", {}, {}, {},
+            [&](llvm::Function *, llvm::AllocaInst *storage) {
+              llvm::Value *payloadPtr = Builder->CreateStructGEP(
+                  structTy, storage, payloadField->index,
+                  "smart.payload.ptr");
+              llvm::Value *controlPtr = Builder->CreateStructGEP(
+                  structTy, storage, controlField->index,
+                  "smart.control.ptr");
+              Builder->CreateStore(
+                  llvm::Constant::getNullValue(payloadFieldTy),
+                  payloadPtr);
+              Builder->CreateStore(
+                  llvm::Constant::getNullValue(controlTy), controlPtr);
+              return true;
+            }))
+      break;
+
+    std::vector<TypeInfo> params{payloadInfo};
+    std::vector<llvm::Type *> llvmParams{payloadTy};
+    if (!buildCtor(
+            "shared.payload", params, llvmParams, {"payload"},
+            [&](llvm::Function *fn, llvm::AllocaInst *storage) {
+              llvm::Argument &payloadArg = *fn->arg_begin();
+              llvm::Value *payloadPtr = Builder->CreateStructGEP(
+                  structTy, storage, payloadField->index,
+                  "smart.payload.ptr");
+              llvm::Value *storedPayload = &payloadArg;
+              if (storedPayload->getType() != payloadFieldTy)
+                storedPayload = Builder->CreateBitCast(
+                    storedPayload, payloadFieldTy,
+                    "smart.shared.payload.cast");
+              Builder->CreateStore(storedPayload, payloadPtr);
+
+              llvm::Value *opaquePayload = Builder->CreateBitCast(
+                  &payloadArg, pointerType(),
+                  "smart.shared.payload.cast");
+              llvm::Value *controlOpaque = Builder->CreateCall(
+                  getSharedControlCreateFunction(), {opaquePayload},
+                  "smart.shared.control.raw");
+              if (!controlOpaque)
+                return false;
+              llvm::Value *typedControl = controlOpaque;
+              if (typedControl->getType() != controlTy)
+                typedControl =
+                    Builder->CreateBitCast(controlOpaque, controlTy,
+                                           "smart.shared.control");
+              llvm::Value *controlPtr = Builder->CreateStructGEP(
+                  structTy, storage, controlField->index,
+                  "smart.control.ptr");
+              Builder->CreateStore(typedControl, controlPtr);
+              return true;
+            }))
+      success = false;
+    break;
+  }
+  case SmartPointerKind::Weak: {
+    if (!payloadField || !controlField) {
+      success = false;
+      break;
+    }
+    llvm::Type *payloadFieldTy = getFieldLLVMType(payloadField);
+    llvm::Type *controlTy = getFieldLLVMType(controlField);
+    if (!payloadFieldTy || !controlTy) {
+      success = false;
+      break;
+    }
+
+    if (!buildCtor(
+            "weak.default", {}, {}, {},
+            [&](llvm::Function *, llvm::AllocaInst *storage) {
+              llvm::Value *payloadPtr = Builder->CreateStructGEP(
+                  structTy, storage, payloadField->index,
+                  "smart.payload.ptr");
+              llvm::Value *controlPtr = Builder->CreateStructGEP(
+                  structTy, storage, controlField->index,
+                  "smart.control.ptr");
+              Builder->CreateStore(
+                  llvm::Constant::getNullValue(payloadFieldTy),
+                  payloadPtr);
+              Builder->CreateStore(
+                  llvm::Constant::getNullValue(controlTy), controlPtr);
+              return true;
+            }))
+      success = false;
+
+    std::string payloadName = typeNameFromInfo(payloadInfo);
+    std::string sharedName = "shared<" + payloadName + ">";
+    TypeInfo sharedType = makeTypeInfo(sharedName);
+    finalizeTypeInfoMetadata(sharedType);
+    materializeCompositeInstantiation(sharedType);
+    std::string sharedKey =
+        stripNullableAnnotations(typeNameFromInfo(sharedType));
+    llvm::StructType *sharedStructTy = StructTypes[sharedKey];
+    const CompositeTypeInfo *sharedInfo =
+        lookupCompositeInfo(sharedKey, /*countHit=*/false);
+    if (!sharedStructTy || !sharedInfo) {
+      success = false;
+      break;
+    }
+    const InstanceFieldInfo *sharedPayloadField =
+        findInstanceField(*sharedInfo, "payload");
+    const InstanceFieldInfo *sharedControlField =
+        findInstanceField(*sharedInfo, "control");
+    if (!sharedPayloadField || !sharedControlField) {
+      success = false;
+      break;
+    }
+    llvm::Type *sharedPayloadTy =
+        getTypeFromString(typeNameFromInfo(sharedPayloadField->type));
+    llvm::Type *sharedControlTy =
+        getTypeFromString(typeNameFromInfo(sharedControlField->type));
+    if (!sharedPayloadTy || !sharedControlTy) {
+      success = false;
+      break;
+    }
+
+    std::vector<TypeInfo> params{sharedType};
+    std::vector<llvm::Type *> llvmParams{
+        getTypeFromString(typeNameFromInfo(sharedType))};
+    if (llvmParams.empty() || !llvmParams.front()) {
+      success = false;
+      break;
+    }
+
+    if (!buildCtor(
+            "weak.shared", params, llvmParams, {"owner"},
+            [&](llvm::Function *fn, llvm::AllocaInst *storage) {
+              llvm::Argument &ownerArg = *fn->arg_begin();
+              llvm::Value *typedOwner = &ownerArg;
+              llvm::Type *ownerPtrTy = pointerType(sharedStructTy);
+              if (typedOwner->getType() != ownerPtrTy)
+                typedOwner =
+                    Builder->CreateBitCast(typedOwner, ownerPtrTy,
+                                           "smart.shared.ptr");
+
+              llvm::Value *ownerPayloadPtr = Builder->CreateStructGEP(
+                  sharedStructTy, typedOwner, sharedPayloadField->index,
+                  "smart.shared.payload.ptr");
+              llvm::Value *ownerPayload =
+                  Builder->CreateLoad(sharedPayloadTy, ownerPayloadPtr,
+                                      "smart.shared.payload");
+
+              llvm::Value *payloadPtr = Builder->CreateStructGEP(
+                  structTy, storage, payloadField->index,
+                  "smart.payload.ptr");
+              if (ownerPayload->getType() != payloadFieldTy)
+                ownerPayload =
+                    Builder->CreateBitCast(ownerPayload, payloadFieldTy);
+              Builder->CreateStore(ownerPayload, payloadPtr);
+
+              llvm::Value *ownerControlPtr = Builder->CreateStructGEP(
+                  sharedStructTy, typedOwner, sharedControlField->index,
+                  "smart.shared.control.ptr");
+              llvm::Value *ownerControl =
+                  Builder->CreateLoad(sharedControlTy, ownerControlPtr,
+                                      "smart.shared.control");
+
+              llvm::Value *hasControl = Builder->CreateICmpNE(
+                  ownerControl,
+                  llvm::Constant::getNullValue(sharedControlTy),
+                  "smart.shared.hascontrol");
+              llvm::Function *parent = Builder->GetInsertBlock()->getParent();
+              llvm::BasicBlock *retainBB = llvm::BasicBlock::Create(
+                  *TheContext, "smart.weak.retain", parent);
+              llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(
+                  *TheContext, "smart.weak.merge", parent);
+              Builder->CreateCondBr(hasControl, retainBB, mergeBB);
+
+              Builder->SetInsertPoint(retainBB);
+              llvm::Value *opaqueControl = Builder->CreateBitCast(
+                  ownerControl, pointerType(),
+                  "smart.shared.control.opaque");
+              Builder->CreateCall(getSharedControlRetainWeakFunction(),
+                                  {opaqueControl});
+              Builder->CreateBr(mergeBB);
+
+              Builder->SetInsertPoint(mergeBB);
+              llvm::Value *controlPtr = Builder->CreateStructGEP(
+                  structTy, storage, controlField->index,
+                  "smart.control.ptr");
+              Builder->CreateStore(ownerControl, controlPtr);
+              return true;
+            }))
+      success = false;
+    break;
+  }
+  case SmartPointerKind::None:
+    break;
+  }
+
+  if (hadInsertPoint)
+    Builder->SetInsertPoint(savedBlock, savedPoint);
+  else
+    Builder->ClearInsertionPoint();
+  return success;
+}
+
+static bool materializeSmartPointerInstantiation(
+    const std::string &constructedName, const TypeInfo &requestedType,
+    SmartPointerKind kind) {
+  if (CG.compositeMetadata.contains(constructedName))
+    return true;
+
+  if (requestedType.typeArguments.size() != 1) {
+    reportCompilerError("Smart pointer '" + requestedType.baseTypeName +
+                        "' expects exactly one type argument");
+    return false;
+  }
+
+  TypeInfo payloadInfo = requestedType.typeArguments.front();
+  payloadInfo = applyActiveTypeBindings(payloadInfo);
+  finalizeTypeInfoMetadata(payloadInfo);
+  llvm::Type *payloadTy = getTypeFromString(typeNameFromInfo(payloadInfo));
+  if (!payloadTy) {
+    reportCompilerError("Unable to materialize smart pointer '" +
+                        constructedName + "' because payload type '" +
+                        typeNameFromInfo(payloadInfo) + "' is unknown");
+    return false;
+  }
+
+  llvm::StructType *structTy = nullptr;
+  auto structIt = StructTypes.find(constructedName);
+  if (structIt != StructTypes.end() && structIt->second)
+    structTy = structIt->second;
+  if (!structTy) {
+    structTy = llvm::StructType::create(*TheContext, constructedName);
+    StructTypes[constructedName] = structTy;
+  }
+
+  std::vector<llvm::Type *> fieldTypes;
+  std::vector<std::pair<std::string, unsigned>> fieldIndices;
+  std::map<std::string, std::string> fieldTypeMap;
+  std::map<std::string, MemberModifiers> fieldModifiers;
+  std::vector<InstanceFieldInfo> instanceFields;
+
+  auto appendField = [&](const std::string &fieldName, llvm::Type *llvmType,
+                         TypeInfo fieldInfo) {
+    unsigned index = fieldTypes.size();
+    fieldTypes.push_back(llvmType);
+    fieldIndices.emplace_back(fieldName, index);
+    fieldTypeMap[fieldName] = typeNameFromInfo(fieldInfo);
+    fieldModifiers[fieldName] = MemberModifiers{};
+    InstanceFieldInfo info;
+    info.name = fieldName;
+    info.index = index;
+    info.type = std::move(fieldInfo);
+    instanceFields.push_back(info);
+  };
+
+  switch (kind) {
+  case SmartPointerKind::Unique: {
+    appendField("value", payloadTy, payloadInfo);
+    TypeInfo flagInfo = makeTypeInfo("bool");
+    finalizeTypeInfoMetadata(flagInfo);
+    llvm::Type *boolTy = getTypeFromString("bool");
+    appendField("hasValue", boolTy, flagInfo);
+    break;
+  }
+  case SmartPointerKind::Shared: {
+    TypeInfo storedPayload = payloadInfo;
+    storedPayload.ownership = OwnershipQualifier::Unowned;
+    appendField("payload", payloadTy, storedPayload);
+    llvm::StructType *controlTy =
+        getOrCreateSharedControlBlockType(constructedName, payloadTy);
+    std::string controlBase =
+        "__HybridSharedControl$" + sanitizeForMangle(constructedName);
+    TypeInfo controlInfo = makeTypeInfo(controlBase + "@");
+    finalizeTypeInfoMetadata(controlInfo);
+    appendField("control", pointerType(controlTy), controlInfo);
+    break;
+  }
+  case SmartPointerKind::Weak: {
+    TypeInfo storedPayload = payloadInfo;
+    storedPayload.ownership = OwnershipQualifier::Unowned;
+    appendField("payload", payloadTy, storedPayload);
+    llvm::StructType *controlTy =
+        getOrCreateSharedControlBlockType(constructedName, payloadTy);
+    std::string controlBase =
+        "__HybridSharedControl$" + sanitizeForMangle(constructedName);
+    TypeInfo controlInfo = makeTypeInfo(controlBase + "@");
+    finalizeTypeInfoMetadata(controlInfo);
+    appendField("weakControl", pointerType(controlTy), controlInfo);
+    break;
+  }
+  case SmartPointerKind::None:
+    return false;
+  }
+
+  structTy->setBody(fieldTypes);
+  StructFieldIndices[constructedName] = fieldIndices;
+  StructFieldTypes[constructedName] = fieldTypeMap;
+
+  CompositeTypeInfo info;
+  info.kind = AggregateKind::Class;
+  info.genericParameters = {"T"};
+  info.hasARCHeader = false;
+  info.headerFieldIndex = std::numeric_limits<unsigned>::max();
+  info.fieldTypes = fieldTypeMap;
+  info.fieldModifiers = fieldModifiers;
+  info.instanceFields = instanceFields;
+  info.typeArgumentBindings["T"] = payloadInfo;
+  info.hasClassDescriptor = true;
+  info.descriptor.name = constructedName;
+  info.descriptor.kind = AggregateKind::Class;
+  info.descriptor.baseClassName = std::nullopt;
+  info.descriptor.interfaceNames.clear();
+  info.descriptor.inheritanceChain.clear();
+  info.descriptor.isAbstract = false;
+  info.descriptor.isInterface = false;
+
+  if (info.descriptorGlobalName.empty()) {
+    llvm::StructType *typeDescTy = getTypeDescriptorType();
+    std::string descriptorName =
+        makeRuntimeSymbolName("__hybrid_type_descriptor$", constructedName);
+    llvm::GlobalVariable *descriptorGV =
+        TheModule->getGlobalVariable(descriptorName, true);
+    if (!descriptorGV) {
+      descriptorGV = new llvm::GlobalVariable(
+          *TheModule, typeDescTy, false, llvm::GlobalValue::InternalLinkage,
+          llvm::Constant::getNullValue(typeDescTy), descriptorName);
+    }
+    info.descriptorGlobalName = descriptorName;
+  }
+
+  CG.compositeMetadata[constructedName] = std::move(info);
+  CompositeTypeInfo &metadata = CG.compositeMetadata[constructedName];
+  metadata.smartPointerKind = kind;
+
+  if (!emitClassRuntimeStructures(constructedName, structTy, metadata))
+    return false;
+  if (!emitSmartPointerConstructors(requestedType, structTy, metadata, kind,
+                                    payloadInfo, payloadTy))
+    return false;
+
+  return true;
+}
+
 static const CompositeTypeInfo *
 materializeCompositeInstantiation(const TypeInfo &requestedType) {
   std::string constructedName =
       stripNullableAnnotations(typeNameFromInfo(requestedType));
+  SmartPointerKind smartKind =
+      detectSmartPointerKind(requestedType.baseTypeName);
+  if (smartKind != SmartPointerKind::None) {
+    if (!materializeSmartPointerInstantiation(constructedName, requestedType,
+                                              smartKind))
+      return nullptr;
+    return lookupCompositeInfo(constructedName, /*countHit=*/false);
+  }
   if (const auto aliasIt =
           CG.compositeMetadataAliases.find(constructedName);
       aliasIt != CG.compositeMetadataAliases.end()) {
@@ -7628,9 +8209,12 @@ llvm::Value *CallExprAST::codegen() {
   if (!parseExplicitTypeArgumentSuffix(decoratedCallee, baseCallee,
                                        explicitTypeArgs))
     return nullptr;
+  bool calleeIsCompositeType = false;
   if (decoratedCallee.find('<') != std::string::npos) {
     TypeInfo boundCallee = applyActiveTypeBindings(makeTypeInfo(decoratedCallee));
     decoratedCallee = typeNameFromInfo(boundCallee);
+    if (lookupCompositeInfo(decoratedCallee, /*countHit=*/false))
+      calleeIsCompositeType = true;
   }
   const auto *functionTemplates =
       lookupGenericFunctionTemplates(baseCallee);
@@ -7654,7 +8238,7 @@ llvm::Value *CallExprAST::codegen() {
   }
   bool treatAsFunctionGenerics =
       !explicitTypeArgs.empty() &&
-      FindGenericTemplate(baseCallee) == nullptr;
+      FindGenericTemplate(baseCallee) == nullptr && !calleeIsCompositeType;
   bool preferGeneric = treatAsFunctionGenerics;
 
   if (!treatAsFunctionGenerics && explicitTypeArgs.empty() &&
@@ -7759,7 +8343,7 @@ llvm::Value *CallExprAST::codegen() {
       return nullptr;
   }
 
-  if (decoratedCallee.find('<') != std::string::npos)
+  if (decoratedCallee.find('<') != std::string::npos && !calleeIsCompositeType)
     lookupCompositeInfo(decoratedCallee);
 
   if (StructTypes.contains(decoratedCallee)) {

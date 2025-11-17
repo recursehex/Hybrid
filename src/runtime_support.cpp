@@ -20,7 +20,17 @@ struct HybridTypeDescriptor {
   std::uint32_t vtableSize;
   const HybridInterfaceEntry *interfaces;
   std::uint32_t interfaceCount;
+  void (*dealloc)(void *);
 };
+
+struct HybridARCHeader {
+  std::uint32_t strongCount;
+  std::uint32_t weakCount;
+  const HybridTypeDescriptor *descriptor;
+};
+
+static uint16_t *dup_utf16_from_utf8(const char *utf8);
+static char *dup_utf8_from_utf16(const uint16_t *utf16);
 
 static size_t hybrid_strlen16(const uint16_t *str) {
   if (!str)
@@ -67,6 +77,31 @@ const void **hybrid_lookup_interface_table(const HybridTypeDescriptor *typeDesc,
     current = current->baseType;
   }
   return nullptr;
+}
+
+int __hybrid_debug_descriptor_matches(void *object,
+                                      const uint16_t *expectedName) {
+  if (!object)
+    return 0;
+  auto *header = static_cast<HybridARCHeader *>(object);
+  if (!header || !header->descriptor || !header->descriptor->typeName)
+    return 0;
+  char *expectedUtf8 = dup_utf8_from_utf16(expectedName);
+  if (!expectedUtf8)
+    return 0;
+  bool matches =
+      std::strcmp(header->descriptor->typeName, expectedUtf8) == 0;
+  std::free(expectedUtf8);
+  return matches ? 1 : 0;
+}
+
+int __hybrid_debug_strong_count(void *object) {
+  if (!object)
+    return 0;
+  auto *header = static_cast<HybridARCHeader *>(object);
+  if (!header)
+    return 0;
+  return static_cast<int>(header->strongCount);
 }
 
 static uint16_t *alloc_utf16_buffer(size_t len) {

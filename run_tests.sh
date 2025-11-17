@@ -138,7 +138,14 @@ struct HybridTypeDescriptor {
     uint32_t vtableSize;
     const HybridInterfaceEntry *interfaces;
     uint32_t interfaceCount;
+    void (*dealloc)(void *);
 };
+
+typedef struct {
+    uint32_t strongCount;
+    uint32_t weakCount;
+    const HybridTypeDescriptor *descriptor;
+} HybridARCHeader;
 
 static size_t hybrid_strlen16(const uint16_t *str) {
     if (!str) {
@@ -349,6 +356,70 @@ const void **hybrid_lookup_interface_table(const HybridTypeDescriptor *typeDesc,
         current = current->baseType;
     }
     return NULL;
+}
+
+int __hybrid_debug_descriptor_matches(void *object,
+                                      const uint16_t *expectedName) {
+    if (!object)
+        return 0;
+    HybridARCHeader *header = (HybridARCHeader *)object;
+    if (!header || !header->descriptor || !header->descriptor->typeName)
+        return 0;
+    size_t len = hybrid_strlen16(expectedName);
+    char *buffer = (char *)malloc(len + 1);
+    if (!buffer)
+        return 0;
+    for (size_t i = 0; i < len; ++i)
+        buffer[i] = (char)(expectedName[i] & 0xFF);
+    buffer[len] = '\0';
+    int matches = strcmp(header->descriptor->typeName, buffer) == 0;
+    free(buffer);
+    return matches;
+}
+
+int __hybrid_debug_strong_count(void *object) {
+    if (!object)
+        return 0;
+    HybridARCHeader *header = (HybridARCHeader *)object;
+    return header ? (int)header->strongCount : 0;
+}
+
+void *hybrid_retain(void *obj) { return obj; }
+void hybrid_release(void *obj) { (void)obj; }
+void *hybrid_autorelease(void *obj) { return obj; }
+void hybrid_dealloc(void *obj) { (void)obj; }
+
+typedef struct {
+    int strong;
+    int weak;
+    void *payload;
+} HybridSharedControlForTests;
+
+void *__hybrid_shared_control_create(void *payload) {
+    HybridSharedControlForTests *ctrl =
+        (HybridSharedControlForTests *)malloc(sizeof(HybridSharedControlForTests));
+    if (!ctrl)
+        return NULL;
+    ctrl->strong = 1;
+    ctrl->weak = 1;
+    ctrl->payload = payload;
+    return ctrl;
+}
+
+void __hybrid_shared_control_retain_strong(void *control) {
+    (void)control;
+}
+
+void __hybrid_shared_control_release_strong(void *control) {
+    HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
+    if (ctrl)
+        free(ctrl);
+}
+
+void __hybrid_shared_control_retain_weak(void *control) { (void)control; }
+
+void __hybrid_shared_control_release_weak(void *control) {
+    (void)control;
 }
 
 EOF

@@ -98,7 +98,11 @@ public:
         originalToken(currentParser().curTok),
         originalLocation(currentParser().currentTokenLocation),
         originalPreviousToken(currentParser().previousToken),
-        originalPreviousLocation(currentParser().previousTokenLocation) {
+        originalPreviousLocation(currentParser().previousTokenLocation),
+        originalIdentifier(currentLexer().identifierStr),
+        originalStringLiteral(currentLexer().stringLiteral),
+        originalNumericLiteral(currentLexer().numericLiteral),
+        originalCharLiteral(currentLexer().charLiteral) {
     if (active)
       tokenCaptureStack().push_back(&capturedTokens);
   }
@@ -119,10 +123,10 @@ public:
     parser.currentTokenLocation = originalLocation;
     parser.previousToken = originalPreviousToken;
     parser.previousTokenLocation = originalPreviousLocation;
-    currentLexer().identifierStr.clear();
-    currentLexer().stringLiteral.clear();
-    currentLexer().numericLiteral = NumericLiteral();
-    currentLexer().charLiteral = 0;
+    currentLexer().identifierStr = originalIdentifier;
+    currentLexer().stringLiteral = originalStringLiteral;
+    currentLexer().numericLiteral = originalNumericLiteral;
+    currentLexer().charLiteral = originalCharLiteral;
     for (auto it = capturedTokens.rbegin(); it != capturedTokens.rend(); ++it)
       parser.pushReplayToken(*it);
     tokenCaptureStack().pop_back();
@@ -142,6 +146,10 @@ private:
   SourceLocation originalLocation{};
   int originalPreviousToken = 0;
   SourceLocation originalPreviousLocation{};
+  std::string originalIdentifier;
+  std::string originalStringLiteral;
+  NumericLiteral originalNumericLiteral;
+  char originalCharLiteral = 0;
   std::vector<ParserContext::PendingToken> capturedTokens;
 };
 
@@ -1528,6 +1536,10 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     return LogError(
         "Unexpected token while parsing an expression",
         "Insert an expression or remove the unexpected token.");
+  case tok_unique:
+  case tok_shared:
+  case tok_weak:
+    return ParseIdentifierExpr();
   case tok_identifier:
     return ParseIdentifierExpr();
   case tok_this:
@@ -1991,12 +2003,26 @@ std::unique_ptr<FunctionAST> ParseDefinition() {
   return std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
 }
 
-/// external ::= 'extern' prototype
+/// external ::= 'extern' ['unsafe'] prototype
 std::unique_ptr<PrototypeAST> ParseExtern() {
   getNextToken(); // eat extern.
-  auto Proto = ParsePrototype();
+  SkipNewlines();
+
+  bool explicitUnsafe = false;
+  if (CurTok == tok_unsafe) {
+    explicitUnsafe = true;
+    getNextToken(); // eat 'unsafe'
+    SkipNewlines();
+    enterUnsafeContext();
+  }
+
+  bool prototypeIsUnsafe = explicitUnsafe || isInUnsafeContext();
+  auto Proto = ParsePrototype(prototypeIsUnsafe);
   if (Proto)
     Proto->markAsExtern();
+
+  if (explicitUnsafe)
+    exitUnsafeContext();
   return Proto;
 }
 

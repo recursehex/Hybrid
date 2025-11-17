@@ -22,6 +22,17 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 
+struct ARCLifetimeSlot {
+  llvm::Value *storage = nullptr;
+  TypeInfo type;
+  bool isTemporary = false;
+};
+
+struct ActiveReturnMetadata {
+  TypeInfo type;
+  bool returnsByRef = false;
+};
+
 struct FunctionOverload {
   std::string mangledName;
   TypeInfo returnType;
@@ -48,6 +59,12 @@ struct CompositeMemberInfo {
   bool isGenericTemplate = false;
   unsigned genericArity = 0;
   llvm::Function *directFunction = nullptr;
+};
+
+struct InstanceFieldInfo {
+  std::string name;
+  unsigned index = 0;
+  TypeInfo type;
 };
 
 struct CompositeTypeInfo {
@@ -80,11 +97,16 @@ struct CompositeTypeInfo {
   std::map<std::string, std::string> interfaceTableGlobals;
   std::vector<std::string> interfaceMethodOrder;
   std::map<std::string, unsigned> interfaceMethodSlotMap;
+  std::vector<InstanceFieldInfo> instanceFields;
+  unsigned headerFieldIndex = std::numeric_limits<unsigned>::max();
+  bool hasARCHeader = false;
+  std::string deallocFunctionName;
   std::optional<std::string> thisOverride;
   std::map<std::string, TypeInfo> typeArgumentBindings;
   std::map<std::string, std::vector<std::string>> genericMethodInstantiations;
   bool hasClassDescriptor = false;
   ClassDescriptor descriptor;
+  SmartPointerKind smartPointerKind = SmartPointerKind::None;
 };
 
 struct GenericsDiagnostics {
@@ -157,6 +179,9 @@ struct CodegenContext {
   std::map<std::string, std::string> compositeLayoutCache;
   std::map<std::string, std::string> compositeMetadataAliases;
   std::map<std::string, std::string> genericFunctionInstantiationCache;
+  std::map<std::string, std::string> arcSpecializationCache;
+  std::vector<std::vector<ARCLifetimeSlot>> arcScopeStack;
+  std::vector<ActiveReturnMetadata> functionReturnStack;
 
   void reset();
 };
@@ -209,6 +234,9 @@ inline void CodegenContext::reset() {
   compositeLayoutCache.clear();
   compositeMetadataAliases.clear();
   genericFunctionInstantiationCache.clear();
+  arcSpecializationCache.clear();
+  arcScopeStack.clear();
+  functionReturnStack.clear();
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

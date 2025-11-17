@@ -29,7 +29,10 @@ set(HYBRID_HEADERS
 add_executable(hybrid ${HYBRID_SOURCES} ${HYBRID_HEADERS})
 
 target_compile_definitions(hybrid PRIVATE
-    HYBRID_RUNTIME_SUPPORT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/runtime_support.cpp")
+    HYBRID_RUNTIME_SUPPORT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/runtime_support.cpp"
+    HYBRID_ARC_RUNTIME_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/runtime/arc.cpp"
+    HYBRID_REFCOUNT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/memory/ref_count.cpp"
+    HYBRID_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Link LLVM libraries
 target_link_libraries(hybrid PRIVATE ${llvm_libs})

@@ -455,8 +455,17 @@ int main(int argc, char **argv) {
 
 #ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
           std::string command = "clang \"" + tempPathStr + "\" \"" +
-                                std::string(HYBRID_RUNTIME_SUPPORT_SOURCE) +
-                                "\" -o \"" + targetOutput + "\"";
+                                std::string(HYBRID_RUNTIME_SUPPORT_SOURCE) + "\"";
+#ifdef HYBRID_ARC_RUNTIME_SOURCE
+          command += " \"" + std::string(HYBRID_ARC_RUNTIME_SOURCE) + "\"";
+#endif
+#ifdef HYBRID_REFCOUNT_SOURCE
+          command += " \"" + std::string(HYBRID_REFCOUNT_SOURCE) + "\"";
+#endif
+#ifdef HYBRID_SOURCE_DIR
+          command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "\"";
+#endif
+          command += " -std=c++17 -o \"" + targetOutput + "\"";
 #else
           std::string command = "clang \"" + tempPathStr + "\" -o \"" + targetOutput + "\"";
 #endif

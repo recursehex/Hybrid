@@ -210,6 +210,11 @@ void HandleUnsafe() {
     enterUnsafeContext();
     HandleInterfaceDefinition();
     exitUnsafeContext();
+  } else if (CurTok == tok_extern) {
+    // Support 'unsafe extern' prototypes.
+    enterUnsafeContext();
+    HandleExtern();
+    exitUnsafeContext();
   } else {
     // Handle unsafe function definition
     enterUnsafeContext();
