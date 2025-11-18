@@ -13,6 +13,11 @@
 
 #include "ast.h"
 
+namespace analysis {
+struct LifetimePlan;
+struct VariableLifetimePlan;
+} // namespace analysis
+
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalValue.h"
@@ -26,6 +31,7 @@ struct ARCLifetimeSlot {
   llvm::Value *storage = nullptr;
   TypeInfo type;
   bool isTemporary = false;
+  const analysis::VariableLifetimePlan *lifetimeInfo = nullptr;
 };
 
 struct ActiveReturnMetadata {
@@ -107,6 +113,9 @@ struct CompositeTypeInfo {
   bool hasClassDescriptor = false;
   ClassDescriptor descriptor;
   SmartPointerKind smartPointerKind = SmartPointerKind::None;
+  std::string smartPointerCopyHelper;
+  std::string smartPointerMoveHelper;
+  std::string smartPointerDestroyHelper;
 };
 
 struct GenericsDiagnostics {
@@ -182,6 +191,7 @@ struct CodegenContext {
   std::map<std::string, std::string> arcSpecializationCache;
   std::vector<std::vector<ARCLifetimeSlot>> arcScopeStack;
   std::vector<ActiveReturnMetadata> functionReturnStack;
+  const analysis::LifetimePlan *currentLifetimePlan = nullptr;
 
   void reset();
 };
@@ -237,6 +247,7 @@ inline void CodegenContext::reset() {
   arcSpecializationCache.clear();
   arcScopeStack.clear();
   functionReturnStack.clear();
+  currentLifetimePlan = nullptr;
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

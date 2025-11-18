@@ -105,6 +105,34 @@ static bool convertUTF8LiteralToUTF16(const std::string &input,
 #define LoopContinueBlocks (CG.loopContinueBlocks)
 #define NonNullFacts (CG.nonNullFactsStack)
 
+static const analysis::VariableLifetimePlan *
+lookupLifetimePlanEntry(const std::string &name) {
+  const analysis::LifetimePlan *plan = CG.currentLifetimePlan;
+  if (!plan)
+    return nullptr;
+  auto it = plan->variables.find(name);
+  if (it == plan->variables.end())
+    return nullptr;
+  return &it->second;
+}
+
+class ActiveLifetimePlanScope {
+public:
+  explicit ActiveLifetimePlanScope(const analysis::LifetimePlan *plan)
+      : previous(CG.currentLifetimePlan) {
+    CG.currentLifetimePlan = plan;
+  }
+
+  ActiveLifetimePlanScope(const ActiveLifetimePlanScope &) = delete;
+  ActiveLifetimePlanScope &
+  operator=(const ActiveLifetimePlanScope &) = delete;
+
+  ~ActiveLifetimePlanScope() { CG.currentLifetimePlan = previous; }
+
+private:
+  const analysis::LifetimePlan *previous = nullptr;
+};
+
 static void noteTypeCacheHit() {
   auto &metrics = CG.genericsMetrics;
   if (metrics.enabled)
@@ -138,7 +166,28 @@ static llvm::PointerType *pointerType(llvm::Type * /*elementType*/,
   return llvm::PointerType::get(*TheContext, addressSpace);
 }
 
+static llvm::FunctionCallee getHybridRetainFunction();
+static llvm::FunctionCallee getHybridReleaseFunction();
+static llvm::FunctionCallee getHybridAutoreleaseFunction();
+static llvm::FunctionCallee getHybridDeallocFunction();
+static llvm::FunctionCallee getHybridAllocObjectFunction();
+static llvm::FunctionCallee getHybridAllocArrayFunction();
+static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
+                                  std::string_view label);
+static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
+                           std::string_view label);
+static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
+                                     llvm::Value *incoming,
+                                     const TypeInfo &info,
+                                     std::string_view label);
+static bool emitSmartPointerHelpers(const std::string &constructedName,
+                                    llvm::StructType *structTy,
+                                    CompositeTypeInfo &metadata,
+                                    SmartPointerKind kind);
 static llvm::FunctionCallee getSharedControlCreateFunction();
+static llvm::FunctionCallee getSharedControlRetainStrongFunction();
+static llvm::FunctionCallee getSharedControlReleaseStrongFunction();
+static llvm::FunctionCallee getSharedControlReleaseWeakFunction();
 static llvm::FunctionCallee getSharedControlRetainWeakFunction();
 static llvm::StructType *
 getOrCreateSharedControlBlockType(const std::string &constructedName,
@@ -1163,7 +1212,7 @@ static llvm::StructType *getTypeDescriptorType() {
                                          "__HybridTypeDescriptor");
 }
 
-static llvm::StructType *getClassHeaderType() {
+static llvm::StructType *getArcHeaderType() {
   if (auto *existing = llvm::StructType::getTypeByName(*TheContext,
                                                        "__HybridClassHeader"))
     return existing;
@@ -1796,6 +1845,30 @@ static llvm::FunctionCallee getSharedControlCreateFunction() {
       "__hybrid_shared_control_create", fnType);
 }
 
+static llvm::FunctionCallee getSharedControlRetainStrongFunction() {
+  auto *opaquePtrTy = pointerType();
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {opaquePtrTy}, false);
+  return TheModule->getOrInsertFunction(
+      "__hybrid_shared_control_retain_strong", fnType);
+}
+
+static llvm::FunctionCallee getSharedControlReleaseStrongFunction() {
+  auto *opaquePtrTy = pointerType();
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {opaquePtrTy}, false);
+  return TheModule->getOrInsertFunction(
+      "__hybrid_shared_control_release_strong", fnType);
+}
+
+static llvm::FunctionCallee getSharedControlReleaseWeakFunction() {
+  auto *opaquePtrTy = pointerType();
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {opaquePtrTy}, false);
+  return TheModule->getOrInsertFunction(
+      "__hybrid_shared_control_release_weak", fnType);
+}
+
 static llvm::FunctionCallee getSharedControlRetainWeakFunction() {
   auto *opaquePtrTy = pointerType();
   auto *fnType = llvm::FunctionType::get(
@@ -1803,6 +1876,295 @@ static llvm::FunctionCallee getSharedControlRetainWeakFunction() {
   return TheModule->getOrInsertFunction(
       "__hybrid_shared_control_retain_weak", fnType);
 }
+
+static bool typeInfoIsConcrete(const TypeInfo &info) {
+  if (info.isGenericParameter)
+    return false;
+  for (const auto &arg : info.typeArguments) {
+    if (!typeInfoIsConcrete(arg))
+      return false;
+  }
+  return true;
+}
+
+static const CompositeTypeInfo *
+resolveSmartPointerMetadata(const TypeInfo &info) {
+  if (!info.isSmartPointer())
+    return nullptr;
+  if (!typeInfoIsConcrete(info))
+    return nullptr;
+  std::string constructed =
+      stripNullableAnnotations(typeNameFromInfo(info));
+  if (constructed.empty())
+    return nullptr;
+  if (const CompositeTypeInfo *meta =
+          lookupCompositeInfo(constructed, /*countHit=*/false))
+    return meta;
+  TypeInfo requested = makeTypeInfo(constructed);
+  return materializeCompositeInstantiation(requested);
+}
+
+static std::string buildArcOpLabel(std::string_view label,
+                                   std::string_view op) {
+  std::string name = "arc";
+  if (!label.empty()) {
+    name.push_back('.');
+    name.append(label);
+  }
+  if (!op.empty()) {
+    name.push_back('.');
+    name.append(op);
+  }
+  return name;
+}
+
+static bool emitSmartPointerInitFromVariable(const TypeInfo &declaredInfo,
+                                             llvm::Value *destPtr,
+                                             VariableExprAST &sourceVar,
+                                             std::string_view label) {
+  if (!destPtr || !declaredInfo.isSmartPointer())
+    return false;
+  const CompositeTypeInfo *metadata =
+      resolveSmartPointerMetadata(declaredInfo);
+  if (!metadata)
+    return false;
+  const SmartPointerKind kind = declaredInfo.smartPointerKind;
+  const bool preferMove = kind == SmartPointerKind::Unique;
+  const std::string &helperName =
+      preferMove ? metadata->smartPointerMoveHelper
+                 : metadata->smartPointerCopyHelper;
+  if (helperName.empty()) {
+    if (preferMove) {
+      reportCompilerError(
+          "Internal error: missing smart pointer move helper for '" +
+          stripNullableAnnotations(typeNameFromInfo(declaredInfo)) + "'");
+    }
+    return false;
+  }
+  llvm::Function *helperFn = TheModule->getFunction(helperName);
+  if (!helperFn) {
+    reportCompilerError(
+        "Internal error: helper '" + helperName +
+        "' has not been materialized for smart pointer '" +
+        stripNullableAnnotations(typeNameFromInfo(declaredInfo)) + "'");
+    return false;
+  }
+
+  llvm::Value *sourcePtr = sourceVar.codegen_ptr();
+  if (!sourcePtr)
+    return false;
+  llvm::Type *expectedPtrTy =
+      helperFn->getFunctionType()->getNumParams() >= 1
+          ? helperFn->getFunctionType()->getParamType(0)
+          : nullptr;
+  if (!expectedPtrTy || !expectedPtrTy->isPointerTy())
+    return false;
+  if (sourcePtr->getType() != expectedPtrTy) {
+    sourcePtr = Builder->CreateBitCast(
+        sourcePtr, expectedPtrTy,
+        buildArcOpLabel(label, preferMove ? "smart.move.cast"
+                                          : "smart.copy.cast"));
+  }
+
+  llvm::Value *result =
+      Builder->CreateCall(helperFn, {sourcePtr},
+                          buildArcOpLabel(label, preferMove ? "smart.move.call"
+                                                            : "smart.copy.call"));
+  Builder->CreateStore(result, destPtr);
+  return true;
+}
+
+static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
+                                  std::string_view label) {
+  if (!value)
+    return nullptr;
+  if (!info.requiresARC() || info.isAlias())
+    return value;
+  if (info.isSmartPointer())
+    return value;
+  if (!value->getType()->isPointerTy())
+    return value;
+
+  llvm::Value *castValue =
+      Builder->CreateBitCast(value, pointerType(),
+                             buildArcOpLabel(label, "retain.cast"));
+  llvm::Value *retained =
+      Builder->CreateCall(getHybridRetainFunction(), {castValue},
+                          buildArcOpLabel(label, "retain.call"));
+  return Builder->CreateBitCast(retained, value->getType(),
+                                buildArcOpLabel(label, "retain.result"));
+}
+
+static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
+                           std::string_view label) {
+  if (!value)
+    return;
+  if (!info.requiresARC() || info.isAlias())
+    return;
+
+  if (info.isSmartPointer()) {
+    const bool isConcrete = typeInfoIsConcrete(info);
+    const CompositeTypeInfo *metadata =
+        isConcrete ? resolveSmartPointerMetadata(info) : nullptr;
+    if (!metadata) {
+      if (isConcrete) {
+        std::string typeLabel =
+            stripNullableAnnotations(typeNameFromInfo(info));
+        reportCompilerError(
+            "Internal error: unable to resolve smart pointer metadata for '" +
+            typeLabel + "'");
+      }
+      return;
+    }
+    if (metadata->smartPointerDestroyHelper.empty())
+      return;
+    llvm::Function *destroyFn =
+        TheModule->getFunction(metadata->smartPointerDestroyHelper);
+    if (!destroyFn) {
+      reportCompilerError("Internal error: missing smart pointer destroy "
+                          "helper '" +
+                          metadata->smartPointerDestroyHelper + "'");
+      return;
+    }
+    llvm::Value *arg = value;
+    if (!arg->getType()->isPointerTy()) {
+      llvm::AllocaInst *tmp =
+          Builder->CreateAlloca(arg->getType(), nullptr,
+                                buildArcOpLabel(label, "smart.tmp"));
+      Builder->CreateStore(arg, tmp);
+      arg = tmp;
+    }
+    llvm::Type *expectedTy =
+        destroyFn->getFunctionType()->getParamType(0);
+    if (expectedTy && arg->getType() != expectedTy) {
+      arg = Builder->CreateBitCast(
+          arg, expectedTy, buildArcOpLabel(label, "smart.cast"));
+    }
+    Builder->CreateCall(destroyFn, {arg});
+    return;
+  }
+
+  if (!value->getType()->isPointerTy())
+    return;
+
+  llvm::Value *castValue =
+      Builder->CreateBitCast(value, pointerType(),
+                             buildArcOpLabel(label, "release.cast"));
+  Builder->CreateCall(getHybridReleaseFunction(), {castValue});
+}
+
+static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
+                                     llvm::Value *incoming,
+                                     const TypeInfo &info,
+                                     std::string_view label) {
+  if (!storagePtr || !incoming) {
+    if (storagePtr)
+      Builder->CreateStore(incoming, storagePtr);
+    return incoming;
+  }
+  if (!info.requiresARC() || info.isSmartPointer() || info.isAlias()) {
+    Builder->CreateStore(incoming, storagePtr);
+    return incoming;
+  }
+
+  llvm::Type *storedTy = incoming->getType();
+  llvm::Value *current = Builder->CreateLoad(
+      storedTy, storagePtr, buildArcOpLabel(label, "managed.load.old"));
+  llvm::Value *retained =
+      emitArcRetain(incoming, info, buildArcOpLabel(label, "managed.retain"));
+  emitArcRelease(current, info, buildArcOpLabel(label, "managed.release"));
+  Builder->CreateStore(retained, storagePtr);
+  return retained;
+}
+
+static void pushArcScope() { CG.arcScopeStack.emplace_back(); }
+
+static void popArcScope(bool emitReleases, std::string_view label) {
+  if (CG.arcScopeStack.empty())
+    return;
+  std::vector<ARCLifetimeSlot> slots =
+      std::move(CG.arcScopeStack.back());
+  CG.arcScopeStack.pop_back();
+  if (!emitReleases)
+    return;
+
+  for (auto it = slots.rbegin(); it != slots.rend(); ++it) {
+    const ARCLifetimeSlot &slot = *it;
+    if (slot.isTemporary)
+      continue;
+    if (!slot.storage || (!slot.type.requiresARC() &&
+                          !slot.type.isSmartPointer()))
+      continue;
+    if (slot.lifetimeInfo && slot.lifetimeInfo->escapes)
+      continue;
+
+    auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(slot.storage);
+    if (!alloca)
+      continue;
+    llvm::Type *storedTy = alloca->getAllocatedType();
+    if (!storedTy)
+      continue;
+    llvm::Value *current = Builder->CreateLoad(
+        storedTy, slot.storage,
+        buildArcOpLabel(label, "scope.load"));
+    emitArcRelease(
+        current, slot.type,
+        buildArcOpLabel(label, "scope.release"));
+    Builder->CreateStore(llvm::Constant::getNullValue(storedTy),
+                         slot.storage);
+  }
+}
+
+static void emitArcScopeDrainAll(std::string_view label) {
+  while (!CG.arcScopeStack.empty())
+    popArcScope(true, label);
+}
+
+static void registerArcLocal(const std::string &name, llvm::Value *storage,
+                             const TypeInfo &info, bool isTemporary) {
+  if (!storage || info.isAlias() || !info.requiresARC())
+    return;
+  if (CG.arcScopeStack.empty())
+    pushArcScope();
+  ARCLifetimeSlot slot;
+  slot.storage = storage;
+  slot.type = info;
+  slot.isTemporary = isTemporary;
+  slot.lifetimeInfo = name.empty() ? nullptr : lookupLifetimePlanEntry(name);
+  CG.arcScopeStack.back().push_back(slot);
+}
+
+class ArcScopeGuard {
+public:
+  explicit ArcScopeGuard(std::string label)
+      : label(std::move(label)), originDepth(CG.arcScopeStack.size()),
+        active(true) {
+    pushArcScope();
+  }
+
+  ArcScopeGuard(const ArcScopeGuard &) = delete;
+  ArcScopeGuard &operator=(const ArcScopeGuard &) = delete;
+
+  ~ArcScopeGuard() {
+    if (!active)
+      return;
+    if (CG.arcScopeStack.size() > originDepth)
+      popArcScope(true, label);
+  }
+
+  void dismissWithoutDrain() {
+    if (!active)
+      return;
+    if (CG.arcScopeStack.size() > originDepth)
+      popArcScope(false, label);
+    active = false;
+  }
+
+private:
+  std::string label;
+  std::size_t originDepth = 0;
+  bool active = false;
+};
 
 static llvm::StructType *
 getOrCreateSharedControlBlockType(const std::string &constructedName,
@@ -2570,6 +2932,12 @@ static std::string makeMemberKey(const std::string &owner, const std::string &me
   return owner + "." + member;
 }
 
+static llvm::Value *emitResolvedCallInternal(
+    const std::string &calleeBase, std::vector<llvm::Value *> ArgValues,
+    const std::vector<bool> &ArgIsRef,
+    const std::vector<std::unique_ptr<ExprAST>> *originalArgs,
+    bool preferGeneric, FunctionOverload *forced, ExprAST *typeOwner);
+
 static void markStaticFieldInitialized(const std::string &owner, const std::string &member) {
   currentCodegen().initializedStaticFields.insert(makeMemberKey(owner, member));
 }
@@ -2586,6 +2954,258 @@ static void noteMemberAssignment(const std::string &ownerName,
       ctx && ctx->name == ownerName && ctx->kind == MethodKind::Constructor) {
     ctx->initializedInstanceFields.insert(memberName);
   }
+}
+
+static bool emitConstructorInitializers(const std::string &typeKey,
+                                        llvm::StructType *structTy,
+                                        llvm::AllocaInst *structPtr,
+                                        CompositeTypeInfo &metadata,
+                                        std::vector<ConstructorInitializer> &initializers) {
+  if (initializers.empty())
+    return true;
+  if (!structTy || !structPtr)
+    return false;
+
+  std::set<std::string> seenFields;
+  for (auto &init : initializers) {
+    if (init.kind == ConstructorInitializer::Kind::Base) {
+      if (!metadata.baseClass) {
+        reportCompilerError("Constructor tries to initialize base '" +
+                                init.target +
+                                "' but '" + typeKey + "' does not inherit it");
+        return false;
+      }
+      auto baseStructIt = StructTypes.find(*metadata.baseClass);
+      if (baseStructIt == StructTypes.end()) {
+        reportCompilerError("Base class '" + *metadata.baseClass +
+                            "' is not available for initializer in '" +
+                                typeKey + "'");
+        return false;
+      }
+      llvm::StructType *baseStructTy = baseStructIt->second;
+      std::vector<bool> argIsRef;
+      argIsRef.reserve(init.arguments.size());
+      std::vector<llvm::Value *> argValues;
+      argValues.reserve(init.arguments.size());
+      for (auto &argExpr : init.arguments) {
+        bool isRef = dynamic_cast<RefExprAST *>(argExpr.get()) != nullptr;
+        argIsRef.push_back(isRef);
+        llvm::Value *value = argExpr->codegen();
+        if (!value)
+          return false;
+        argValues.push_back(value);
+      }
+
+      llvm::Value *baseValue = emitResolvedCallInternal(
+          *metadata.baseClass, std::move(argValues), argIsRef,
+          &init.arguments, /*preferGeneric=*/false, nullptr, nullptr);
+      if (!baseValue)
+        return false;
+
+      if (baseValue->getType()->isPointerTy()) {
+        baseValue = Builder->CreateLoad(baseStructTy, baseValue,
+                                        "ctor.base.value");
+      } else if (baseValue->getType() != baseStructTy) {
+        baseValue = Builder->CreateBitCast(baseValue, baseStructTy,
+                                           "ctor.base.cast");
+      }
+
+      llvm::Value *basePtr = Builder->CreateBitCast(
+          structPtr, pointerType(baseStructTy), "ctor.base.ptr");
+      Builder->CreateStore(baseValue, basePtr);
+      if (const CompositeTypeInfo *baseInfo =
+              lookupCompositeInfo(*metadata.baseClass)) {
+        for (const auto &fieldEntry : baseInfo->fieldTypes)
+          noteMemberAssignment(typeKey, fieldEntry.first, false);
+      }
+      continue;
+    }
+
+    auto staticIt = metadata.staticFieldModifiers.find(init.target);
+    if (staticIt != metadata.staticFieldModifiers.end()) {
+      reportCompilerError("Constructor initializer cannot target static field '" +
+                              init.target + "' in '" + typeKey + "'");
+      return false;
+    }
+
+    if (!seenFields.insert(init.target).second) {
+      reportCompilerError("Constructor initializer duplicates field '" +
+                          init.target + "' in '" + typeKey + "'");
+      return false;
+    }
+
+    auto fieldTypeIt = metadata.fieldTypes.find(init.target);
+    if (fieldTypeIt == metadata.fieldTypes.end()) {
+      reportCompilerError("Unknown field '" + init.target +
+                          "' in constructor initializer for '" + typeKey + "'");
+      return false;
+    }
+
+    auto indicesIt = StructFieldIndices.find(typeKey);
+    if (indicesIt == StructFieldIndices.end()) {
+      reportCompilerError("Internal error: missing field layout for '" +
+                          typeKey + "'");
+      return false;
+    }
+    std::optional<unsigned> fieldIndex;
+    for (const auto &entry : indicesIt->second) {
+      if (entry.first == init.target) {
+        fieldIndex = entry.second;
+        break;
+      }
+    }
+    if (!fieldIndex) {
+      reportCompilerError("Field '" + init.target +
+                          "' is not an instance member of '" + typeKey + "'");
+      return false;
+    }
+
+    llvm::Type *fieldLLVMType = structTy->getElementType(*fieldIndex);
+    llvm::Value *fieldPtr = Builder->CreateStructGEP(
+        structTy, structPtr, *fieldIndex, init.target + ".ctor.ptr");
+    if (init.arguments.empty() || !init.arguments.front()) {
+      reportCompilerError("Field initializer for '" + init.target +
+                          "' requires a value");
+      return false;
+    }
+    llvm::Value *fieldValue = init.arguments.front()->codegen();
+    if (!fieldValue)
+      return false;
+
+    const std::string &fieldTypeName = fieldTypeIt->second;
+    if (fieldLLVMType && fieldValue->getType() != fieldLLVMType)
+      fieldValue = castToType(fieldValue, fieldLLVMType, fieldTypeName);
+
+    TypeInfo fieldInfo = makeTypeInfo(fieldTypeName);
+    finalizeTypeInfoMetadata(fieldInfo);
+    emitManagedStore(fieldPtr, fieldValue, fieldInfo,
+                     typeKey + "." + init.target + ".ctorinit");
+    noteMemberAssignment(typeKey, init.target, false);
+  }
+
+  return true;
+}
+
+static bool emitCompositeDealloc(const std::string &typeKey,
+                                 llvm::StructType *structTy,
+                                 CompositeTypeInfo &metadata) {
+  if (!structTy)
+    return true;
+  if (!metadata.hasARCHeader)
+    return true;
+
+  auto *voidTy = llvm::Type::getVoidTy(*TheContext);
+  auto *opaquePtrTy = pointerType();
+  llvm::FunctionType *fnTy =
+      llvm::FunctionType::get(voidTy, {opaquePtrTy}, false);
+  std::string symbol = makeRuntimeSymbolName("__hybrid_dealloc$", typeKey);
+  llvm::Function *fn = TheModule->getFunction(symbol);
+  if (fn) {
+    if (!fn->isDeclaration()) {
+      metadata.deallocFunctionName = symbol;
+      return true;
+    }
+    if (fn->getFunctionType() != fnTy) {
+      reportCompilerError("Internal error: dealloc prototype mismatch for '" +
+                          typeKey + "'");
+      return false;
+    }
+  } else {
+    fn = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage, symbol,
+                                TheModule.get());
+  }
+  metadata.deallocFunctionName = symbol;
+
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(*TheContext, "entry", fn);
+  auto *savedBlock = Builder->GetInsertBlock();
+  llvm::BasicBlock::iterator savedPoint;
+  bool hadInsertPoint = savedBlock != nullptr;
+  if (hadInsertPoint)
+    savedPoint = Builder->GetInsertPoint();
+
+  llvm::BasicBlock *bodyBB =
+      llvm::BasicBlock::Create(*TheContext, "dealloc.body", fn);
+  llvm::BasicBlock *retBB =
+      llvm::BasicBlock::Create(*TheContext, "dealloc.ret", fn);
+
+  Builder->SetInsertPoint(entry);
+  llvm::Argument &rawObject = *fn->arg_begin();
+  rawObject.setName("object");
+  llvm::Value *isNull = Builder->CreateICmpEQ(
+      &rawObject, llvm::ConstantPointerNull::get(opaquePtrTy),
+      "dealloc.isnull");
+  Builder->CreateCondBr(isNull, retBB, bodyBB);
+
+  auto restoreInsertPoint = [&]() {
+    if (hadInsertPoint)
+      Builder->SetInsertPoint(savedBlock, savedPoint);
+    else
+      Builder->ClearInsertionPoint();
+  };
+
+  Builder->SetInsertPoint(bodyBB);
+  llvm::Value *typedPtr = Builder->CreateBitCast(
+      &rawObject, pointerType(structTy), "dealloc.typed");
+
+  auto indicesIt = StructFieldIndices.find(typeKey);
+  if (indicesIt == StructFieldIndices.end()) {
+    reportCompilerError("Internal error: missing layout info while emitting dealloc for '" +
+                        typeKey + "'");
+    restoreInsertPoint();
+    return false;
+  }
+
+  for (const auto &fieldEntry : metadata.fieldTypes) {
+    const std::string &fieldName = fieldEntry.first;
+    const std::string &fieldTypeName = fieldEntry.second;
+    auto fieldIndexIt = std::find_if(
+        indicesIt->second.begin(), indicesIt->second.end(),
+        [&](const auto &pair) { return pair.first == fieldName; });
+    if (fieldIndexIt == indicesIt->second.end())
+      continue;
+
+    TypeInfo fieldInfo = makeTypeInfo(fieldTypeName);
+    finalizeTypeInfoMetadata(fieldInfo);
+    if (!fieldInfo.requiresARC() && !fieldInfo.isSmartPointer())
+      continue;
+
+    unsigned index = fieldIndexIt->second;
+    llvm::Value *fieldPtr = Builder->CreateStructGEP(
+        structTy, typedPtr, index, fieldName + ".dtor.ptr");
+    llvm::Type *elementTy = structTy->getElementType(index);
+    llvm::Value *fieldVal = Builder->CreateLoad(
+        elementTy, fieldPtr, fieldName + ".dtor.load");
+    emitArcRelease(fieldVal, fieldInfo, fieldName + ".dtor.release");
+  }
+
+  if (metadata.baseClass) {
+    const CompositeTypeInfo *baseInfo =
+        lookupCompositeInfo(*metadata.baseClass);
+    if (!baseInfo || baseInfo->deallocFunctionName.empty()) {
+      reportCompilerError("Internal error: missing dealloc helper for base class '" +
+                          *metadata.baseClass + "' while emitting '" + typeKey + "'");
+      restoreInsertPoint();
+      return false;
+    }
+    llvm::Function *baseFn =
+        TheModule->getFunction(baseInfo->deallocFunctionName);
+    if (!baseFn) {
+      reportCompilerError("Internal error: function '" +
+                          baseInfo->deallocFunctionName +
+                          "' missing while emitting dealloc for '" + typeKey + "'");
+      restoreInsertPoint();
+      return false;
+    }
+    Builder->CreateCall(baseFn, {&rawObject});
+  } else {
+    Builder->CreateCall(getHybridDeallocFunction(), {&rawObject});
+  }
+
+  Builder->CreateBr(retBB);
+  Builder->SetInsertPoint(retBB);
+  Builder->CreateRetVoid();
+  restoreInsertPoint();
+  return true;
 }
 
 static bool memberHasDeclarationInitializer(const CompositeTypeInfo &info,
@@ -3302,6 +3922,29 @@ createSmartPointerCtorFunction(const std::string &constructedName,
   return fn;
 }
 
+static llvm::Function *
+createSmartPointerHelperFunction(const std::string &constructedName,
+                                 const std::string &suffix,
+                                 llvm::Type *returnType,
+                                 const std::vector<llvm::Type *> &paramTypes,
+                                 const std::vector<std::string> &argNames) {
+  std::string fnName = "__hybrid_smart_" + sanitizeForMangle(constructedName) +
+                       "$" + suffix;
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(returnType, paramTypes, false);
+  llvm::Function *fn = llvm::Function::Create(
+      fnType, llvm::Function::ExternalLinkage, fnName, TheModule.get());
+  unsigned idx = 0;
+  for (auto &arg : fn->args()) {
+    if (idx < argNames.size() && !argNames[idx].empty())
+      arg.setName(argNames[idx]);
+    else
+      arg.setName("arg" + std::to_string(idx));
+    ++idx;
+  }
+  return fn;
+}
+
 static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
                                          llvm::StructType *structTy,
                                          CompositeTypeInfo &metadata,
@@ -3385,6 +4028,7 @@ static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
     return true;
   };
 
+  const bool payloadUsesARC = payloadInfo.requiresARC();
   bool success = true;
   switch (kind) {
   case SmartPointerKind::Unique: {
@@ -3411,24 +4055,30 @@ static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
 
     std::vector<TypeInfo> params{payloadInfo};
     std::vector<llvm::Type *> llvmParams{payloadTy};
-    if (!buildCtor(
-            "unique.payload", params, llvmParams, {"payload"},
-            [&](llvm::Function *fn, llvm::AllocaInst *storage) {
-              llvm::Argument &payloadArg = *fn->arg_begin();
-              llvm::Value *valuePtr = Builder->CreateStructGEP(
-                  structTy, storage, valueField->index, "smart.value.ptr");
-              auto *opaquePtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
-              llvm::Value *opaquePayload = Builder->CreateBitCast(
-                  &payloadArg, opaquePtrTy, "smart.unique.payload.cast");
-              llvm::Value *retainedOpaque = Builder->CreateCall(
-                  getHybridRetainFunction(), {opaquePayload},
-                  "smart.unique.payload.retain");
-              llvm::Value *retained =
-                  Builder->CreateBitCast(retainedOpaque, storedType,
-                                         "smart.unique.payload.value");
-              Builder->CreateStore(retained, valuePtr);
-              return storeBoolField(storage, true);
-            }))
+	    if (!buildCtor(
+	            "unique.payload", params, llvmParams, {"payload"},
+	            [&](llvm::Function *fn, llvm::AllocaInst *storage) {
+	              llvm::Argument &payloadArg = *fn->arg_begin();
+	              llvm::Value *valuePtr = Builder->CreateStructGEP(
+	                  structTy, storage, valueField->index, "smart.value.ptr");
+	              if (payloadInfo.requiresARC()) {
+	                auto *opaquePtrTy =
+	                    pointerType(llvm::Type::getInt8Ty(*TheContext));
+	                llvm::Value *opaquePayload = Builder->CreateBitCast(
+	                    &payloadArg, opaquePtrTy,
+	                    "smart.unique.payload.cast");
+	                llvm::Value *retainedOpaque = Builder->CreateCall(
+	                    getHybridRetainFunction(), {opaquePayload},
+	                    "smart.unique.payload.retain");
+	                llvm::Value *retained =
+	                    Builder->CreateBitCast(retainedOpaque, storedType,
+	                                           "smart.unique.payload.value");
+	                Builder->CreateStore(retained, valuePtr);
+	              } else {
+	                Builder->CreateStore(&payloadArg, valuePtr);
+	              }
+	              return storeBoolField(storage, true);
+	            }))
       success = false;
     break;
   }
@@ -3478,6 +4128,15 @@ static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
                     "smart.shared.payload.cast");
               Builder->CreateStore(storedPayload, payloadPtr);
 
+              llvm::Value *controlPtr = Builder->CreateStructGEP(
+                  structTy, storage, controlField->index,
+                  "smart.control.ptr");
+              if (!payloadUsesARC) {
+                Builder->CreateStore(
+                    llvm::Constant::getNullValue(controlTy), controlPtr);
+                return true;
+              }
+
               llvm::Value *opaquePayload = Builder->CreateBitCast(
                   &payloadArg, pointerType(),
                   "smart.shared.payload.cast");
@@ -3491,9 +4150,6 @@ static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
                 typedControl =
                     Builder->CreateBitCast(controlOpaque, controlTy,
                                            "smart.shared.control");
-              llvm::Value *controlPtr = Builder->CreateStructGEP(
-                  structTy, storage, controlField->index,
-                  "smart.control.ptr");
               Builder->CreateStore(typedControl, controlPtr);
               return true;
             }))
@@ -3602,6 +4258,15 @@ static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
                   Builder->CreateLoad(sharedControlTy, ownerControlPtr,
                                       "smart.shared.control");
 
+              llvm::Value *controlPtr = Builder->CreateStructGEP(
+                  structTy, storage, controlField->index,
+                  "smart.control.ptr");
+              if (!payloadUsesARC) {
+                Builder->CreateStore(
+                    llvm::Constant::getNullValue(controlTy), controlPtr);
+                return true;
+              }
+
               llvm::Value *hasControl = Builder->CreateICmpNE(
                   ownerControl,
                   llvm::Constant::getNullValue(sharedControlTy),
@@ -3622,9 +4287,6 @@ static bool emitSmartPointerConstructors(const TypeInfo &requestedType,
               Builder->CreateBr(mergeBB);
 
               Builder->SetInsertPoint(mergeBB);
-              llvm::Value *controlPtr = Builder->CreateStructGEP(
-                  structTy, storage, controlField->index,
-                  "smart.control.ptr");
               Builder->CreateStore(ownerControl, controlPtr);
               return true;
             }))
@@ -3772,14 +4434,368 @@ static bool materializeSmartPointerInstantiation(
   CG.compositeMetadata[constructedName] = std::move(info);
   CompositeTypeInfo &metadata = CG.compositeMetadata[constructedName];
   metadata.smartPointerKind = kind;
+  metadata.smartPointerCopyHelper.clear();
+  metadata.smartPointerMoveHelper.clear();
+  metadata.smartPointerDestroyHelper.clear();
 
   if (!emitClassRuntimeStructures(constructedName, structTy, metadata))
     return false;
   if (!emitSmartPointerConstructors(requestedType, structTy, metadata, kind,
                                     payloadInfo, payloadTy))
     return false;
+  if (!emitSmartPointerHelpers(constructedName, structTy, metadata, kind))
+    return false;
 
   return true;
+}
+
+static bool emitSmartPointerHelpers(const std::string &constructedName,
+                                    llvm::StructType *structTy,
+                                    CompositeTypeInfo &metadata,
+                                    SmartPointerKind kind) {
+  if (!structTy)
+    return true;
+
+  auto *savedBlock = Builder->GetInsertBlock();
+  llvm::BasicBlock::iterator savedPoint;
+  const bool hadInsertPoint = savedBlock != nullptr;
+  if (hadInsertPoint)
+    savedPoint = Builder->GetInsertPoint();
+  auto restoreInsertPoint = [&]() {
+    if (hadInsertPoint)
+      Builder->SetInsertPoint(savedBlock, savedPoint);
+    else
+      Builder->ClearInsertionPoint();
+  };
+
+  auto getField = [&](std::string_view name) -> const InstanceFieldInfo * {
+    return findInstanceField(metadata, name);
+  };
+
+  llvm::PointerType *structPtrTy = pointerType(structTy);
+
+  auto emitUniqueMoveHelper =
+      [&](const InstanceFieldInfo *valueInfo,
+          const InstanceFieldInfo *flagInfo) -> llvm::Function * {
+    if (!valueInfo || !flagInfo)
+      return nullptr;
+    llvm::Type *valueTy =
+        getTypeFromString(typeNameFromInfo(valueInfo->type));
+    llvm::Type *flagTy =
+        getTypeFromString(typeNameFromInfo(flagInfo->type));
+    if (!valueTy || !flagTy)
+      return nullptr;
+    llvm::Function *fn = createSmartPointerHelperFunction(
+        constructedName, "unique.move", structTy, {structPtrTy}, {"source"});
+    if (!fn)
+      return nullptr;
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", fn);
+    Builder->SetInsertPoint(entry);
+    llvm::Argument &sourceArg = *fn->arg_begin();
+    llvm::AllocaInst *resultAlloca =
+        Builder->CreateAlloca(structTy, nullptr,
+                              "smart.unique.move.alloca");
+    llvm::Value *valuePtr =
+        Builder->CreateStructGEP(structTy, &sourceArg, valueInfo->index,
+                                 "smart.unique.move.value.ptr");
+    llvm::Value *flagPtr =
+        Builder->CreateStructGEP(structTy, &sourceArg, flagInfo->index,
+                                 "smart.unique.move.flag.ptr");
+    llvm::Value *valueVal =
+        Builder->CreateLoad(valueTy, valuePtr, "smart.unique.move.value");
+    llvm::Value *flagVal =
+        Builder->CreateLoad(flagTy, flagPtr, "smart.unique.move.flag");
+
+    llvm::Value *destValuePtr =
+        Builder->CreateStructGEP(structTy, resultAlloca, valueInfo->index,
+                                 "smart.unique.move.dest.value.ptr");
+    llvm::Value *destFlagPtr =
+        Builder->CreateStructGEP(structTy, resultAlloca, flagInfo->index,
+                                 "smart.unique.move.dest.flag.ptr");
+    Builder->CreateStore(valueVal, destValuePtr);
+    Builder->CreateStore(flagVal, destFlagPtr);
+
+    Builder->CreateStore(llvm::Constant::getNullValue(valueTy), valuePtr);
+    Builder->CreateStore(llvm::ConstantInt::get(flagTy, 0), flagPtr);
+
+    llvm::Value *result =
+        Builder->CreateLoad(structTy, resultAlloca,
+                            "smart.unique.move.result");
+    Builder->CreateRet(result);
+    llvm::verifyFunction(*fn);
+    return fn;
+  };
+
+  auto emitUniqueDestroyHelper =
+      [&](const InstanceFieldInfo *valueInfo,
+          const InstanceFieldInfo *flagInfo) -> llvm::Function * {
+    if (!valueInfo || !flagInfo)
+      return nullptr;
+    llvm::Type *valueTy =
+        getTypeFromString(typeNameFromInfo(valueInfo->type));
+    llvm::Type *flagTy =
+        getTypeFromString(typeNameFromInfo(flagInfo->type));
+    if (!valueTy || !flagTy)
+      return nullptr;
+    llvm::Function *fn = createSmartPointerHelperFunction(
+        constructedName, "unique.destroy",
+        llvm::Type::getVoidTy(*TheContext), {structPtrTy}, {"value"});
+    if (!fn)
+      return nullptr;
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", fn);
+    Builder->SetInsertPoint(entry);
+    llvm::Argument &selfArg = *fn->arg_begin();
+    llvm::Value *valuePtr =
+        Builder->CreateStructGEP(structTy, &selfArg, valueInfo->index,
+                                 "smart.unique.destroy.value.ptr");
+    llvm::Value *flagPtr =
+        Builder->CreateStructGEP(structTy, &selfArg, flagInfo->index,
+                                 "smart.unique.destroy.flag.ptr");
+    llvm::Value *flagVal =
+        Builder->CreateLoad(flagTy, flagPtr, "smart.unique.destroy.flag");
+    llvm::Value *hasValue = Builder->CreateICmpNE(
+        flagVal, llvm::ConstantInt::get(flagTy, 0),
+        "smart.unique.destroy.has");
+
+    llvm::Function *parent = Builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock *releaseBB =
+        llvm::BasicBlock::Create(*TheContext, "smart.unique.destroy.release",
+                                 parent);
+    llvm::BasicBlock *continueBB =
+        llvm::BasicBlock::Create(*TheContext, "smart.unique.destroy.cont",
+                                 parent);
+    Builder->CreateCondBr(hasValue, releaseBB, continueBB);
+
+    Builder->SetInsertPoint(releaseBB);
+    llvm::Value *payload =
+        Builder->CreateLoad(valueTy, valuePtr, "smart.unique.destroy.payload");
+    emitArcRelease(payload, valueInfo->type, "smart.unique.destroy");
+    Builder->CreateBr(continueBB);
+
+    Builder->SetInsertPoint(continueBB);
+    Builder->CreateStore(llvm::Constant::getNullValue(valueTy), valuePtr);
+    Builder->CreateStore(llvm::ConstantInt::get(flagTy, 0), flagPtr);
+    Builder->CreateRetVoid();
+    llvm::verifyFunction(*fn);
+    return fn;
+  };
+
+  auto emitPointerCopyMoveHelper =
+      [&](const std::string &suffix, bool retainControl, bool zeroSource,
+          SmartPointerKind helperKind) -> llvm::Function * {
+    const InstanceFieldInfo *payloadInfo = getField("payload");
+    const InstanceFieldInfo *controlInfo =
+        getField(helperKind == SmartPointerKind::Weak ? "weakControl"
+                                                      : "control");
+    if (!payloadInfo || !controlInfo)
+      return nullptr;
+    llvm::Type *payloadTyField =
+        getTypeFromString(typeNameFromInfo(payloadInfo->type));
+    llvm::Type *controlTyField =
+        getTypeFromString(typeNameFromInfo(controlInfo->type));
+    if (!payloadTyField || !controlTyField)
+      return nullptr;
+    llvm::Function *fn = createSmartPointerHelperFunction(
+        constructedName, suffix, structTy, {structPtrTy}, {"source"});
+    if (!fn)
+      return nullptr;
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", fn);
+    Builder->SetInsertPoint(entry);
+    llvm::Argument &sourceArg = *fn->arg_begin();
+    llvm::AllocaInst *resultAlloca =
+        Builder->CreateAlloca(structTy, nullptr, "smart.helper.alloca");
+
+    llvm::Value *payloadPtr =
+        Builder->CreateStructGEP(structTy, &sourceArg, payloadInfo->index,
+                                 "smart.helper.payload.ptr");
+    llvm::Value *controlPtr =
+        Builder->CreateStructGEP(structTy, &sourceArg, controlInfo->index,
+                                 "smart.helper.control.ptr");
+    llvm::Value *payloadVal =
+        Builder->CreateLoad(payloadTyField, payloadPtr,
+                            "smart.helper.payload");
+    llvm::Value *controlVal =
+        Builder->CreateLoad(controlTyField, controlPtr,
+                            "smart.helper.control");
+
+    llvm::Value *destPayloadPtr =
+        Builder->CreateStructGEP(structTy, resultAlloca, payloadInfo->index,
+                                 "smart.helper.dest.payload.ptr");
+    llvm::Value *destControlPtr =
+        Builder->CreateStructGEP(structTy, resultAlloca, controlInfo->index,
+                                 "smart.helper.dest.control.ptr");
+    Builder->CreateStore(payloadVal, destPayloadPtr);
+    Builder->CreateStore(controlVal, destControlPtr);
+
+    if (retainControl) {
+      llvm::Value *hasControl = Builder->CreateICmpNE(
+          controlVal, llvm::Constant::getNullValue(controlTyField),
+          "smart.helper.hasctrl");
+      llvm::Function *parent = Builder->GetInsertBlock()->getParent();
+      llvm::BasicBlock *retainBB = llvm::BasicBlock::Create(
+          *TheContext, "smart.helper.retain", parent);
+      llvm::BasicBlock *retainCont = llvm::BasicBlock::Create(
+          *TheContext, "smart.helper.retain.cont", parent);
+      Builder->CreateCondBr(hasControl, retainBB, retainCont);
+
+      Builder->SetInsertPoint(retainBB);
+      llvm::Value *opaqueControl =
+          Builder->CreateBitCast(controlVal, pointerType(),
+                                 "smart.helper.control.cast");
+      if (helperKind == SmartPointerKind::Weak)
+        Builder->CreateCall(getSharedControlRetainWeakFunction(),
+                            {opaqueControl});
+      else
+        Builder->CreateCall(getSharedControlRetainStrongFunction(),
+                            {opaqueControl});
+      Builder->CreateBr(retainCont);
+
+      Builder->SetInsertPoint(retainCont);
+    }
+
+    if (zeroSource) {
+      Builder->CreateStore(llvm::Constant::getNullValue(payloadTyField),
+                           payloadPtr);
+      Builder->CreateStore(llvm::Constant::getNullValue(controlTyField),
+                           controlPtr);
+    }
+
+    llvm::Value *result =
+        Builder->CreateLoad(structTy, resultAlloca, "smart.helper.result");
+    Builder->CreateRet(result);
+    llvm::verifyFunction(*fn);
+    return fn;
+  };
+
+  auto emitPointerDestroyHelper =
+      [&](const std::string &suffix, SmartPointerKind helperKind)
+      -> llvm::Function * {
+    const InstanceFieldInfo *payloadInfo = getField("payload");
+    const InstanceFieldInfo *controlInfo =
+        getField(helperKind == SmartPointerKind::Weak ? "weakControl"
+                                                      : "control");
+    if (!payloadInfo || !controlInfo)
+      return nullptr;
+    llvm::Type *payloadTyField =
+        getTypeFromString(typeNameFromInfo(payloadInfo->type));
+    llvm::Type *controlTyField =
+        getTypeFromString(typeNameFromInfo(controlInfo->type));
+    if (!payloadTyField || !controlTyField)
+      return nullptr;
+    llvm::Function *fn = createSmartPointerHelperFunction(
+        constructedName, suffix, llvm::Type::getVoidTy(*TheContext),
+        {structPtrTy}, {"value"});
+    if (!fn)
+      return nullptr;
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", fn);
+    Builder->SetInsertPoint(entry);
+    llvm::Argument &selfArg = *fn->arg_begin();
+    llvm::Value *payloadPtr =
+        Builder->CreateStructGEP(structTy, &selfArg, payloadInfo->index,
+                                 "smart.dtor.payload.ptr");
+    llvm::Value *controlPtr =
+        Builder->CreateStructGEP(structTy, &selfArg, controlInfo->index,
+                                 "smart.dtor.control.ptr");
+    llvm::Value *controlVal =
+        Builder->CreateLoad(controlTyField, controlPtr,
+                            "smart.dtor.control");
+    llvm::Value *hasControl = Builder->CreateICmpNE(
+        controlVal, llvm::Constant::getNullValue(controlTyField),
+        "smart.dtor.hasctrl");
+
+    llvm::Function *parent = Builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock *releaseBB =
+        llvm::BasicBlock::Create(*TheContext, "smart.dtor.release", parent);
+    llvm::BasicBlock *continueBB =
+        llvm::BasicBlock::Create(*TheContext, "smart.dtor.cont", parent);
+    Builder->CreateCondBr(hasControl, releaseBB, continueBB);
+
+    Builder->SetInsertPoint(releaseBB);
+    llvm::Value *opaqueControl =
+        Builder->CreateBitCast(controlVal, pointerType(),
+                               "smart.dtor.control.cast");
+    if (helperKind == SmartPointerKind::Weak)
+      Builder->CreateCall(getSharedControlReleaseWeakFunction(),
+                          {opaqueControl});
+    else
+      Builder->CreateCall(getSharedControlReleaseStrongFunction(),
+                          {opaqueControl});
+    Builder->CreateBr(continueBB);
+
+    Builder->SetInsertPoint(continueBB);
+    Builder->CreateStore(llvm::Constant::getNullValue(payloadTyField),
+                         payloadPtr);
+    Builder->CreateStore(llvm::Constant::getNullValue(controlTyField),
+                         controlPtr);
+    Builder->CreateRetVoid();
+    llvm::verifyFunction(*fn);
+    return fn;
+  };
+
+  bool ok = true;
+  switch (kind) {
+  case SmartPointerKind::Unique: {
+    const InstanceFieldInfo *valueInfo = getField("value");
+    const InstanceFieldInfo *flagInfo = getField("hasValue");
+    llvm::Function *moveFn =
+        emitUniqueMoveHelper(valueInfo, flagInfo);
+    llvm::Function *destroyFn =
+        emitUniqueDestroyHelper(valueInfo, flagInfo);
+    if (!moveFn || !destroyFn)
+      ok = false;
+    else {
+      metadata.smartPointerMoveHelper = moveFn->getName().str();
+      metadata.smartPointerCopyHelper.clear();
+      metadata.smartPointerDestroyHelper = destroyFn->getName().str();
+    }
+    break;
+  }
+  case SmartPointerKind::Shared: {
+    llvm::Function *copyFn =
+        emitPointerCopyMoveHelper("shared.copy", true, false,
+                                  SmartPointerKind::Shared);
+    llvm::Function *moveFn =
+        emitPointerCopyMoveHelper("shared.move", false, true,
+                                  SmartPointerKind::Shared);
+    llvm::Function *destroyFn =
+        emitPointerDestroyHelper("shared.destroy", SmartPointerKind::Shared);
+    if (!copyFn || !moveFn || !destroyFn)
+      ok = false;
+    else {
+      metadata.smartPointerCopyHelper = copyFn->getName().str();
+      metadata.smartPointerMoveHelper = moveFn->getName().str();
+      metadata.smartPointerDestroyHelper = destroyFn->getName().str();
+    }
+    break;
+  }
+  case SmartPointerKind::Weak: {
+    llvm::Function *copyFn =
+        emitPointerCopyMoveHelper("weak.copy", true, false,
+                                  SmartPointerKind::Weak);
+    llvm::Function *moveFn =
+        emitPointerCopyMoveHelper("weak.move", false, true,
+                                  SmartPointerKind::Weak);
+    llvm::Function *destroyFn =
+        emitPointerDestroyHelper("weak.destroy", SmartPointerKind::Weak);
+    if (!copyFn || !moveFn || !destroyFn)
+      ok = false;
+    else {
+      metadata.smartPointerCopyHelper = copyFn->getName().str();
+      metadata.smartPointerMoveHelper = moveFn->getName().str();
+      metadata.smartPointerDestroyHelper = destroyFn->getName().str();
+    }
+    break;
+  }
+  case SmartPointerKind::None:
+    break;
+  }
+
+  restoreInsertPoint();
+  return ok;
 }
 
 static const CompositeTypeInfo *
@@ -5453,6 +6469,7 @@ llvm::Value *ArrayExprAST::codegen() {
     llvm::Type *elementLLVMType;
     std::string elementTypeName;
     bool elementNullable;
+    TypeInfo elementTypeInfo;
   };
 
 static std::optional<ArrayElementAccessInfo>
@@ -5646,6 +6663,8 @@ computeArrayElementAccess(ArrayIndexExprAST *node) {
   access.elementLLVMType = ElemType;
   access.elementTypeName = elemTypeStr;
   access.elementNullable = elementIsNullable;
+  access.elementTypeInfo = makeTypeInfo(elemTypeStr);
+  finalizeTypeInfoMetadata(access.elementTypeInfo);
   return access;
 }
 
@@ -7232,6 +8251,7 @@ llvm::Value *BinaryExprAST::codegen() {
       {
         const ExprAST *rhsCheckExpr = unwrapRefExpr(getRHS());
         bool rhsIsNullable = expressionIsNullable(rhsCheckExpr);
+        auto *rhsVarExpr = dynamic_cast<VariableExprAST *>(getRHS());
       if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
         // Simple variable assignment - check local first, then global
         llvm::Value *Variable = NamedValues[LHSE->getName()];
@@ -7265,12 +8285,25 @@ llvm::Value *BinaryExprAST::codegen() {
           std::string targetTypeName = info && !info->typeName.empty() ? info->typeName : LHSE->getTypeName();
           if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, VarType, targetTypeName, "assignment to '" + LHSE->getName() + "'"))
             return nullptr;
-    if (info && !info->typeName.empty()) {
-      R = castToType(R, VarType, info->typeName);
-    } else {
-      R = castToType(R, VarType);
-    }
-          Builder->CreateStore(R, Variable);
+  if (info && !info->typeName.empty()) {
+    R = castToType(R, VarType, info->typeName);
+  } else {
+    R = castToType(R, VarType);
+  }
+          if (info && info->isSmartPointer() && rhsVarExpr &&
+              rhsVarExpr->getName() != LHSE->getName()) {
+            if (emitSmartPointerInitFromVariable(*info, Variable, *rhsVarExpr,
+                                                 LHSE->getName())) {
+              updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+              setTypeName("void");
+              return llvm::UndefValue::get(
+                  llvm::Type::getVoidTy(*TheContext));
+            }
+          }
+          if (info && info->requiresARC() && !info->isSmartPointer())
+            emitManagedStore(Variable, R, *info, LHSE->getName());
+          else
+            Builder->CreateStore(R, Variable);
           updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
@@ -7311,7 +8344,20 @@ llvm::Value *BinaryExprAST::codegen() {
           } else {
             R = castToType(R, VarType);
           }
-          Builder->CreateStore(R, GV);
+          if (info && info->isSmartPointer() && rhsVarExpr &&
+              rhsVarExpr->getName() != LHSE->getName()) {
+            if (emitSmartPointerInitFromVariable(*info, GV, *rhsVarExpr,
+                                                 LHSE->getName())) {
+              updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+              setTypeName("void");
+              return llvm::UndefValue::get(
+                  llvm::Type::getVoidTy(*TheContext));
+            }
+          }
+          if (info && info->requiresARC() && !info->isSmartPointer())
+            emitManagedStore(GV, R, *info, LHSE->getName());
+          else
+            Builder->CreateStore(R, GV);
           updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
@@ -7332,11 +8378,27 @@ llvm::Value *BinaryExprAST::codegen() {
         if (!ElemPtr || !ElemType || !ElemPtr->getType()->isPointerTy())
           return LogErrorV("Invalid array element pointer");
 
+        auto *arrayElementRHSVar =
+            dynamic_cast<VariableExprAST *>(getRHS());
+
         if (rhsIsNullable && !access.elementNullable) {
           return LogErrorV("Cannot assign nullable value to non-nullable array element");
         }
 
-        Builder->CreateStore(R, ElemPtr);
+        if (arrayElementRHSVar && access.elementTypeInfo.isSmartPointer()) {
+          if (emitSmartPointerInitFromVariable(access.elementTypeInfo, ElemPtr,
+                                               *arrayElementRHSVar, "array")) {
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+          }
+        }
+
+        if (access.elementTypeInfo.requiresARC() &&
+            !access.elementTypeInfo.isSmartPointer()) {
+          emitManagedStore(ElemPtr, R, access.elementTypeInfo, "array");
+        } else {
+          Builder->CreateStore(R, ElemPtr);
+        }
         // Return a void value to indicate this is a statement, not an expression
         setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -7366,8 +8428,26 @@ llvm::Value *BinaryExprAST::codegen() {
         else
           R = castToType(R, fieldInfo.fieldType);
 
-        Builder->CreateStore(R, fieldInfo.fieldPtr);
-        noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(), fieldInfo.isStatic);
+        if (rhsVarExpr && fieldInfo.declaredFieldType.isSmartPointer()) {
+          if (emitSmartPointerInitFromVariable(
+                  fieldInfo.declaredFieldType, fieldInfo.fieldPtr,
+                  *rhsVarExpr, LHSMA->getMemberName())) {
+            noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(),
+                                 fieldInfo.isStatic);
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+          }
+        }
+
+        if (fieldInfo.declaredFieldType.requiresARC() &&
+            !fieldInfo.declaredFieldType.isSmartPointer()) {
+          emitManagedStore(fieldInfo.fieldPtr, R, fieldInfo.declaredFieldType,
+                           LHSMA->getMemberName());
+        } else {
+          Builder->CreateStore(R, fieldInfo.fieldPtr);
+        }
+        noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(),
+                             fieldInfo.isStatic);
         // Return a void value to indicate this is a statement, not an expression
         setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -7976,6 +9056,16 @@ llvm::Value *UnaryExprAST::codegen() {
     std::string baseType = Operand->getTypeName();
     setTypeName(baseType + "@");
 
+    std::string lookupName =
+        stripNullableAnnotations(sanitizeBaseTypeName(baseType));
+    if (const CompositeTypeInfo *comp = lookupCompositeInfo(lookupName)) {
+      (void)comp;
+      llvm::Type *valueTy = getTypeFromString(baseType);
+      if (valueTy)
+        Ptr = Builder->CreateLoad(valueTy, Ptr,
+                                  "addr.comp.load");
+    }
+
     return Ptr;
   } else if (Op == "@") {
     // Dereference operator
@@ -8372,10 +9462,11 @@ llvm::Value *CallExprAST::codegen() {
                           preferGeneric);
 }
 
-llvm::Value *CallExprAST::emitResolvedCall(
+static llvm::Value *emitResolvedCallInternal(
     const std::string &calleeBase, std::vector<llvm::Value *> ArgValues,
-    const std::vector<bool> &ArgIsRef, bool preferGeneric,
-    FunctionOverload *forced) {
+    const std::vector<bool> &ArgIsRef,
+    const std::vector<std::unique_ptr<ExprAST>> *originalArgs,
+    bool preferGeneric, FunctionOverload *forced, ExprAST *typeOwner) {
   struct CandidateResult {
     FunctionOverload *overload = nullptr;
     unsigned conversions = 0;
@@ -8392,8 +9483,10 @@ llvm::Value *CallExprAST::emitResolvedCall(
     std::vector<CandidateResult> viable;
     viable.reserve(overloadIt->second.size());
 
+    const size_t explicitArgCount =
+        originalArgs ? originalArgs->size() : 0;
     size_t syntheticArgCount =
-        ArgValues.size() > getArgs().size() ? ArgValues.size() - getArgs().size()
+        ArgValues.size() > explicitArgCount ? ArgValues.size() - explicitArgCount
                                             : 0;
 
     for (auto &overload : overloadIt->second) {
@@ -8417,10 +9510,10 @@ llvm::Value *CallExprAST::emitResolvedCall(
         }
 
         const ExprAST *argExpr = nullptr;
-        if (idx >= syntheticArgCount) {
+        if (originalArgs && idx >= syntheticArgCount) {
           size_t exprIndex = idx - syntheticArgCount;
-          if (exprIndex < getArgs().size())
-            argExpr = getArgs()[exprIndex].get();
+          if (exprIndex < originalArgs->size())
+            argExpr = (*originalArgs)[exprIndex].get();
         }
         const ExprAST *coreArg = unwrapRefExpr(argExpr);
         if (coreArg && !coreArg->getTypeName().empty()) {
@@ -8518,10 +9611,12 @@ llvm::Value *CallExprAST::emitResolvedCall(
   llvm::Value *CallValue = nullptr;
   if (CalleeF->getReturnType()->isVoidTy()) {
     CallValue = Builder->CreateCall(CalleeF, CallArgs);
-    setTypeName("void");
+    if (typeOwner)
+      typeOwner->setTypeName("void");
   } else {
     CallValue = Builder->CreateCall(CalleeF, CallArgs, "calltmp");
-    setTypeName(typeNameFromInfo(chosen->returnType));
+    if (typeOwner)
+      typeOwner->setTypeName(typeNameFromInfo(chosen->returnType));
 
     if (chosen->returnsByRef) {
       llvm::Type *valueType = getTypeFromString(typeNameFromInfo(chosen->returnType));
@@ -8532,6 +9627,14 @@ llvm::Value *CallExprAST::emitResolvedCall(
   }
 
   return CallValue;
+}
+
+llvm::Value *CallExprAST::emitResolvedCall(
+    const std::string &calleeBase, std::vector<llvm::Value *> ArgValues,
+    const std::vector<bool> &ArgIsRef, bool preferGeneric,
+    FunctionOverload *forced) {
+  return emitResolvedCallInternal(calleeBase, std::move(ArgValues), ArgIsRef,
+                                  &Args, preferGeneric, forced, this);
 }
 
 llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
@@ -8697,7 +9800,7 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
     auto *typeDescPtrTy =
         pointerType(getTypeDescriptorType());
 
-    llvm::StructType *headerTy = getClassHeaderType();
+    llvm::StructType *headerTy = getArcHeaderType();
     llvm::Value *headerPtr = Builder->CreateBitCast(
         instancePtr, pointerType(headerTy), "hybrid.header.iface");
     llvm::Value *descAddr = Builder->CreateStructGEP(
@@ -8780,7 +9883,7 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
           "hybrid.method.recv");
     }
 
-    llvm::StructType *headerTy = getClassHeaderType();
+    llvm::StructType *headerTy = getArcHeaderType();
     llvm::Value *headerPtr = Builder->CreateStructGEP(
         ownerStructTy, typedInstancePtr, 0, "hybrid.header.ptr");
     auto *typeDescPtrTy =
@@ -8914,9 +10017,11 @@ llvm::Value *ReturnStmtAST::codegen() {
       }
     }
 
+    emitArcScopeDrainAll("return");
     Builder->CreateRet(Val);
   } else {
     // Void return
+    emitArcScopeDrainAll("return");
     Builder->CreateRetVoid();
   }
   return llvm::Constant::getNullValue(llvm::Type::getDoubleTy(*TheContext));
@@ -8924,6 +10029,7 @@ llvm::Value *ReturnStmtAST::codegen() {
 
 // Generate code for block statements
 llvm::Value *BlockStmtAST::codegen() {
+  ArcScopeGuard arcScope("block");
   llvm::Value *Last = nullptr;
   // Generate code for each statement in the block
   for (auto &Stmt : getStatements()) {
@@ -9356,35 +10462,66 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         return Builder->CreateLoad(VarType, Ptr, (getName() + "_deref"));
       } else {
         // Regular variable without ref
-        // Generate and validate the initial value first
+        llvm::AllocaInst *Alloca =
+            Builder->CreateAlloca(VarType, nullptr, getName());
+        if (declaredInfo.requiresARC() && !declaredInfo.isSmartPointer() &&
+            VarType->isPointerTy()) {
+          Builder->CreateStore(llvm::Constant::getNullValue(VarType), Alloca);
+        }
+        bool nullabilityChecked = false;
+        auto ensureNullability = [&]() -> bool {
+          if (!shouldCheckNullability || nullabilityChecked)
+            return true;
+          nullabilityChecked = true;
+          if (!validateNullableAssignment(declaredInfo, NullableCheckExpr,
+                                          targetDescription))
+            return false;
+          return true;
+        };
+
+        bool initializedBySmartPointerHelper = false;
+        if (getInitializer() && declaredInfo.isSmartPointer()) {
+          if (auto *varInit =
+                  dynamic_cast<VariableExprAST *>(getInitializer())) {
+            if (!ensureNullability())
+              return nullptr;
+            initializedBySmartPointerHelper =
+                emitSmartPointerInitFromVariable(declaredInfo, Alloca, *varInit,
+                                                 getName());
+          }
+        }
+
         llvm::Value *InitVal = nullptr;
-        if (getInitializer()) {
+        if (!initializedBySmartPointerHelper && getInitializer()) {
+          if (!ensureNullability())
+            return nullptr;
           InitVal = generateInitializerValue(getInitializer());
           if (!InitVal)
             return nullptr;
-
-          if (shouldCheckNullability && !validateNullableAssignment(declaredInfo, NullableCheckExpr, targetDescription))
-            return nullptr;
         }
-
-        // Only create the alloca after successful initialization
-        llvm::AllocaInst *Alloca = Builder->CreateAlloca(VarType, nullptr, getName());
 
         // Cast and store the initial value if present
         if (InitVal) {
-          if (diagnoseDisallowedImplicitIntegerConversion(getInitializer(), InitVal, VarType, getType(), "initializer for '" + getName() + "'"))
+          if (diagnoseDisallowedImplicitIntegerConversion(
+                  getInitializer(), InitVal, VarType, getType(),
+                  "initializer for '" + getName() + "'"))
             return nullptr;
           InitVal = castToType(InitVal, VarType, getType());
-          Builder->CreateStore(InitVal, Alloca);
+          if (declaredInfo.requiresARC() && !declaredInfo.isSmartPointer())
+            emitManagedStore(Alloca, InitVal, declaredInfo, getName());
+          else
+            Builder->CreateStore(InitVal, Alloca);
         }
 
         // Remember this local binding
         NamedValues[getName()] = Alloca;
         rememberLocalType(getName(), declaredInfo);
+        registerArcLocal(getName(), Alloca, declaredInfo, false);
 
         // Track array size for compile-time bounds checking
         if (declaredInfo.isArray) {
-          if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
+          if (auto *ArrayInit =
+                  dynamic_cast<ArrayExprAST *>(getInitializer())) {
             auto dims = computeLiteralDimensions(ArrayInit);
             if (!dims.empty())
               ArraySizes[getName()] = std::move(dims);
@@ -9556,7 +10693,9 @@ llvm::Value *ForEachStmtAST::codegen() {
   if (DeclaredRef) {
     rememberLocalType(VarName, runtimeTypeFrom(getTypeInfo(), RefStorageClass::RefAlias, true));
   } else {
-    rememberLocalType(VarName, getTypeInfo());
+    TypeInfo loopVarInfo = getTypeInfo();
+    rememberLocalType(VarName, loopVarInfo);
+    registerArcLocal(VarName, VarAlloca, loopVarInfo, false);
   }
   
   // Push the exit and continue blocks for break/skip statements
@@ -10506,6 +11645,7 @@ llvm::Value *AssertStmtAST::codegen() {
 
 // Generate code for unsafe blocks
 llvm::Value *UnsafeBlockStmtAST::codegen() {
+  ArcScopeGuard arcScope("unsafe");
   // Unsafe blocks simply execute their body
   // The safety checks are done at parse time, not at runtime
   return Body->codegen();
@@ -10672,6 +11812,7 @@ llvm::Function *FunctionAST::codegen() {
     return nullptr;
 
   currentAnalysis().analyzeFunction(*this);
+  ActiveLifetimePlanScope lifetimeScope(currentAnalysis().planFor(*this));
 
   SemanticGenericParameterScope functionGenerics(getProto()->getGenericParameters());
   FunctionOverload *overloadEntry = lookupFunctionOverload(*getProto());
@@ -10687,10 +11828,14 @@ llvm::Function *FunctionAST::codegen() {
   llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
   Builder->SetInsertPoint(BB);
 
-  NamedValues.clear();
-  LocalTypes.clear();
-  NonNullFacts.clear();
-  ensureBaseNonNullScope();
+  bool functionCodegenSucceeded = false;
+  {
+    ArcScopeGuard functionScope("function");
+
+    NamedValues.clear();
+    LocalTypes.clear();
+    NonNullFacts.clear();
+    ensureBaseNonNullScope();
 
   for (auto it = ArraySizes.begin(); it != ArraySizes.end();) {
     if (NamedValues.count(it->first) || LocalTypes.count(it->first)) {
@@ -10711,14 +11856,14 @@ llvm::Function *FunctionAST::codegen() {
     NamedValues[std::string(Arg.getName())] = Alloca;
 
     if (i < Params.size()) {
+      TypeInfo paramInfo = applyActiveTypeBindings(Params[i].DeclaredType);
       if (isRefParam) {
-        TypeInfo paramInfo = Params[i].DeclaredType;
         paramInfo.refStorage = RefStorageClass::RefAlias;
         paramInfo.declaredRef = true;
-        rememberLocalType(std::string(Arg.getName()), std::move(paramInfo));
-      } else {
-        rememberLocalType(std::string(Arg.getName()), Params[i].DeclaredType);
       }
+      rememberLocalType(std::string(Arg.getName()), paramInfo);
+      if (!isRefParam)
+        registerArcLocal(std::string(Arg.getName()), Alloca, paramInfo, false);
     }
     ++i;
   }
@@ -10747,33 +11892,37 @@ llvm::Function *FunctionAST::codegen() {
     TopLevelExecEmitted = true;
   }
 
-  if (getBody()->codegen()) {
-    if (!Builder->GetInsertBlock()->getTerminator()) {
-      if (TheFunction->getReturnType()->isVoidTy()) {
-        Builder->CreateRetVoid();
-      } else {
-        Builder->CreateRet(llvm::Constant::getNullValue(TheFunction->getReturnType()));
+    if (getBody()->codegen()) {
+      if (!Builder->GetInsertBlock()->getTerminator()) {
+        if (TheFunction->getReturnType()->isVoidTy()) {
+          Builder->CreateRetVoid();
+        } else {
+          Builder->CreateRet(llvm::Constant::getNullValue(TheFunction->getReturnType()));
+        }
       }
+
+      llvm::verifyFunction(*TheFunction);
+      functionCodegenSucceeded = true;
     }
 
-    llvm::verifyFunction(*TheFunction);
+    if (!functionCodegenSucceeded) {
+      TheFunction->eraseFromParent();
+      if (overloadEntry)
+        overloadEntry->function = nullptr;
+    }
+  }
 
-    Builder->ClearInsertionPoint();
-    NamedValues.clear();
-    LocalTypes.clear();
-    NonNullFacts.clear();
+  Builder->ClearInsertionPoint();
+  NamedValues.clear();
+  LocalTypes.clear();
+  NonNullFacts.clear();
 
+  if (functionCodegenSucceeded) {
     if (isVoidMain)
       ensureVoidMainWrapper(TheFunction);
-
     return TheFunction;
   }
 
-  TheFunction->eraseFromParent();
-  if (overloadEntry)
-    overloadEntry->function = nullptr;
-  Builder->ClearInsertionPoint();
-  NonNullFacts.clear();
   return nullptr;
 }
 
@@ -10952,8 +12101,7 @@ llvm::Type *StructAST::codegen() {
     compositeInfo.typeArgumentBindings = *bindings;
   else
     compositeInfo.typeArgumentBindings.clear();
-  compositeInfo.hasClassDescriptor =
-      (kind == AggregateKind::Class || kind == AggregateKind::Interface);
+  compositeInfo.hasClassDescriptor = true;
   compositeInfo.descriptor.name = typeKey;
   compositeInfo.descriptor.kind = kind;
   compositeInfo.descriptor.baseClassName = effectiveBaseClass;
@@ -10964,7 +12112,7 @@ llvm::Type *StructAST::codegen() {
   compositeInfo.descriptor.isInterface = (kind == AggregateKind::Interface);
   compositeInfo.descriptor.constructors.clear();
 
-  if (kind == AggregateKind::Class || kind == AggregateKind::Interface) {
+  if (compositeInfo.hasClassDescriptor) {
     llvm::StructType *TypeDescTy = getTypeDescriptorType();
     std::string descriptorName =
         makeRuntimeSymbolName("__hybrid_type_descriptor$", typeKey);
@@ -11010,13 +12158,27 @@ llvm::Type *StructAST::codegen() {
         compositeInfo.fieldModifiers = baseInfo->fieldModifiers;
         compositeInfo.fieldDeclarationInitializers =
             baseInfo->fieldDeclarationInitializers;
+        compositeInfo.hasARCHeader = baseInfo->hasARCHeader;
+        compositeInfo.headerFieldIndex = baseInfo->headerFieldIndex;
+      } else {
+        compositeInfo.hasARCHeader = true;
+        compositeInfo.headerFieldIndex = 0;
       }
     } else {
-      llvm::StructType *HeaderType = getClassHeaderType();
+      llvm::StructType *HeaderType = getArcHeaderType();
       FieldTypes.reserve(Fields.size() + 1);
       FieldTypes.push_back(HeaderType);
       FieldIndex = 1;
+      compositeInfo.hasARCHeader = true;
+      compositeInfo.headerFieldIndex = 0;
     }
+  } else if (kind == AggregateKind::Struct) {
+    llvm::StructType *HeaderType = getArcHeaderType();
+    FieldTypes.reserve(Fields.size() + 1);
+    FieldTypes.push_back(HeaderType);
+    FieldIndex = 1;
+    compositeInfo.hasARCHeader = true;
+    compositeInfo.headerFieldIndex = 0;
   } else {
     FieldTypes.reserve(Fields.size());
   }
@@ -11192,11 +12354,13 @@ llvm::Type *StructAST::codegen() {
           Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
 
       llvm::Constant *DescriptorPtrConst = nullptr;
-      if (metadata.kind == AggregateKind::Class) {
-        llvm::GlobalVariable *descriptorGV =
-            TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
+      if (metadata.hasARCHeader) {
+        llvm::GlobalVariable *descriptorGV = nullptr;
+        if (!metadata.descriptorGlobalName.empty())
+          descriptorGV = TheModule->getGlobalVariable(
+              metadata.descriptorGlobalName, true);
         if (!descriptorGV) {
-          reportCompilerError("Internal error: descriptor for class '" + typeKey +
+          reportCompilerError("Internal error: descriptor for type '" + typeKey +
                               "' missing during constructor emission");
           ConstructorFunc->eraseFromParent();
           NamedValues.clear();
@@ -11205,18 +12369,18 @@ llvm::Type *StructAST::codegen() {
           Builder->ClearInsertionPoint();
           return nullptr;
         }
-        llvm::StructType *headerTy = getClassHeaderType();
+        llvm::StructType *headerTy = getArcHeaderType();
         auto *int32Ty = llvm::Type::getInt32Ty(*TheContext);
         DescriptorPtrConst = llvm::ConstantExpr::getBitCast(
             descriptorGV, pointerType(getTypeDescriptorType()));
-        llvm::Value *headerPtr =
-            Builder->CreateStructGEP(StructType, StructPtr, 0, "hybrid.header");
-        llvm::Value *strongPtr =
-            Builder->CreateStructGEP(headerTy, headerPtr, 0, "hybrid.header.strong");
-        llvm::Value *weakPtr =
-            Builder->CreateStructGEP(headerTy, headerPtr, 1, "hybrid.header.weak");
-        llvm::Value *descPtr =
-            Builder->CreateStructGEP(headerTy, headerPtr, 2, "hybrid.header.desc");
+        llvm::Value *headerPtr = Builder->CreateStructGEP(
+            StructType, StructPtr, metadata.headerFieldIndex, "hybrid.header");
+        llvm::Value *strongPtr = Builder->CreateStructGEP(
+            headerTy, headerPtr, 0, "hybrid.header.strong");
+        llvm::Value *weakPtr = Builder->CreateStructGEP(
+            headerTy, headerPtr, 1, "hybrid.header.weak");
+        llvm::Value *descPtr = Builder->CreateStructGEP(
+            headerTy, headerPtr, 2, "hybrid.header.desc");
         Builder->CreateStore(llvm::ConstantInt::get(int32Ty, 1), strongPtr);
         Builder->CreateStore(llvm::ConstantInt::get(int32Ty, 0), weakPtr);
         Builder->CreateStore(DescriptorPtrConst, descPtr);
@@ -11250,14 +12414,36 @@ llvm::Type *StructAST::codegen() {
         ++argIndex;
       }
 
+      if (!emitConstructorInitializers(typeKey, StructType, StructPtr,
+                                        metadata,
+                                        MethodDef.getConstructorInitializers())) {
+        ConstructorFunc->eraseFromParent();
+        NamedValues.clear();
+        LocalTypes.clear();
+        NonNullFacts.clear();
+        Builder->ClearInsertionPoint();
+        return nullptr;
+      }
+
+      if (metadata.hasARCHeader && DescriptorPtrConst) {
+        llvm::StructType *headerTy = getArcHeaderType();
+        llvm::Value *headerPtr = Builder->CreateStructGEP(
+            StructType, StructPtr, metadata.headerFieldIndex,
+            "hybrid.header.inits");
+        llvm::Value *descPtr = Builder->CreateStructGEP(
+            headerTy, headerPtr, 2, "hybrid.header.desc.inits");
+        Builder->CreateStore(DescriptorPtrConst, descPtr);
+      }
+
       if (Method->getBody()->codegen()) {
         if (!Builder->GetInsertBlock()->getTerminator()) {
-          if (DescriptorPtrConst) {
-            llvm::StructType *headerTy = getClassHeaderType();
-            llvm::Value *headerPtr =
-                Builder->CreateStructGEP(StructType, StructPtr, 0, "hybrid.header.final");
-            llvm::Value *descPtr =
-                Builder->CreateStructGEP(headerTy, headerPtr, 2, "hybrid.header.desc.final");
+          if (metadata.hasARCHeader && DescriptorPtrConst) {
+            llvm::StructType *headerTy = getArcHeaderType();
+            llvm::Value *headerPtr = Builder->CreateStructGEP(
+                StructType, StructPtr, metadata.headerFieldIndex,
+                "hybrid.header.final");
+            llvm::Value *descPtr = Builder->CreateStructGEP(
+                headerTy, headerPtr, 2, "hybrid.header.desc.final");
             Builder->CreateStore(DescriptorPtrConst, descPtr);
           }
           llvm::Value *StructValue =
@@ -11480,8 +12666,16 @@ llvm::Type *StructAST::codegen() {
       abandonStructDefinition();
       return nullptr;
     }
-  } else if (metadata.kind == AggregateKind::Class) {
+  } else if (metadata.kind == AggregateKind::Class ||
+             metadata.kind == AggregateKind::Struct) {
     if (!emitClassRuntimeStructures(typeKey, StructType, metadata)) {
+      abandonStructDefinition();
+      return nullptr;
+    }
+  }
+
+  if (metadata.kind != AggregateKind::Interface) {
+    if (!emitCompositeDealloc(typeKey, StructType, metadata)) {
       abandonStructDefinition();
       return nullptr;
     }

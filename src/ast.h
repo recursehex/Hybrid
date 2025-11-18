@@ -1056,6 +1056,17 @@ enum class MethodKind : uint8_t {
   ThisOverride
 };
 
+struct ConstructorInitializer {
+  enum class Kind : uint8_t {
+    Base,
+    Field
+  };
+
+  Kind kind = Kind::Field;
+  std::string target;
+  std::vector<std::unique_ptr<ExprAST>> arguments;
+};
+
 struct MethodDefinition {
   std::unique_ptr<FunctionAST> Function;
   std::unique_ptr<PrototypeAST> Prototype;
@@ -1064,6 +1075,7 @@ struct MethodDefinition {
   std::string DisplayName;
   bool HasImplicitThis = false;
   PrototypeAST *PrototypeView = nullptr;
+  std::vector<ConstructorInitializer> Initializers;
 
   MethodDefinition(std::unique_ptr<FunctionAST> Function,
                    MemberModifiers Modifiers,
@@ -1100,6 +1112,15 @@ struct MethodDefinition {
   }
   bool needsInstanceThis() const {
     return !isStatic() && Kind != MethodKind::Constructor;
+  }
+  void setConstructorInitializers(std::vector<ConstructorInitializer> inits) {
+    Initializers = std::move(inits);
+  }
+  std::vector<ConstructorInitializer> &getConstructorInitializers() {
+    return Initializers;
+  }
+  const std::vector<ConstructorInitializer> &getConstructorInitializers() const {
+    return Initializers;
   }
 };
 

@@ -15,5 +15,7 @@ int main()
     unique<Gadget> owned = unique<Gadget>(Gadget(7))
     shared<Gadget> sharedOwner = shared<Gadget>(Gadget(9))
     weak<Gadget> observer = weak<Gadget>(sharedOwner)
+    shared<int> sharedNumber = shared<int>(42)
+    weak<int> numberObserver = weak<int>(sharedNumber)
     return 0
 }
