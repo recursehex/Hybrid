@@ -9082,27 +9082,38 @@ llvm::Value *UnaryExprAST::codegen() {
     size_t atPos = operandType.find('@');
     std::string baseType = operandType.substr(0, atPos);
 
-    // If it's a multi-level pointer, the result is still a pointer
+    int level = 1;
     if (atPos + 1 < operandType.size()) {
       std::string levelStr = operandType.substr(atPos + 1);
-      if (!levelStr.empty()) {
-        int level = std::stoi(levelStr);
-        if (level > 1) {
-          // Result type is pointer with level-1
-          if (level == 2) {
-            setTypeName(baseType + "@");
-          } else {
-            setTypeName(baseType + "@" + std::to_string(level - 1));
-          }
-        } else {
-          setTypeName(baseType);
-        }
+      if (!levelStr.empty())
+        level = std::stoi(levelStr);
+    }
+
+    if (level > 1) {
+      if (level == 2) {
+        setTypeName(baseType + "@");
       } else {
-        setTypeName(baseType);
+        setTypeName(baseType + "@" + std::to_string(level - 1));
       }
     } else {
       setTypeName(baseType);
     }
+
+    bool treatAsCompositeReference = false;
+    if (level <= 1) {
+      std::string lookupName =
+          stripNullableAnnotations(sanitizeBaseTypeName(baseType));
+      if (!lookupName.empty()) {
+        if (const CompositeTypeInfo *info =
+                lookupCompositeInfo(lookupName)) {
+          (void)info;
+          treatAsCompositeReference = true;
+        }
+      }
+    }
+
+    if (treatAsCompositeReference)
+      return OperandV;
 
     // Get the element type to load
     llvm::Type *ElementType = getTypeFromString(getTypeName());
@@ -12352,6 +12363,7 @@ llvm::Type *StructAST::codegen() {
 
       llvm::AllocaInst *StructPtr =
           Builder->CreateAlloca(StructType, nullptr, "struct_alloc");
+      Builder->CreateStore(llvm::Constant::getNullValue(StructType), StructPtr);
 
       llvm::Constant *DescriptorPtrConst = nullptr;
       if (metadata.hasARCHeader) {
