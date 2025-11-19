@@ -73,6 +73,34 @@ void testMultipleWeakObservers()
     // All observers watch the same shared owner
 }
 
+void testSharedReassignmentLoop()
+{
+    shared<Counter> head = shared<Counter>(Counter(20, 2000))
+    int i = 0
+    while i < 20
+    {
+        shared<Counter> next = shared<Counter>(Counter(20 + i, 2000 + i))
+        shared<Counter> copy = next
+        head = copy
+        i++
+    }
+}
+
+void testWeakReassignmentLoop()
+{
+    shared<Counter> source = shared<Counter>(Counter(30, 3000))
+    weak<Counter> watcher = weak<Counter>(source)
+    int i = 0
+    while i < 20
+    {
+        shared<Counter> next = shared<Counter>(Counter(30 + i, 3000 + i))
+        weak<Counter> alias = weak<Counter>(next)
+        watcher = alias
+        source = next
+        i++
+    }
+}
+
 int main()
 {
     testUniqueOwnership()
@@ -80,6 +108,8 @@ int main()
     testWeakObservation()
     testSharedPrimitives()
     testMultipleWeakObservers()
+    testSharedReassignmentLoop()
+    testWeakReassignmentLoop()
 
     // Basic smoke test with direct usage
     unique<int> u = unique<int>(10)

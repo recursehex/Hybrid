@@ -1918,6 +1918,71 @@ static std::string buildArcOpLabel(std::string_view label,
   return name;
 }
 
+// Smart pointer variables store a pointer to a wrapper struct that lives in
+// stack storage for the current activation. The wrapper itself never escapes;
+// only the pointer is visible to user code. This helper loads (or lazily
+// allocates) that wrapper storage and tells the caller whether we just created
+// it so overwrite paths can destroy the old payload before reusing the slot.
+struct SmartPointerWrapperSlot {
+  llvm::Value *storage = nullptr;
+  llvm::Value *freshlyAllocated = nullptr;
+};
+
+static SmartPointerWrapperSlot
+prepareSmartPointerWrapperSlot(llvm::Value *destPtr,
+                               llvm::StructType *structTy,
+                               std::string_view label) {
+  SmartPointerWrapperSlot slot;
+  if (!destPtr || !structTy)
+    return slot;
+  llvm::BasicBlock *currentBlock = Builder->GetInsertBlock();
+  if (!currentBlock)
+    return slot;
+  llvm::Function *parent = currentBlock->getParent();
+  if (!parent)
+    return slot;
+
+  auto *destPtrTy = llvm::dyn_cast<llvm::PointerType>(destPtr->getType());
+  if (!destPtrTy)
+    return slot;
+  llvm::PointerType *wrapperPtrTy = pointerType(destPtrTy->getAddressSpace());
+
+  llvm::Value *existing = Builder->CreateLoad(
+      wrapperPtrTy, destPtr, buildArcOpLabel(label, "smart.slot.load"));
+  llvm::Value *isNull = Builder->CreateICmpEQ(
+      existing,
+      llvm::ConstantPointerNull::get(wrapperPtrTy),
+      buildArcOpLabel(label, "smart.slot.isnull"));
+
+  llvm::BasicBlock *allocBB = llvm::BasicBlock::Create(
+      *TheContext, buildArcOpLabel(label, "smart.slot.alloc"), parent);
+  llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(
+      *TheContext, buildArcOpLabel(label, "smart.slot.merge"), parent);
+  Builder->CreateCondBr(isNull, allocBB, mergeBB);
+
+  Builder->SetInsertPoint(allocBB);
+  llvm::AllocaInst *storage = createEntryAlloca(
+      parent, structTy, buildArcOpLabel(label, "smart.slot.storage"));
+  Builder->CreateStore(storage, destPtr);
+  Builder->CreateBr(mergeBB);
+
+  Builder->SetInsertPoint(mergeBB);
+  llvm::PHINode *storagePhi = Builder->CreatePHI(
+      wrapperPtrTy, 2, buildArcOpLabel(label, "smart.slot.ptr"));
+  storagePhi->addIncoming(storage, allocBB);
+  storagePhi->addIncoming(existing, currentBlock);
+
+  llvm::PHINode *freshPhi = Builder->CreatePHI(
+      llvm::Type::getInt1Ty(*TheContext), 2,
+      buildArcOpLabel(label, "smart.slot.isfresh"));
+  freshPhi->addIncoming(llvm::ConstantInt::getTrue(*TheContext), allocBB);
+  freshPhi->addIncoming(llvm::ConstantInt::getFalse(*TheContext), currentBlock);
+
+  slot.storage = storagePhi;
+  slot.freshlyAllocated = freshPhi;
+  return slot;
+}
+
 static bool emitSmartPointerInitFromVariable(const TypeInfo &declaredInfo,
                                              llvm::Value *destPtr,
                                              VariableExprAST &sourceVar,
@@ -1971,27 +2036,53 @@ static bool emitSmartPointerInitFromVariable(const TypeInfo &declaredInfo,
                           buildArcOpLabel(label, preferMove ? "smart.move.call"
                                                             : "smart.copy.call"));
 
-  // The helper returns a struct value, but destPtr is a pointer to pointer.
-  // We need to allocate storage for the struct and store the pointer to it.
-  llvm::Type *structType = result->getType();
-  if (!structType->isStructTy())
-  {
+  auto *structTy = llvm::dyn_cast<llvm::StructType>(result->getType());
+  if (!structTy) {
     reportCompilerError(
         "Internal error: smart pointer copy/move helper returned non-struct type");
     return false;
   }
 
-  // Allocate storage for the struct value
-  llvm::AllocaInst *structStorage =
-      Builder->CreateAlloca(structType, nullptr,
-                            buildArcOpLabel(label, "smart.inst"));
+  SmartPointerWrapperSlot slot =
+      prepareSmartPointerWrapperSlot(destPtr, structTy, label);
+  if (!slot.storage || !slot.freshlyAllocated)
+    return false;
 
-  // Store the struct value into the allocated storage
-  Builder->CreateStore(result, structStorage);
+  if (!metadata->smartPointerDestroyHelper.empty()) {
+    llvm::Function *destroyFn =
+        TheModule->getFunction(metadata->smartPointerDestroyHelper);
+    if (!destroyFn) {
+      reportCompilerError("Internal error: missing smart pointer destroy helper '" +
+                         metadata->smartPointerDestroyHelper + "'");
+      return false;
+    }
 
-  // Store the pointer to the struct into destPtr (the wrapper pointer)
-  Builder->CreateStore(structStorage, destPtr);
+    llvm::Value *needsDestroy = Builder->CreateNot(
+        slot.freshlyAllocated, buildArcOpLabel(label, "smart.slot.reassign"));
+    llvm::BasicBlock *currentBlock = Builder->GetInsertBlock();
+    llvm::Function *parent = currentBlock ? currentBlock->getParent() : nullptr;
+    if (!parent)
+      return false;
+    llvm::BasicBlock *destroyBB = llvm::BasicBlock::Create(
+        *TheContext, buildArcOpLabel(label, "smart.destroy.old"), parent);
+    llvm::BasicBlock *destroyCont = llvm::BasicBlock::Create(
+        *TheContext, buildArcOpLabel(label, "smart.destroy.cont"), parent);
+    Builder->CreateCondBr(needsDestroy, destroyBB, destroyCont);
 
+    Builder->SetInsertPoint(destroyBB);
+    llvm::Value *destroyArg = slot.storage;
+    llvm::Type *expectedTy = destroyFn->getFunctionType()->getParamType(0);
+    if (expectedTy && destroyArg->getType() != expectedTy) {
+      destroyArg = Builder->CreateBitCast(
+          destroyArg, expectedTy, buildArcOpLabel(label, "smart.destroy.cast"));
+    }
+    Builder->CreateCall(destroyFn, {destroyArg});
+    Builder->CreateBr(destroyCont);
+
+    Builder->SetInsertPoint(destroyCont);
+  }
+
+  Builder->CreateStore(result, slot.storage);
   return true;
 }
 
@@ -10507,6 +10598,10 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         // Regular variable without ref
         llvm::AllocaInst *Alloca =
             Builder->CreateAlloca(VarType, nullptr, getName());
+        if (declaredInfo.isSmartPointer() && VarType->isPointerTy()) {
+          llvm::PointerType *ptrTy = llvm::cast<llvm::PointerType>(VarType);
+          Builder->CreateStore(llvm::ConstantPointerNull::get(ptrTy), Alloca);
+        }
         if (declaredInfo.requiresARC() && !declaredInfo.isSmartPointer() &&
             VarType->isPointerTy()) {
           Builder->CreateStore(llvm::Constant::getNullValue(VarType), Alloca);
