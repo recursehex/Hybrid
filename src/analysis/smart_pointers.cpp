@@ -61,25 +61,9 @@ bool SmartPointerSemantics::sawExplicitRelease(const std::string &symbol) const 
   return it != releaseCounts.end() && it->second > 0;
 }
 
-void SmartPointerSemantics::markUniqueMoved(const std::string &symbol) {
-  uniqueMoves[symbol] = true;
-}
-
-void SmartPointerSemantics::clearUniqueMove(const std::string &symbol) {
-  auto it = uniqueMoves.find(symbol);
-  if (it != uniqueMoves.end())
-    it->second = false;
-}
-
-bool SmartPointerSemantics::isUniqueMoved(const std::string &symbol) const {
-  auto it = uniqueMoves.find(symbol);
-  return it != uniqueMoves.end() && it->second;
-}
-
 void SmartPointerSemantics::reset() {
   retainCounts.clear();
   releaseCounts.clear();
-  uniqueMoves.clear();
 }
 
 } // namespace analysis

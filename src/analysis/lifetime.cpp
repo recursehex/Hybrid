@@ -149,10 +149,14 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
   if (auto *binary = dynamic_cast<BinaryExprAST *>(&expr)) {
     if (binary->getOp() == "=")
       handleAssignment(*binary, plan);
-    if (auto *lhs = binary->getLHS())
-      walkExpression(*lhs, plan);
-    if (auto *rhs = binary->getRHS())
-      walkExpression(*rhs, plan);
+    if (auto *lhs = binary->getLHS()) {
+      if (!dynamic_cast<VariableExprAST *>(lhs))
+        walkExpression(*lhs, plan);
+    }
+    if (auto *rhs = binary->getRHS()) {
+      if (!dynamic_cast<VariableExprAST *>(rhs))
+        walkExpression(*rhs, plan);
+    }
     return;
   }
   if (auto *call = dynamic_cast<CallExprAST *>(&expr)) {
@@ -277,16 +281,17 @@ void LifetimeAnalyzer::handleVariableDeclaration(VariableDeclarationStmtAST &dec
       if (&source != &entry)
         validateSmartPointerTransfer(entry, source, "initialization");
       if (pointerSemantics.requiresMoveOnAssign(source.type)) {
-        if (source.uniqueMoved ||
-            pointerSemantics.isUniqueMoved(source.name)) {
+        if (isUniqueMoved(source)) {
           reportCompilerError("unique pointer '" + source.name +
                               "' was moved and cannot be used again");
         }
-        pointerSemantics.markUniqueMoved(source.name);
-        source.uniqueMoved = true;
+        markUniqueMoved(source);
       }
+      markUniqueReinitialized(entry);
+    } else {
+      walkExpression(*init, plan);
+      markUniqueReinitialized(entry);
     }
-    walkExpression(*init, plan);
   }
 }
 
@@ -318,10 +323,7 @@ void LifetimeAnalyzer::handleAssignment(BinaryExprAST &assign,
   if (lhsVar) {
     auto &lhsInfo = ensureVariable(lhsVar->getName(), nullptr, plan);
     lhsInfoPtr = &lhsInfo;
-    if (pointerSemantics.requiresMoveOnAssign(lhsInfo.type)) {
-      pointerSemantics.clearUniqueMove(lhsInfo.name);
-      lhsInfo.uniqueMoved = false;
-    }
+    markUniqueReinitialized(lhsInfo);
     if (shouldTrack(lhsInfo)) {
       emitEvent(lhsInfo.name, plan, LifetimeEvent::Kind::Release,
                 "overwritten");
@@ -332,13 +334,11 @@ void LifetimeAnalyzer::handleAssignment(BinaryExprAST &assign,
     rhsInfoPtr = &rhsInfo;
     if ((!lhsInfoPtr || lhsInfoPtr != rhsInfoPtr) &&
         pointerSemantics.requiresMoveOnAssign(rhsInfo.type)) {
-      if (rhsInfo.uniqueMoved ||
-          pointerSemantics.isUniqueMoved(rhsInfo.name)) {
+      if (isUniqueMoved(rhsInfo)) {
         reportCompilerError("unique pointer '" + rhsInfo.name +
                             "' was moved and cannot be reassigned");
       }
-      pointerSemantics.markUniqueMoved(rhsInfo.name);
-      rhsInfo.uniqueMoved = true;
+      markUniqueMoved(rhsInfo);
     }
     if (shouldTrack(rhsInfo)) {
       std::string note = "assigned to ";
@@ -447,9 +447,7 @@ void LifetimeAnalyzer::finalizePlan(LifetimePlan &plan) {
 void LifetimeAnalyzer::visitVariableExpr(VariableExprAST &varExpr,
                                          LifetimePlan &plan) {
   auto &entry = ensureVariable(varExpr.getName(), nullptr, plan);
-  if (pointerSemantics.requiresMoveOnAssign(entry.type) &&
-      (entry.uniqueMoved ||
-       pointerSemantics.isUniqueMoved(entry.name))) {
+  if (isUniqueMoved(entry)) {
     reportCompilerError("unique pointer '" + entry.name +
                         "' was moved and cannot be used until reassigned");
   }
@@ -496,6 +494,24 @@ void LifetimeAnalyzer::validateSmartPointerTransfer(
                       "' to raw ARC-managed variable '" + target.name +
                       "' during " + context,
                       "Use explicit smart pointer helpers or unwrap the value.");
+}
+
+void LifetimeAnalyzer::markUniqueMoved(VariableLifetimePlan &var) {
+  if (!pointerSemantics.requiresMoveOnAssign(var.type))
+    return;
+  var.uniqueState = VariableLifetimePlan::UniqueState::Moved;
+}
+
+void LifetimeAnalyzer::markUniqueReinitialized(VariableLifetimePlan &var) {
+  if (!pointerSemantics.requiresMoveOnAssign(var.type))
+    return;
+  var.uniqueState = VariableLifetimePlan::UniqueState::Alive;
+}
+
+bool LifetimeAnalyzer::isUniqueMoved(const VariableLifetimePlan &var) const {
+  if (!pointerSemantics.requiresMoveOnAssign(var.type))
+    return false;
+  return var.uniqueState == VariableLifetimePlan::UniqueState::Moved;
 }
 
 } // namespace analysis

@@ -32,16 +32,11 @@ public:
   bool sawExplicitRetain(const std::string &symbol) const;
   bool sawExplicitRelease(const std::string &symbol) const;
 
-  void markUniqueMoved(const std::string &symbol);
-  void clearUniqueMove(const std::string &symbol);
-  bool isUniqueMoved(const std::string &symbol) const;
-
   void reset();
 
 private:
   std::map<std::string, unsigned> retainCounts;
   std::map<std::string, unsigned> releaseCounts;
-  std::map<std::string, bool> uniqueMoves;
 };
 
 } // namespace analysis

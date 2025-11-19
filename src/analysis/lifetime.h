@@ -27,6 +27,14 @@ struct LifetimeEvent {
 };
 
 struct VariableLifetimePlan {
+  // Tracks the ownership state of unique<T> variables so we can flag
+  // use-after-move while still allowing reassignment after reinit.
+  enum class UniqueState {
+    Unknown,
+    Alive,
+    Moved
+  };
+
   std::string name;
   TypeInfo type{};
   bool escapes = false;
@@ -35,7 +43,7 @@ struct VariableLifetimePlan {
   bool needsZeroing = false;
   bool explicitRetainSeen = false;
   bool explicitReleaseSeen = false;
-  bool uniqueMoved = false;
+  UniqueState uniqueState = UniqueState::Unknown;
   std::vector<LifetimeEvent> events;
 };
 
@@ -88,6 +96,9 @@ private:
   void validateSmartPointerTransfer(VariableLifetimePlan &target,
                                     VariableLifetimePlan &source,
                                     const std::string &context);
+  void markUniqueMoved(VariableLifetimePlan &var);
+  void markUniqueReinitialized(VariableLifetimePlan &var);
+  bool isUniqueMoved(const VariableLifetimePlan &var) const;
 };
 
 } // namespace analysis

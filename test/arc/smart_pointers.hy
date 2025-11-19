@@ -22,6 +22,23 @@ void testUniquePointers()
     unique<TestObject> uniqueObj = unique<TestObject>(TestObject(10))
 }
 
+void testUniqueReassignment()
+{
+    unique<TestObject> donor = unique<TestObject>(TestObject(11))
+    unique<TestObject> slot = unique<TestObject>(TestObject(12))
+
+    slot = donor
+    donor = unique<TestObject>(TestObject(13))
+
+    int i = 0
+    while i < 15
+    {
+        slot = donor
+        donor = unique<TestObject>(TestObject(20 + i))
+        i++
+    }
+}
+
 void testSharedPointers()
 {
     shared<int> sharedInt = shared<int>(99)
@@ -66,6 +83,7 @@ void testTypeDescriptions()
 int main()
 {
     testUniquePointers()
+    testUniqueReassignment()
     testSharedPointers()
     testWeakPointers()
     testSmartPointerAssignments()

@@ -101,6 +101,22 @@ void testWeakReassignmentLoop()
     }
 }
 
+void testUniqueReassignmentLoop()
+{
+    unique<Counter> donor = unique<Counter>(Counter(40, 4000))
+    unique<Counter> slot = unique<Counter>(Counter(41, 4100))
+    int i = 0
+    while i < 25
+    {
+        slot = donor
+        donor = unique<Counter>(Counter(100 + i, 5000 + i))
+        unique<Counter> scratch = unique<Counter>(Counter(200 + i, 6000 + i))
+        slot = scratch
+        donor = unique<Counter>(Counter(300 + i, 7000 + i))
+        i++
+    }
+}
+
 int main()
 {
     testUniqueOwnership()
@@ -110,6 +126,7 @@ int main()
     testMultipleWeakObservers()
     testSharedReassignmentLoop()
     testWeakReassignmentLoop()
+    testUniqueReassignmentLoop()
 
     // Basic smoke test with direct usage
     unique<int> u = unique<int>(10)

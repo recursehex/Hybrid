@@ -41,9 +41,31 @@ void stressWeak()
     }
 }
 
+void stressUnique()
+{
+    unique<Payload> donor = unique<Payload>(Payload(10))
+    unique<Payload> slot = unique<Payload>(Payload(20))
+
+    int i = 0
+    while i < 30
+    {
+        slot = donor
+        donor = unique<Payload>(Payload(100 + i))
+
+        unique<Payload> scratch = unique<Payload>(Payload(200 + i))
+        slot = scratch
+        donor = unique<Payload>(Payload(300 + i))
+        i++
+    }
+
+    slot = donor
+    donor = unique<Payload>(Payload(999))
+}
+
 int main()
 {
     stressShared()
     stressWeak()
+    stressUnique()
     return 0
 }
