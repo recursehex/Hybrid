@@ -189,6 +189,8 @@ static llvm::FunctionCallee getSharedControlRetainStrongFunction();
 static llvm::FunctionCallee getSharedControlReleaseStrongFunction();
 static llvm::FunctionCallee getSharedControlReleaseWeakFunction();
 static llvm::FunctionCallee getSharedControlRetainWeakFunction();
+static llvm::FunctionCallee getSharedControlLockFunction();
+static llvm::FunctionCallee getSharedControlUseCountFunction();
 static llvm::StructType *
 getOrCreateSharedControlBlockType(const std::string &constructedName,
                                   llvm::Type *payloadTy);
@@ -1875,6 +1877,23 @@ static llvm::FunctionCallee getSharedControlRetainWeakFunction() {
       llvm::Type::getVoidTy(*TheContext), {opaquePtrTy}, false);
   return TheModule->getOrInsertFunction(
       "__hybrid_shared_control_retain_weak", fnType);
+}
+
+static llvm::FunctionCallee getSharedControlLockFunction() {
+  auto *opaquePtrTy = pointerType();
+  auto *fnType =
+      llvm::FunctionType::get(opaquePtrTy, {opaquePtrTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_shared_control_lock",
+                                        fnType);
+}
+
+static llvm::FunctionCallee getSharedControlUseCountFunction() {
+  auto *opaquePtrTy = pointerType();
+  auto *intTy = llvm::Type::getInt32Ty(*TheContext);
+  auto *fnType =
+      llvm::FunctionType::get(intTy, {opaquePtrTy}, false);
+  return TheModule->getOrInsertFunction(
+      "__hybrid_shared_control_use_count", fnType);
 }
 
 static bool typeInfoIsConcrete(const TypeInfo &info) {
@@ -4596,6 +4615,34 @@ static bool emitSmartPointerHelpers(const std::string &constructedName,
   };
 
   llvm::PointerType *structPtrTy = pointerType(structTy);
+  TypeInfo selfType = makeTypeInfo(constructedName);
+  finalizeTypeInfoMetadata(selfType);
+  selfType.refStorage = RefStorageClass::RefAlias;
+  selfType.declaredRef = true;
+
+  auto registerMethod = [&](const std::string &name, llvm::Function *fn,
+                            const TypeInfo &returnType,
+                            bool returnsByRef = false) -> bool {
+    if (!fn)
+      return false;
+    CompositeMemberInfo member;
+    member.modifiers = MemberModifiers{};
+    member.modifiers.access = MemberAccess::PublicReadWrite();
+    member.signature = constructedName + "." + name;
+    member.dispatchKey = member.signature;
+    member.returnType = returnType;
+    member.parameterTypes = {selfType};
+    member.parameterIsRef = {true};
+    member.returnsByRef = returnsByRef;
+    member.directFunction = fn;
+    metadata.methodInfo[name] = std::move(member);
+    auto &instantiations = metadata.genericMethodInstantiations[name];
+    std::string mangled(fn->getName());
+    if (std::find(instantiations.begin(), instantiations.end(), mangled) ==
+        instantiations.end())
+      instantiations.push_back(std::move(mangled));
+    return true;
+  };
 
   auto emitUniqueMoveHelper =
       [&](const InstanceFieldInfo *valueInfo,
@@ -4859,6 +4906,183 @@ static bool emitSmartPointerHelpers(const std::string &constructedName,
     return fn;
   };
 
+  auto emitSharedUseCountHelper = [&]() -> llvm::Function * {
+    const InstanceFieldInfo *controlInfo = getField("control");
+    if (!controlInfo)
+      return nullptr;
+    llvm::Type *controlTyField =
+        getTypeFromString(typeNameFromInfo(controlInfo->type));
+    if (!controlTyField)
+      return nullptr;
+    llvm::Type *intTy = llvm::Type::getInt32Ty(*TheContext);
+    llvm::Function *fn = createSmartPointerHelperFunction(
+        constructedName, "shared.use_count", intTy, {structPtrTy},
+        {"self"});
+    if (!fn)
+      return nullptr;
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", fn);
+    Builder->SetInsertPoint(entry);
+    llvm::Argument &selfArg = *fn->arg_begin();
+    llvm::Value *controlPtr =
+        Builder->CreateStructGEP(structTy, &selfArg, controlInfo->index,
+                                 "smart.use_count.control.ptr");
+    llvm::Value *controlVal =
+        Builder->CreateLoad(controlTyField, controlPtr,
+                            "smart.use_count.control");
+    llvm::Value *hasControl = Builder->CreateICmpNE(
+        controlVal, llvm::Constant::getNullValue(controlTyField),
+        "smart.use_count.hasctrl");
+    llvm::Function *parent = Builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock *haveCtrlBB = llvm::BasicBlock::Create(
+        *TheContext, "smart.use_count.have", parent);
+    llvm::BasicBlock *noCtrlBB = llvm::BasicBlock::Create(
+        *TheContext, "smart.use_count.none", parent);
+    llvm::BasicBlock *doneBB = llvm::BasicBlock::Create(
+        *TheContext, "smart.use_count.done", parent);
+    Builder->CreateCondBr(hasControl, haveCtrlBB, noCtrlBB);
+
+    Builder->SetInsertPoint(noCtrlBB);
+    Builder->CreateBr(doneBB);
+
+    Builder->SetInsertPoint(haveCtrlBB);
+    llvm::Value *opaqueControl = Builder->CreateBitCast(
+        controlVal, pointerType(), "smart.use_count.control.cast");
+    llvm::Value *count = Builder->CreateCall(
+        getSharedControlUseCountFunction(), {opaqueControl},
+        "smart.use_count.call");
+    Builder->CreateBr(doneBB);
+
+    Builder->SetInsertPoint(doneBB);
+    llvm::PHINode *result = Builder->CreatePHI(
+        intTy, 2, "smart.use_count.result");
+    result->addIncoming(llvm::ConstantInt::get(intTy, 0), noCtrlBB);
+    result->addIncoming(count, haveCtrlBB);
+    Builder->CreateRet(result);
+    llvm::verifyFunction(*fn);
+    return fn;
+  };
+
+  auto emitWeakLockHelper = [&](TypeInfo &outReturnType) -> llvm::Function * {
+    const InstanceFieldInfo *payloadInfo = getField("payload");
+    const InstanceFieldInfo *controlInfo = getField("weakControl");
+    if (!payloadInfo || !controlInfo)
+      return nullptr;
+    llvm::Type *payloadTyField =
+        getTypeFromString(typeNameFromInfo(payloadInfo->type));
+    llvm::Type *controlTyField =
+        getTypeFromString(typeNameFromInfo(controlInfo->type));
+    if (!payloadTyField || !controlTyField)
+      return nullptr;
+
+    std::string payloadTypeName = typeNameFromInfo(payloadInfo->type);
+    TypeInfo sharedReturnInfo =
+        makeTypeInfo("shared<" + payloadTypeName + ">");
+    finalizeTypeInfoMetadata(sharedReturnInfo);
+    materializeCompositeInstantiation(sharedReturnInfo);
+    std::string sharedKey =
+        stripNullableAnnotations(typeNameFromInfo(sharedReturnInfo));
+    llvm::StructType *sharedStructTy = StructTypes[sharedKey];
+    const CompositeTypeInfo *sharedInfo =
+        lookupCompositeInfo(sharedKey, /*countHit=*/false);
+    if (!sharedStructTy || !sharedInfo)
+      return nullptr;
+    const InstanceFieldInfo *sharedPayloadField =
+        findInstanceField(*sharedInfo, "payload");
+    const InstanceFieldInfo *sharedControlField =
+        findInstanceField(*sharedInfo, "control");
+    if (!sharedPayloadField || !sharedControlField)
+      return nullptr;
+    llvm::Type *sharedPayloadTy =
+        getTypeFromString(typeNameFromInfo(sharedPayloadField->type));
+    llvm::Type *sharedControlTy =
+        getTypeFromString(typeNameFromInfo(sharedControlField->type));
+    if (!sharedPayloadTy || !sharedControlTy)
+      return nullptr;
+
+    llvm::Function *fn = createSmartPointerHelperFunction(
+        constructedName, "weak.lock", sharedStructTy, {structPtrTy},
+        {"self"});
+    if (!fn)
+      return nullptr;
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(*TheContext, "entry", fn);
+    Builder->SetInsertPoint(entry);
+    llvm::Argument &selfArg = *fn->arg_begin();
+
+    llvm::AllocaInst *resultAlloca =
+        Builder->CreateAlloca(sharedStructTy, nullptr,
+                              "smart.lock.alloca");
+    Builder->CreateStore(llvm::Constant::getNullValue(sharedStructTy),
+                         resultAlloca);
+
+    llvm::Value *controlPtr =
+        Builder->CreateStructGEP(structTy, &selfArg, controlInfo->index,
+                                 "smart.lock.control.ptr");
+    llvm::Value *controlVal =
+        Builder->CreateLoad(controlTyField, controlPtr,
+                            "smart.lock.control");
+    llvm::Value *hasControl = Builder->CreateICmpNE(
+        controlVal, llvm::Constant::getNullValue(controlTyField),
+        "smart.lock.hasctrl");
+    llvm::Function *parent = Builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock *tryLockBB = llvm::BasicBlock::Create(
+        *TheContext, "smart.lock.try", parent);
+    llvm::BasicBlock *doneBB = llvm::BasicBlock::Create(
+        *TheContext, "smart.lock.done", parent);
+    llvm::BasicBlock *successBB = llvm::BasicBlock::Create(
+        *TheContext, "smart.lock.success", parent);
+    Builder->CreateCondBr(hasControl, tryLockBB, doneBB);
+
+    Builder->SetInsertPoint(tryLockBB);
+    llvm::Value *opaqueControl = Builder->CreateBitCast(
+        controlVal, pointerType(), "smart.lock.control.cast");
+    llvm::Value *payloadOpaque = Builder->CreateCall(
+        getSharedControlLockFunction(), {opaqueControl},
+        "smart.lock.call");
+    llvm::Value *shareable = Builder->CreateICmpNE(
+        payloadOpaque, llvm::ConstantPointerNull::get(pointerType()),
+        "smart.lock.live");
+    Builder->CreateCondBr(shareable, successBB, doneBB);
+
+    Builder->SetInsertPoint(successBB);
+    llvm::Value *typedPayload = nullptr;
+    if (sharedPayloadTy->isPointerTy()) {
+      typedPayload = Builder->CreateBitCast(
+          payloadOpaque, sharedPayloadTy, "smart.lock.payload.cast");
+    } else {
+      llvm::PointerType *payloadPtrTy = pointerType(sharedPayloadTy);
+      llvm::Value *payloadPtr = Builder->CreateBitCast(
+          payloadOpaque, payloadPtrTy, "smart.lock.payload.ptr");
+      typedPayload = Builder->CreateLoad(
+          sharedPayloadTy, payloadPtr, "smart.lock.payload");
+    }
+    llvm::Value *payloadPtr =
+        Builder->CreateStructGEP(sharedStructTy, resultAlloca,
+                                 sharedPayloadField->index,
+                                 "smart.lock.result.payload.ptr");
+    Builder->CreateStore(typedPayload, payloadPtr);
+
+    llvm::Value *typedControl = controlVal;
+    if (typedControl->getType() != sharedControlTy)
+      typedControl = Builder->CreateBitCast(
+          controlVal, sharedControlTy, "smart.lock.control.result.cast");
+    llvm::Value *controlPtrOut =
+        Builder->CreateStructGEP(sharedStructTy, resultAlloca,
+                                 sharedControlField->index,
+                                 "smart.lock.result.control.ptr");
+    Builder->CreateStore(typedControl, controlPtrOut);
+    Builder->CreateBr(doneBB);
+
+    Builder->SetInsertPoint(doneBB);
+    llvm::Value *result = Builder->CreateLoad(
+        sharedStructTy, resultAlloca, "smart.lock.result");
+    Builder->CreateRet(result);
+    llvm::verifyFunction(*fn);
+    outReturnType = std::move(sharedReturnInfo);
+    return fn;
+  };
+
   bool ok = true;
   switch (kind) {
   case SmartPointerKind::Unique: {
@@ -4886,12 +5110,16 @@ static bool emitSmartPointerHelpers(const std::string &constructedName,
                                   SmartPointerKind::Shared);
     llvm::Function *destroyFn =
         emitPointerDestroyHelper("shared.destroy", SmartPointerKind::Shared);
-    if (!copyFn || !moveFn || !destroyFn)
+    llvm::Function *useCountFn = emitSharedUseCountHelper();
+    if (!copyFn || !moveFn || !destroyFn || !useCountFn)
       ok = false;
     else {
       metadata.smartPointerCopyHelper = copyFn->getName().str();
       metadata.smartPointerMoveHelper = moveFn->getName().str();
       metadata.smartPointerDestroyHelper = destroyFn->getName().str();
+      TypeInfo countReturn = makeTypeInfo("int");
+      finalizeTypeInfoMetadata(countReturn);
+      registerMethod("use_count", useCountFn, countReturn);
     }
     break;
   }
@@ -4904,12 +5132,15 @@ static bool emitSmartPointerHelpers(const std::string &constructedName,
                                   SmartPointerKind::Weak);
     llvm::Function *destroyFn =
         emitPointerDestroyHelper("weak.destroy", SmartPointerKind::Weak);
-    if (!copyFn || !moveFn || !destroyFn)
+    TypeInfo lockReturn;
+    llvm::Function *lockFn = emitWeakLockHelper(lockReturn);
+    if (!copyFn || !moveFn || !destroyFn || !lockFn)
       ok = false;
     else {
       metadata.smartPointerCopyHelper = copyFn->getName().str();
       metadata.smartPointerMoveHelper = moveFn->getName().str();
       metadata.smartPointerDestroyHelper = destroyFn->getName().str();
+      registerMethod("lock", lockFn, lockReturn);
     }
     break;
   }
@@ -10640,15 +10871,56 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Cast and store the initial value if present
         if (InitVal) {
-          if (diagnoseDisallowedImplicitIntegerConversion(
-                  getInitializer(), InitVal, VarType, getType(),
-                  "initializer for '" + getName() + "'"))
-            return nullptr;
-          InitVal = castToType(InitVal, VarType, getType());
-          if (declaredInfo.requiresARC() && !declaredInfo.isSmartPointer())
-            emitManagedStore(Alloca, InitVal, declaredInfo, getName());
-          else
-            Builder->CreateStore(InitVal, Alloca);
+          if (declaredInfo.isSmartPointer()) {
+            const CompositeTypeInfo *metadata =
+                resolveSmartPointerMetadata(declaredInfo);
+            if (!metadata) {
+              reportCompilerError("Unable to materialize smart pointer '" +
+                                  typeNameFromInfo(declaredInfo) + "' for '" +
+                                  getName() + "'");
+              return nullptr;
+            }
+            auto structIt =
+                StructTypes.find(stripNullableAnnotations(
+                    typeNameFromInfo(declaredInfo)));
+            llvm::StructType *structTy =
+                structIt != StructTypes.end() ? structIt->second : nullptr;
+            if (!structTy) {
+              reportCompilerError("Internal error: missing struct type for '" +
+                                  typeNameFromInfo(declaredInfo) + "'");
+              return nullptr;
+            }
+
+            SmartPointerWrapperSlot slot = prepareSmartPointerWrapperSlot(
+                Alloca, structTy, getName());
+            if (!slot.storage)
+              return nullptr;
+
+            llvm::Value *stored = InitVal;
+            if (stored->getType()->isPointerTy()) {
+              stored = Builder->CreateLoad(
+                  structTy, stored,
+                  buildArcOpLabel(getName(), "smart.init.load"));
+            }
+            if (stored->getType() != structTy) {
+              reportCompilerError(
+                  "Initializer for '" + getName() +
+                  "' has incompatible smart pointer representation");
+              return nullptr;
+            }
+
+            Builder->CreateStore(stored, slot.storage);
+          } else {
+            if (diagnoseDisallowedImplicitIntegerConversion(
+                    getInitializer(), InitVal, VarType, getType(),
+                    "initializer for '" + getName() + "'"))
+              return nullptr;
+            InitVal = castToType(InitVal, VarType, getType());
+            if (declaredInfo.requiresARC())
+              emitManagedStore(Alloca, InitVal, declaredInfo, getName());
+            else
+              Builder->CreateStore(InitVal, Alloca);
+          }
         }
 
         // Remember this local binding

@@ -503,7 +503,8 @@ int main(int argc, char **argv) {
                 codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
 
 #ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
-          std::string command = "clang \"" + tempPathStr + "\" \"" +
+          const char *linker = "clang++";
+          std::string command = std::string(linker) + " \"" + tempPathStr + "\" \"" +
                                 std::string(HYBRID_RUNTIME_SUPPORT_SOURCE) + "\"";
 #ifdef HYBRID_ARC_RUNTIME_SOURCE
           command += " \"" + std::string(HYBRID_ARC_RUNTIME_SOURCE) + "\"";

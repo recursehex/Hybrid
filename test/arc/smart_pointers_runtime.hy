@@ -53,6 +53,35 @@ void testWeakObservation()
     // When strongOwner is destroyed, observer should be zeroed
 }
 
+void testSharedUseCount()
+{
+    shared<Counter> primary = shared<Counter>(Counter(5, 500))
+    int first = primary.use_count()
+    assert first == 1
+
+    shared<Counter> secondary = primary
+    assert primary.use_count() == 2
+    assert secondary.use_count() == 2
+}
+
+void testWeakLock()
+{
+    shared<Counter> owner = shared<Counter>(Counter(6, 600))
+    weak<Counter> observer = weak<Counter>(owner)
+    shared<Counter> promoted = observer.lock()
+    assert promoted.use_count() == 2
+
+    weak<Counter> dangling = weak<Counter>()
+    if true
+    {
+        shared<Counter> temp = shared<Counter>(Counter(7, 700))
+        dangling = weak<Counter>(temp)
+    }
+
+    shared<Counter> expired = dangling.lock()
+    assert expired.use_count() == 0
+}
+
 // Test shared<T> with primitive types
 void testSharedPrimitives()
 {
@@ -124,6 +153,8 @@ int main()
     testWeakObservation()
     testSharedPrimitives()
     testMultipleWeakObservers()
+    testSharedUseCount()
+    testWeakLock()
     testSharedReassignmentLoop()
     testWeakReassignmentLoop()
     testUniqueReassignmentLoop()

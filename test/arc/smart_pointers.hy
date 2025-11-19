@@ -74,10 +74,10 @@ void testTypeDescriptions()
     assert uniqueDesc == "type:unique<int>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:none"
 
     string sharedDesc = describeType("shared<TestObject>")
-    assert sharedDesc == "type:shared<TestObject>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=TestObject|genericMethodInstantiations:none"
+    assert sharedDesc == "type:shared<TestObject>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=TestObject|genericMethodInstantiations:shared.use_count=1"
 
     string weakDesc = describeType("weak<int>")
-    assert weakDesc == "type:weak<int>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:none"
+    assert weakDesc == "type:weak<int>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:weak.lock=1"
 }
 
 int main()

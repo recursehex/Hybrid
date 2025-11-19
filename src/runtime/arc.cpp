@@ -39,6 +39,9 @@ void __hybrid_shared_control_retain_weak(
     HybridSharedControlBlock *control);
 void __hybrid_shared_control_release_weak(
     HybridSharedControlBlock *control);
+void *__hybrid_shared_control_lock(HybridSharedControlBlock *control);
+std::uint32_t __hybrid_shared_control_use_count(
+    HybridSharedControlBlock *control);
 
 void *hybrid_alloc_object(std::size_t totalSize,
                           const HybridTypeDescriptor *descriptor) {
@@ -171,6 +174,31 @@ void __hybrid_shared_control_release_weak(
   if (previous == 1) {
     std::free(control);
   }
+}
+
+void *__hybrid_shared_control_lock(HybridSharedControlBlock *control) {
+  if (!control)
+    return nullptr;
+  if (!control->payload)
+    return nullptr;
+  std::uint32_t observed =
+      control->strongCount.load(std::memory_order_acquire);
+  while (observed != 0) {
+    if (control->strongCount.compare_exchange_weak(
+            observed, observed + 1, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      hybrid_retain(control->payload);
+      return control->payload;
+    }
+  }
+  return nullptr;
+}
+
+std::uint32_t __hybrid_shared_control_use_count(
+    HybridSharedControlBlock *control) {
+  if (!control)
+    return 0;
+  return control->strongCount.load(std::memory_order_acquire);
 }
 
 } // extern "C"

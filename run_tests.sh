@@ -422,6 +422,20 @@ void __hybrid_shared_control_release_weak(void *control) {
     (void)control;
 }
 
+void *__hybrid_shared_control_lock(void *control) {
+    HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
+    if (!ctrl || ctrl->strong <= 0)
+        return NULL;
+    return ctrl->payload;
+}
+
+int __hybrid_shared_control_use_count(void *control) {
+    HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
+    if (!ctrl)
+        return 0;
+    return ctrl->strong;
+}
+
 EOF
     clang -c "${RUNTIME_LIB%.o}.c" -o "$RUNTIME_LIB" 2>/dev/null
 fi
@@ -549,11 +563,11 @@ run_test() {
                     local clang_success=0
                     if [ $needs_smart_ptr_runtime -eq 1 ]; then
                         # Smart pointer tests use C++ runtime - don't include stub runtime library
-                        if clang "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                        if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
                             clang_success=1
                         fi
                     else
-                        if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                        if clang++ "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
                             clang_success=1
                         fi
                     fi
@@ -607,11 +621,11 @@ run_test() {
                         local clang_success=0
                         if [ $needs_smart_ptr_runtime -eq 1 ]; then
                             # Smart pointer tests use C++ runtime - don't include stub runtime library
-                            if clang "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                            if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
                                 clang_success=1
                             fi
                         else
-                            if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                            if clang++ "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
                                 clang_success=1
                             fi
                         fi
