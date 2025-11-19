@@ -540,7 +540,25 @@ run_test() {
                 echo "$clean_ir" > "$temp_ir"
 
                 if grep -q "define i32 @main" "$temp_ir"; then
-                    if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                    # Check if smart pointer runtime is needed
+                    local needs_smart_ptr_runtime=0
+                    if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
+                        needs_smart_ptr_runtime=1
+                    fi
+
+                    local clang_success=0
+                    if [ $needs_smart_ptr_runtime -eq 1 ]; then
+                        # Smart pointer tests use C++ runtime - don't include stub runtime library
+                        if clang "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                            clang_success=1
+                        fi
+                    else
+                        if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                            clang_success=1
+                        fi
+                    fi
+
+                    if [ $clang_success -eq 1 ]; then
                         set +e
                         runtime_output=$("$temp_bin" 2>&1)
                         runtime_exit_code=$?
@@ -580,7 +598,25 @@ run_test() {
                     echo "$clean_ir" > "$temp_ir"
 
                     if grep -q "define i32 @main" "$temp_ir"; then
-                        if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                        # Check if smart pointer runtime is needed
+                        local needs_smart_ptr_runtime=0
+                        if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
+                            needs_smart_ptr_runtime=1
+                        fi
+
+                        local clang_success=0
+                        if [ $needs_smart_ptr_runtime -eq 1 ]; then
+                            # Smart pointer tests use C++ runtime - don't include stub runtime library
+                            if clang "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                                clang_success=1
+                            fi
+                        else
+                            if clang "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                                clang_success=1
+                            fi
+                        fi
+
+                        if [ $clang_success -eq 1 ]; then
                             set +e
                             runtime_output=$("$temp_bin" 2>&1)
                             runtime_exit_code=$?

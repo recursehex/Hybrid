@@ -403,12 +403,61 @@ int main(int argc, char **argv) {
       };
 
       auto writeModuleIR = [&](llvm::raw_ostream &os) {
+        // LLVM's module printer emits type declarations after functions, but LLVM's
+        // textual IR parser requires types to be declared before use. We work around
+        // this by capturing the IR, extracting type declarations, and re-ordering them.
+        std::string moduleIR;
+        llvm::raw_string_ostream buffer(moduleIR);
+
         if (codegenCtx.genericsDiagnostics.diagnosticsEnabled) {
           captureModuleIR();
-          os << cachedModuleIR;
-          return;
+          moduleIR = cachedModuleIR;
+        } else {
+          module->print(buffer, nullptr);
+          buffer.flush();
         }
-        module->print(os, nullptr);
+
+        // Extract and reorder: module metadata, then types, then everything else
+        std::istringstream iss(moduleIR);
+        std::string line;
+        std::vector<std::string> moduleMetadata;
+        std::vector<std::string> typeDecls;
+        std::vector<std::string> otherLines;
+        bool inMetadata = true;
+
+        while (std::getline(iss, line)) {
+          // Module metadata lines start with ';' or are special directives
+          if (inMetadata && (line.empty() || line[0] == ';' ||
+              line.find("source_filename") == 0 ||
+              line.find("target datalayout") == 0 ||
+              line.find("target triple") == 0)) {
+            moduleMetadata.push_back(line);
+            continue;
+          }
+          inMetadata = false;
+
+          // Type declarations match pattern: %TypeName = type { ... }
+          size_t firstNonSpace = line.find_first_not_of(" \t");
+          if (firstNonSpace != std::string::npos && line[firstNonSpace] == '%') {
+            size_t typePos = line.find(" = type ");
+            if (typePos != std::string::npos) {
+              typeDecls.push_back(line);
+              continue;
+            }
+          }
+          otherLines.push_back(line);
+        }
+
+        // Emit in correct order: metadata, types, then everything else
+        for (const auto &meta : moduleMetadata) {
+          os << meta << "\n";
+        }
+        for (const auto &decl : typeDecls) {
+          os << decl << "\n";
+        }
+        for (const auto &other : otherLines) {
+          os << other << "\n";
+        }
       };
 
       auto emitTextFile = [&](const std::string &path) -> bool {

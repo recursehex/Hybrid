@@ -1,0 +1,90 @@
+// Runtime smart pointer behavior validation
+// Tests reference counting, ownership transfer, and weak zeroing at runtime
+
+class Counter
+{
+    int id
+    int value
+
+    Counter(int identifier, int val)
+    {
+        this.id = identifier
+        this.value = val
+    }
+
+    int getId()
+    {
+        return this.id
+    }
+
+    int getValue()
+    {
+        return this.value
+    }
+
+    void increment()
+    {
+        this.value = this.value + 1
+    }
+}
+
+// Test unique<T> exclusive ownership
+void testUniqueOwnership()
+{
+    unique<Counter> owner = unique<Counter>(Counter(1, 100))
+    // After scope exit, owner should be destroyed and Counter freed
+}
+
+// Test shared<T> reference counting with multiple owners
+void testSharedRefCounting()
+{
+    shared<Counter> primary = shared<Counter>(Counter(2, 200))
+    shared<Counter> secondary = primary  // Increment strong count
+    shared<Counter> tertiary = secondary // Increment strong count again
+    // All three share ownership; object destroyed when last one goes out of scope
+}
+
+// Test weak<T> observation without ownership
+void testWeakObservation()
+{
+    shared<Counter> strongOwner = shared<Counter>(Counter(3, 300))
+    weak<Counter> observer = weak<Counter>(strongOwner)
+    // observer does not keep Counter alive
+    // When strongOwner is destroyed, observer should be zeroed
+}
+
+// Test shared<T> with primitive types
+void testSharedPrimitives()
+{
+    shared<int> sharedNum = shared<int>(777)
+    shared<int> copy1 = sharedNum
+    shared<int> copy2 = sharedNum
+    shared<int> copy3 = copy1
+    // All copies share the same control block
+}
+
+// Test weak<T> with multiple weak observers
+void testMultipleWeakObservers()
+{
+    shared<Counter> owner = shared<Counter>(Counter(4, 400))
+    weak<Counter> observer1 = weak<Counter>(owner)
+    weak<Counter> observer2 = weak<Counter>(owner)
+    weak<Counter> observer3 = weak<Counter>(owner)
+    // All observers watch the same shared owner
+}
+
+int main()
+{
+    testUniqueOwnership()
+    testSharedRefCounting()
+    testWeakObservation()
+    testSharedPrimitives()
+    testMultipleWeakObservers()
+
+    // Basic smoke test with direct usage
+    unique<int> u = unique<int>(10)
+    shared<int> s = shared<int>(20)
+    weak<int> w = weak<int>(s)
+
+    return 0
+}

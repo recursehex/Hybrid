@@ -1970,7 +1970,28 @@ static bool emitSmartPointerInitFromVariable(const TypeInfo &declaredInfo,
       Builder->CreateCall(helperFn, {sourcePtr},
                           buildArcOpLabel(label, preferMove ? "smart.move.call"
                                                             : "smart.copy.call"));
-  Builder->CreateStore(result, destPtr);
+
+  // The helper returns a struct value, but destPtr is a pointer to pointer.
+  // We need to allocate storage for the struct and store the pointer to it.
+  llvm::Type *structType = result->getType();
+  if (!structType->isStructTy())
+  {
+    reportCompilerError(
+        "Internal error: smart pointer copy/move helper returned non-struct type");
+    return false;
+  }
+
+  // Allocate storage for the struct value
+  llvm::AllocaInst *structStorage =
+      Builder->CreateAlloca(structType, nullptr,
+                            buildArcOpLabel(label, "smart.inst"));
+
+  // Store the struct value into the allocated storage
+  Builder->CreateStore(result, structStorage);
+
+  // Store the pointer to the struct into destPtr (the wrapper pointer)
+  Builder->CreateStore(structStorage, destPtr);
+
   return true;
 }
 
@@ -4398,6 +4419,17 @@ static bool materializeSmartPointerInstantiation(
   structTy->setBody(fieldTypes);
   StructFieldIndices[constructedName] = fieldIndices;
   StructFieldTypes[constructedName] = fieldTypeMap;
+
+  // Force the struct type to be emitted early in LLVM textual IR by creating
+  // a dummy global variable. This ensures the type definition appears before
+  // any functions that use it, which is required by LLVM's textual IR parser.
+  std::string dummyGlobalName =
+      "__hybrid_force_type_emission_" + sanitizeForMangle(constructedName);
+  if (!TheModule->getGlobalVariable(dummyGlobalName, true)) {
+    new llvm::GlobalVariable(
+        *TheModule, structTy, true, llvm::GlobalValue::InternalLinkage,
+        llvm::Constant::getNullValue(structTy), dummyGlobalName);
+  }
 
   CompositeTypeInfo info;
   info.kind = AggregateKind::Class;
