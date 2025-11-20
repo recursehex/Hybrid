@@ -999,6 +999,28 @@ char_literal_end:
     }
   }
 
+  if (LastChar == '~') {
+    SourceLocation start = lex.lastCharLocation();
+    int NextChar = lex.consumeChar();
+    if (std::isalpha(static_cast<unsigned char>(NextChar)) || NextChar == '_') {
+      std::string ident;
+      ident.push_back(static_cast<char>(NextChar));
+      int ch = lex.consumeChar();
+      while (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_') {
+        ident.push_back(static_cast<char>(ch));
+        ch = lex.consumeChar();
+      }
+      lex.identifierStr = ident;
+      LastChar = ch;
+      lex.setTokenStart(start);
+      return tok_tilde_identifier;
+    }
+    lex.unconsumeChar(NextChar);
+    LastChar = lex.consumeChar();
+    lex.setTokenStart(start);
+    return '~';
+  }
+
   // Check for colon (type casting operator)
   if (LastChar == ':') {
     SourceLocation start = lex.lastCharLocation();

@@ -1779,7 +1779,12 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       getNextToken(); // eat '.'
       std::string MemberName;
       std::string MemberGenericSuffix;
-      if (CurTok == tok_identifier) {
+      bool isDestructor = false;
+      if (CurTok == tok_tilde_identifier) {
+        isDestructor = true;
+        MemberName = IdentifierStr;
+        getNextToken();
+      } else if (CurTok == tok_identifier) {
         MemberName = IdentifierStr;
         getNextToken();
       } else if (CurTok == tok_this) {
@@ -1789,23 +1794,32 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         LogError("Expected member name after '.'");
         return nullptr;
       }
-      std::string DecoratedName = MemberName;
-      if (!ParseOptionalGenericArgumentList(DecoratedName, true))
-        return nullptr;
-      if (DecoratedName.size() > MemberName.size()) {
-        MemberGenericSuffix = DecoratedName.substr(MemberName.size());
-        SkipNewlines();
-        if (CurTok != '(') {
-          reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
-                              "Use parentheses to invoke the method after specifying explicit type arguments.");
+      if (isDestructor) {
+        LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
+                                                    std::string{}, true);
+      } else {
+        std::string DecoratedName = MemberName;
+        if (!ParseOptionalGenericArgumentList(DecoratedName, true))
           return nullptr;
+        if (DecoratedName.size() > MemberName.size()) {
+          MemberGenericSuffix = DecoratedName.substr(MemberName.size());
+          SkipNewlines();
+          if (CurTok != '(') {
+            reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
+                                "Use parentheses to invoke the method after specifying explicit type arguments.");
+            return nullptr;
+          }
         }
+        LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
+                                                    std::move(MemberGenericSuffix));
       }
-      LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
-                                                  std::move(MemberGenericSuffix));
     } else if (CurTok == tok_null_safe_access) {
       // Null-safe member access
       getNextToken(); // eat '?.'
+      if (CurTok == tok_tilde_identifier) {
+        reportCompilerError("Null-safe destructor access is not supported");
+        return nullptr;
+      }
       if (CurTok != tok_identifier) {
         LogError("Expected member name after '?.'");
         return nullptr;
@@ -1828,34 +1842,48 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         return nullptr;
       }
       getNextToken(); // eat '->'
-      if (CurTok != tok_identifier) {
+      bool isDestructor = false;
+      if (CurTok == tok_tilde_identifier)
+        isDestructor = true;
+      if (CurTok != tok_identifier && CurTok != tok_tilde_identifier) {
         LogError("Expected member name after '->'");
         return nullptr;
       }
       std::string MemberName = IdentifierStr;
       getNextToken(); // eat member name
       std::string MemberGenericSuffix;
-      std::string DecoratedName = MemberName;
-      if (!ParseOptionalGenericArgumentList(DecoratedName, true))
-        return nullptr;
-      if (DecoratedName.size() > MemberName.size()) {
-        MemberGenericSuffix = DecoratedName.substr(MemberName.size());
-        SkipNewlines();
-        if (CurTok != '(') {
-          reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
-                              "Use parentheses to invoke the method after specifying explicit type arguments.");
+      if (!isDestructor) {
+        std::string DecoratedName = MemberName;
+        if (!ParseOptionalGenericArgumentList(DecoratedName, true))
           return nullptr;
+        if (DecoratedName.size() > MemberName.size()) {
+          MemberGenericSuffix = DecoratedName.substr(MemberName.size());
+          SkipNewlines();
+          if (CurTok != '(') {
+            reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
+                                "Use parentheses to invoke the method after specifying explicit type arguments.");
+            return nullptr;
+          }
         }
       }
       // Create (@ptr).member
       auto Deref = std::make_unique<UnaryExprAST>("@", std::move(LHS), true);
       LHS = std::make_unique<MemberAccessExprAST>(std::move(Deref), MemberName,
-                                                  std::move(MemberGenericSuffix));
+                                                  std::move(MemberGenericSuffix),
+                                                  isDestructor);
     } else if (CurTok == '(') {
       std::vector<std::unique_ptr<ExprAST>> Args;
       if (!ParseArgumentList(Args))
         return nullptr;
-      LHS = std::make_unique<CallExprAST>(std::move(LHS), std::move(Args));
+      std::unique_ptr<ExprAST> CalleeExpr = std::move(LHS);
+      auto Call = std::make_unique<CallExprAST>(std::move(CalleeExpr),
+                                                std::move(Args));
+      if (auto *member =
+              dynamic_cast<MemberAccessExprAST *>(Call->getCalleeExpr())) {
+        if (member->isDestructorAccess())
+          Call->markDestructorCall(member->getMemberName());
+      }
+      LHS = std::move(Call);
     } else {
       break;
     }
@@ -2928,14 +2956,16 @@ std::unique_ptr<StmtAST> ParseStatement() {
     getNextToken(); // eat 'free'
     while (CurTok == tok_newline)
       getNextToken();
-    if (CurTok != tok_newline && CurTok != ';' && CurTok != '}' &&
-        CurTok != tok_eof) {
-      auto Expr = ParseExpression();
-      if (!Expr)
-        return nullptr;
+    if (CurTok == tok_newline || CurTok == ';' || CurTok == '}' ||
+        CurTok == tok_eof) {
+      return LogErrorS("Expected expression after 'free'",
+                       "Provide a reference expression to release.");
     }
-    return LogErrorS("The 'free' keyword is reserved for upcoming ARC support",
-                     "Manual release statements will be added alongside ARC runtime hooks.");
+    auto Expr = ParseExpression();
+    if (!Expr)
+      return nullptr;
+    return std::make_unique<ExpressionStmtAST>(
+        std::make_unique<FreeExprAST>(std::move(Expr)));
   }
   case tok_ref:
     // Handle ref variable declarations
@@ -3377,6 +3407,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   std::vector<MethodDefinition> Methods;
   bool seenThisOverride = false;
   bool hasConstructor = false;
+  bool hasDestructor = false;
+  int destructorIndex = -1;
 
   auto parseConstructor = [&](MemberModifiers modifiers,
                               std::vector<std::string> ctorGenericParams) -> bool {
@@ -3634,6 +3666,88 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     if (!ParsePendingMemberModifiers(pendingMods))
       return nullptr;
 
+    if (CurTok == tok_tilde_identifier) {
+      if (kind == AggregateKind::Interface) {
+        reportCompilerError("Interfaces cannot declare destructors");
+        return nullptr;
+      }
+      if (hasDestructor) {
+        reportCompilerError("Type '" + compositeName + "' already declares a destructor");
+        return nullptr;
+      }
+
+      std::string dtorTarget = IdentifierStr;
+      getNextToken(); // eat '~Name'
+      SkipNewlines();
+
+      if (dtorTarget != compositeName) {
+        reportCompilerError("Destructor name must match its enclosing type",
+                            "Use '~" + compositeName + "()' to declare a destructor for '" +
+                                compositeName + "'.");
+        return nullptr;
+      }
+
+      std::string decoratedName = dtorTarget;
+      if (!ParseOptionalGenericArgumentList(decoratedName, true))
+        return nullptr;
+      if (decoratedName != dtorTarget) {
+        reportCompilerError("Destructors cannot declare generic parameters");
+        return nullptr;
+      }
+
+      if (CurTok != '(') {
+        LogError("Expected '(' after destructor name");
+        return nullptr;
+      }
+      getNextToken(); // eat '('
+      SkipNewlines();
+      if (CurTok != ')') {
+        reportCompilerError("Destructors cannot declare parameters");
+        return nullptr;
+      }
+      getNextToken(); // eat ')'
+      SkipNewlines();
+
+      MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+      if ((modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+        reportCompilerError("Destructors cannot be static");
+        return nullptr;
+      }
+      if ((modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+        reportCompilerError("Destructors cannot be const-qualified");
+        return nullptr;
+      }
+      if (modifiers.isAbstract) {
+        reportCompilerError("Destructors cannot be abstract");
+        return nullptr;
+      }
+      if (modifiers.isVirtual || modifiers.isOverride) {
+        reportCompilerError("Destructors do not support virtual or override modifiers");
+        return nullptr;
+      }
+
+      if (CurTok != '{') {
+        LogError("Expected '{' after destructor declaration");
+        return nullptr;
+      }
+
+      auto Body = ParseBlock();
+      if (!Body)
+        return nullptr;
+
+      TypeInfo dtorReturn = buildDeclaredTypeInfo("void", false);
+      std::string functionName = compositeName + ".~" + compositeName;
+      auto Proto = std::make_unique<PrototypeAST>(
+          std::move(dtorReturn), functionName, std::vector<Parameter>{},
+          false, false);
+      auto Dtor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
+      Methods.emplace_back(std::move(Dtor), modifiers, MethodKind::Destructor,
+                           "~" + compositeName);
+      destructorIndex = static_cast<int>(Methods.size()) - 1;
+      hasDestructor = true;
+      continue;
+    }
+
     std::string Type;
 
     if (CurTok == tok_identifier && IdentifierStr == compositeName) {
@@ -3829,6 +3943,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       inheritance.constructorAccesses.push_back(method.getModifiers().access);
   }
   Result->setInheritanceMetadata(std::move(inheritance));
+  if (destructorIndex >= 0)
+    Result->setDestructorIndex(destructorIndex);
   return Result;
 }
 // Evaluate constant expressions at compile time

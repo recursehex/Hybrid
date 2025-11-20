@@ -163,6 +163,7 @@ enum Token {
   tok_autoreleasepool = -105,  // @autoreleasepool
   tok_new = -106,              // new keyword (reserved)
   tok_free = -107,             // free keyword (reserved)
+  tok_tilde_identifier = -108, // ~identifier (destructors)
 
   // error token
   tok_error = -100            // error during lexing

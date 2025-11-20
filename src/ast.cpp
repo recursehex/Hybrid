@@ -199,12 +199,15 @@ static TypeInfo makeTypeInfo(std::string typeName,
                              RefStorageClass storage = RefStorageClass::None,
                              bool isMutable = true,
                              bool declaredRef = false);
+static std::string sanitizeCompositeLookupName(const std::string &typeName);
 
 static bool ensureNoDuplicateGenericParameters(const std::vector<std::string> &params,
                                                const std::string &contextDescription);
 
 static std::string stripNullableAnnotations(const std::string &typeName);
 static std::string typeNameFromInfo(const TypeInfo &info);
+static bool typeHasDestructor(const TypeInfo &info);
+static bool typeNeedsLifetimeTracking(const TypeInfo &info);
 
 static void dumpGenericBindingStack(const GenericsDiagnostics &diag) {
   if (diag.bindingStack.empty())
@@ -1000,6 +1003,23 @@ static std::string typeNameFromInfo(const TypeInfo &info) {
   return result;
 }
 
+static bool typeHasDestructor(const TypeInfo &info) {
+  std::string base = sanitizeCompositeLookupName(typeNameFromInfo(info));
+  if (base.empty())
+    return false;
+  if (const CompositeTypeInfo *meta = lookupCompositeInfo(base))
+    return meta->hasDestructor;
+  return false;
+}
+
+static bool typeNeedsLifetimeTracking(const TypeInfo &info) {
+  if (info.isAlias())
+    return false;
+  if (info.requiresARC())
+    return true;
+  return typeHasDestructor(info);
+}
+
 static std::string joinListOrNone(const std::vector<std::string> &items) {
   if (items.empty())
     return "none";
@@ -1301,6 +1321,8 @@ static bool computeVirtualDispatchLayout(const std::string &typeName,
   if (metadata.kind != AggregateKind::Class)
     return true;
 
+  constexpr const char *DestructorKey = "__dtor";
+
   std::vector<std::string> order;
   std::vector<std::string> impls;
   std::vector<bool> isAbstract;
@@ -1319,6 +1341,7 @@ static bool computeVirtualDispatchLayout(const std::string &typeName,
     impls = baseInfo->vtableImplementations;
     isAbstract = baseInfo->vtableIsAbstract;
     slotMap = baseInfo->vtableSlotMap;
+    metadata.destructorVtableSlot = baseInfo->destructorVtableSlot;
   }
 
   impls.resize(order.size());
@@ -1374,6 +1397,29 @@ static bool computeVirtualDispatchLayout(const std::string &typeName,
   metadata.vtableImplementations = std::move(impls);
   metadata.vtableIsAbstract = std::move(isAbstract);
   metadata.vtableSlotMap = std::move(slotMap);
+
+  if (metadata.hasDestructor) {
+    unsigned slot = metadata.destructorVtableSlot;
+    if (slot == std::numeric_limits<unsigned>::max()) {
+      slot = static_cast<unsigned>(metadata.vtableOrder.size());
+      metadata.vtableOrder.push_back(DestructorKey);
+      metadata.vtableImplementations.push_back(metadata.destructorFunctionName);
+      metadata.vtableIsAbstract.push_back(false);
+    } else {
+      if (slot >= metadata.vtableImplementations.size()) {
+        metadata.vtableImplementations.resize(slot + 1);
+        metadata.vtableIsAbstract.resize(slot + 1, false);
+        metadata.vtableOrder.resize(slot + 1, {});
+      }
+      metadata.vtableImplementations[slot] = metadata.destructorFunctionName;
+      if (slot < metadata.vtableOrder.size() && metadata.vtableOrder[slot].empty())
+        metadata.vtableOrder[slot] = DestructorKey;
+      metadata.vtableIsAbstract[slot] = false;
+    }
+    metadata.vtableSlotMap[DestructorKey] = slot;
+    metadata.destructorVtableSlot = slot;
+  }
+
   return true;
 }
 
@@ -2223,8 +2269,11 @@ static void popArcScope(bool emitReleases, std::string_view label) {
     const ARCLifetimeSlot &slot = *it;
     if (slot.isTemporary)
       continue;
-    if (!slot.storage || (!slot.type.requiresARC() &&
-                          !slot.type.isSmartPointer()))
+    if (!slot.storage)
+      continue;
+    const bool hasDestructor = typeHasDestructor(slot.type);
+    if (!slot.type.requiresARC() && !slot.type.isSmartPointer() &&
+        !hasDestructor)
       continue;
     if (slot.lifetimeInfo && slot.lifetimeInfo->escapes)
       continue;
@@ -2235,14 +2284,41 @@ static void popArcScope(bool emitReleases, std::string_view label) {
     llvm::Type *storedTy = alloca->getAllocatedType();
     if (!storedTy)
       continue;
-    llvm::Value *current = Builder->CreateLoad(
-        storedTy, slot.storage,
-        buildArcOpLabel(label, "scope.load"));
-    emitArcRelease(
-        current, slot.type,
-        buildArcOpLabel(label, "scope.release"));
-    Builder->CreateStore(llvm::Constant::getNullValue(storedTy),
-                         slot.storage);
+    const bool storedIsPointer = storedTy->isPointerTy();
+    if (slot.type.requiresARC() && storedIsPointer) {
+      llvm::Value *current = Builder->CreateLoad(
+          storedTy, slot.storage,
+          buildArcOpLabel(label, "scope.load"));
+      emitArcRelease(
+          current, slot.type,
+          buildArcOpLabel(label, "scope.release"));
+      Builder->CreateStore(llvm::Constant::getNullValue(storedTy),
+                           slot.storage);
+    } else if (hasDestructor) {
+      std::string typeKey =
+          sanitizeCompositeLookupName(typeNameFromInfo(slot.type));
+      const CompositeTypeInfo *meta = lookupCompositeInfo(typeKey);
+      if (meta && meta->hasDestructor &&
+          !meta->destructorFunctionName.empty()) {
+        llvm::Function *dtor =
+            TheModule->getFunction(meta->destructorFunctionName);
+        if (dtor) {
+          llvm::Value *dtorArg = slot.storage;
+          if (!dtor->arg_empty()) {
+            llvm::Type *expected = dtor->getFunctionType()->getParamType(0);
+            if (dtorArg->getType() != expected)
+              dtorArg = Builder->CreateBitCast(
+                  slot.storage, expected,
+                  buildArcOpLabel(label, "scope.dtor.cast"));
+            Builder->CreateCall(dtor, {dtorArg});
+          } else {
+            Builder->CreateCall(dtor, {});
+          }
+        }
+      }
+      Builder->CreateStore(llvm::Constant::getNullValue(storedTy),
+                           slot.storage);
+    }
   }
 }
 
@@ -2251,9 +2327,20 @@ static void emitArcScopeDrainAll(std::string_view label) {
     popArcScope(true, label);
 }
 
+static void markArcSlotDestroyed(llvm::Value *storage) {
+  if (!storage)
+    return;
+  for (auto &frame : CG.arcScopeStack) {
+    for (auto &slot : frame) {
+      if (slot.storage == storage)
+        slot.isTemporary = true;
+    }
+  }
+}
+
 static void registerArcLocal(const std::string &name, llvm::Value *storage,
                              const TypeInfo &info, bool isTemporary) {
-  if (!storage || info.isAlias() || !info.requiresARC())
+  if (!storage || info.isAlias() || !typeNeedsLifetimeTracking(info))
     return;
   if (CG.arcScopeStack.empty())
     pushArcScope();
@@ -3277,6 +3364,85 @@ static bool emitCompositeDealloc(const std::string &typeKey,
   Builder->SetInsertPoint(bodyBB);
   llvm::Value *typedPtr = Builder->CreateBitCast(
       &rawObject, pointerType(structTy), "dealloc.typed");
+
+  if (metadata.hasDestructor) {
+    auto callDestructor = [&](llvm::Function *fn, llvm::Value *target) {
+      if (!fn->arg_empty()) {
+        llvm::Type *expected = fn->getFunctionType()->getParamType(0);
+        if (target->getType() != expected)
+          target = Builder->CreateBitCast(
+              target, expected, "dealloc.dtor.this");
+        Builder->CreateCall(fn, {target});
+      } else {
+        Builder->CreateCall(fn, {});
+      }
+    };
+
+    if (metadata.kind == AggregateKind::Class &&
+        metadata.destructorVtableSlot !=
+            std::numeric_limits<unsigned>::max()) {
+      llvm::StructType *headerTy = getArcHeaderType();
+      llvm::Value *headerPtr = Builder->CreateStructGEP(
+          structTy, typedPtr, metadata.headerFieldIndex, "dealloc.header");
+      llvm::Value *descAddr = Builder->CreateStructGEP(
+          headerTy, headerPtr, 2, "dealloc.desc.addr");
+      llvm::Value *descriptor = Builder->CreateLoad(
+          pointerType(getTypeDescriptorType()), descAddr, "dealloc.desc");
+      llvm::Value *vtableAddr = Builder->CreateStructGEP(
+          getTypeDescriptorType(), descriptor, 2, "dealloc.vtable.addr");
+      llvm::Value *vtablePtr =
+          Builder->CreateLoad(pointerType(), vtableAddr, "dealloc.vtable");
+      llvm::Value *slotIndex = llvm::ConstantInt::get(
+          llvm::Type::getInt64Ty(*TheContext),
+          static_cast<uint64_t>(metadata.destructorVtableSlot));
+      llvm::Value *slotPtr = Builder->CreateInBoundsGEP(
+          pointerType(), vtablePtr, slotIndex, "dealloc.vslot");
+      llvm::Value *slotFnPtr =
+          Builder->CreateLoad(pointerType(), slotPtr, "dealloc.fptr");
+      llvm::Function *dtorFn =
+          TheModule->getFunction(metadata.destructorFunctionName);
+      if (!dtorFn) {
+        reportCompilerError("Internal error: destructor '" +
+                            metadata.destructorFunctionName +
+                            "' not found while emitting dealloc for '" +
+                            typeKey + "'");
+        restoreInsertPoint();
+        return false;
+      }
+      llvm::Value *typedFnPtr = Builder->CreateBitCast(
+          slotFnPtr, dtorFn->getFunctionType()->getPointerTo(),
+          "dealloc.dtor.func");
+      if (dtorFn->arg_empty()) {
+        Builder->CreateCall(dtorFn->getFunctionType(), typedFnPtr, {});
+      } else {
+        llvm::Value *dtorThis = typedPtr;
+        llvm::Type *expected = dtorFn->getFunctionType()->getParamType(0);
+        if (dtorThis->getType() != expected)
+          dtorThis = Builder->CreateBitCast(
+              typedPtr, expected, "dealloc.dtor.this");
+        Builder->CreateCall(dtorFn->getFunctionType(), typedFnPtr,
+                            {dtorThis});
+      }
+    } else {
+      if (metadata.destructorFunctionName.empty()) {
+        reportCompilerError("Internal error: destructor symbol missing for '" +
+                            typeKey + "' during dealloc emission");
+        restoreInsertPoint();
+        return false;
+      }
+      llvm::Function *dtorFn =
+          TheModule->getFunction(metadata.destructorFunctionName);
+      if (!dtorFn) {
+        reportCompilerError("Internal error: destructor '" +
+                            metadata.destructorFunctionName +
+                            "' not found while emitting dealloc for '" +
+                            typeKey + "'");
+        restoreInsertPoint();
+        return false;
+      }
+      callDestructor(dtorFn, typedPtr);
+    }
+  }
 
   auto indicesIt = StructFieldIndices.find(typeKey);
   if (indicesIt == StructFieldIndices.end()) {
@@ -9634,6 +9800,37 @@ llvm::Value *ReleaseExprAST::codegen() {
   return value;
 }
 
+llvm::Value *FreeExprAST::codegen() {
+  llvm::Value *value = Operand->codegen();
+  if (!value)
+    return nullptr;
+
+  TypeInfo info = makeTypeInfo(Operand->getTypeName());
+  finalizeTypeInfoMetadata(info);
+  if (info.smartPointerKind != SmartPointerKind::None) {
+    reportCompilerError("Cannot free smart pointer values directly",
+                        "Let the smart pointer manage its lifetime instead of using 'free'.");
+    return nullptr;
+  }
+  if (info.refStorage == RefStorageClass::None && info.pointerDepth == 0) {
+    reportCompilerError("The 'free' keyword requires a reference value",
+                        "Only heap-managed references may be freed; stack values are released automatically.");
+    return nullptr;
+  }
+  if (!info.requiresARC()) {
+    reportCompilerError("The 'free' keyword is only valid for ARC-managed references");
+    return nullptr;
+  }
+  if (!value->getType()->isPointerTy()) {
+    reportCompilerError("The 'free' keyword requires a reference value");
+    return nullptr;
+  }
+
+  emitArcRelease(value, info, "free");
+  setTypeName("void");
+  return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
 static bool parseExplicitTypeArgumentSuffix(const std::string &text,
                                             std::string &baseName,
                                             std::vector<TypeInfo> &typeArguments) {
@@ -9802,6 +9999,7 @@ llvm::Value *CallExprAST::codegen() {
     lookupCompositeInfo(decoratedCallee);
 
   if (StructTypes.contains(decoratedCallee)) {
+    markTemporary();
     llvm::Value *ConstructedValue =
         emitResolvedCall(baseCallee, std::move(ArgValues), ArgIsRef,
                          preferGeneric);
@@ -10029,12 +10227,157 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   if (ownerName.empty())
-    return LogErrorV("Unable to determine composite type for method call");
+    return LogErrorV("Unable to determine composite type for member call");
 
 
   const CompositeTypeInfo *info = lookupCompositeInfo(ownerName);
   if (!info)
-    return LogErrorV(("Type '" + ownerName + "' has no metadata for methods").c_str());
+    return LogErrorV(("Type '" + ownerName +
+                      "' has no metadata for member calls")
+                         .c_str());
+
+  const bool isDtorCall =
+      member.isDestructorAccess() || isDestructorCall();
+
+  auto ensureInstancePointer = [&]() -> llvm::Value * {
+    if (instancePtr)
+      return instancePtr;
+    instancePtr = member.getObject()->codegen_ptr();
+    if (!instancePtr) {
+      instanceValue = member.getObject()->codegen();
+      if (!instanceValue)
+        return nullptr;
+      if (instanceValue->getType()->isPointerTy()) {
+        instancePtr = instanceValue;
+      } else {
+        llvm::AllocaInst *Tmp =
+            Builder->CreateAlloca(instanceValue->getType(), nullptr,
+                                  "method.recv");
+        Builder->CreateStore(instanceValue, Tmp);
+        instancePtr = Tmp;
+      }
+    }
+    return instancePtr;
+  };
+
+  if (isDtorCall && info->smartPointerKind != SmartPointerKind::None) {
+    reportCompilerError("Manual destructor calls are not allowed on smart pointers",
+                        "Let the smart pointer manage lifetime instead of invoking '~" +
+                            member.getMemberName() + "()' manually.");
+    return nullptr;
+  }
+
+  if (isDtorCall) {
+    TypeInfo ownerInfoFull = makeTypeInfo(member.getObject()->getTypeName());
+    ownerInfoFull = applyActiveTypeBindings(ownerInfoFull);
+    finalizeTypeInfoMetadata(ownerInfoFull);
+    if (ownerInfoFull.ownership != OwnershipQualifier::Strong) {
+      reportCompilerError(
+          "Manual destructor calls require strong-owned targets",
+          "Convert weak or unowned references to strong ones before invoking a destructor.");
+      return nullptr;
+    }
+    if (!info->hasDestructor || info->destructorFunctionName.empty()) {
+      reportCompilerError("Type '" + ownerName +
+                          "' does not declare a destructor");
+      return nullptr;
+    }
+    if (!getArgs().empty()) {
+      reportCompilerError("Destructor calls cannot take arguments");
+      return nullptr;
+    }
+    std::string targetName =
+        sanitizeCompositeLookupName(member.getMemberName());
+    if (!targetName.empty() && targetName != ownerName) {
+      reportCompilerError("Destructor '~" + targetName +
+                          "()' does not match receiver of type '" + ownerName +
+                          "'");
+      return nullptr;
+    }
+    if (!ensureMemberAccessAllowed(info->destructorModifiers,
+                                   AccessIntent::Call, ownerName,
+                                   "~" + ownerName))
+      return nullptr;
+
+    llvm::Value *thisPtr = ensureInstancePointer();
+    if (!thisPtr)
+      return nullptr;
+
+    llvm::Function *dtorFn =
+        TheModule->getFunction(info->destructorFunctionName);
+    if (!dtorFn) {
+      reportCompilerError(
+          "Internal error: destructor '" + info->destructorFunctionName +
+          "' missing during call emission");
+      return nullptr;
+    }
+
+    llvm::Value *dispatchTarget = nullptr;
+    if (info->kind == AggregateKind::Class &&
+        info->destructorVtableSlot !=
+            std::numeric_limits<unsigned>::max()) {
+      auto structIt = StructTypes.find(ownerName);
+      if (structIt != StructTypes.end() && info->hasARCHeader) {
+        llvm::StructType *structTy = structIt->second;
+        llvm::StructType *headerTy = getArcHeaderType();
+        llvm::Value *headerPtr = Builder->CreateStructGEP(
+            structTy, thisPtr, info->headerFieldIndex, "dtor.header");
+        llvm::Value *descAddr = Builder->CreateStructGEP(
+            headerTy, headerPtr, 2, "dtor.desc.addr");
+        llvm::Value *descriptor = Builder->CreateLoad(
+            pointerType(getTypeDescriptorType()), descAddr, "dtor.desc");
+        llvm::Value *vtableAddr = Builder->CreateStructGEP(
+            getTypeDescriptorType(), descriptor, 2, "dtor.vtable.addr");
+        llvm::Value *vtablePtr =
+            Builder->CreateLoad(pointerType(), vtableAddr, "dtor.vtable");
+        llvm::Value *slotIndex = llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(*TheContext),
+            static_cast<uint64_t>(info->destructorVtableSlot));
+        llvm::Value *slotPtr = Builder->CreateInBoundsGEP(
+            pointerType(), vtablePtr, slotIndex, "dtor.vslot");
+        llvm::Value *slotFnPtr =
+            Builder->CreateLoad(pointerType(), slotPtr, "dtor.fptr");
+        llvm::Type *fnPtrTy =
+            dtorFn->getFunctionType()->getPointerTo();
+        dispatchTarget =
+            Builder->CreateBitCast(slotFnPtr, fnPtrTy, "dtor.target");
+      }
+    }
+
+    llvm::Value *callArg = thisPtr;
+    if (!dtorFn->arg_empty()) {
+      llvm::Type *expected = dtorFn->getFunctionType()->getParamType(0);
+      if (callArg->getType() != expected) {
+        callArg = Builder->CreateBitCast(
+            thisPtr, expected, "dtor.manual.this");
+      }
+    }
+
+    TypeInfo ownerInfo = ownerInfoFull;
+    llvm::Value *retained =
+        emitArcRetain(callArg, ownerInfo,
+                      ownerName + ".dtor.manual.retain");
+    llvm::Value *callValue = nullptr;
+    if (dispatchTarget) {
+      if (dtorFn->arg_empty()) {
+        callValue = Builder->CreateCall(dtorFn->getFunctionType(),
+                                        dispatchTarget, {});
+      } else {
+        callValue = Builder->CreateCall(dtorFn->getFunctionType(),
+                                        dispatchTarget, {retained});
+      }
+    } else {
+      callValue = dtorFn->arg_empty()
+                      ? Builder->CreateCall(dtorFn)
+                      : Builder->CreateCall(dtorFn, {retained});
+    }
+    emitArcRelease(retained, ownerInfo,
+                   ownerName + ".dtor.manual.release");
+    if (auto *allocaPtr = llvm::dyn_cast<llvm::AllocaInst>(thisPtr))
+      markArcSlotDestroyed(allocaPtr);
+    setTypeName("void");
+    return callValue;
+  }
 
   auto methodIt = info->methodInfo.find(member.getMemberName());
   if (methodIt == info->methodInfo.end())
@@ -10055,21 +10398,9 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
 
   if (!isStaticMethod) {
     if (!instancePtr) {
-      instancePtr = member.getObject()->codegen_ptr();
-      if (!instancePtr) {
-        instanceValue = member.getObject()->codegen();
-        if (!instanceValue)
-          return nullptr;
-        if (instanceValue->getType()->isPointerTy()) {
-          instancePtr = instanceValue;
-        } else {
-          llvm::AllocaInst *Tmp =
-              Builder->CreateAlloca(instanceValue->getType(), nullptr,
-                                    "method.recv");
-          Builder->CreateStore(instanceValue, Tmp);
-          instancePtr = Tmp;
-        }
-      }
+      instancePtr = ensureInstancePointer();
+      if (!instancePtr)
+        return nullptr;
     }
 
     ArgIsRef.push_back(true);
@@ -10916,10 +11247,16 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
                     "initializer for '" + getName() + "'"))
               return nullptr;
             InitVal = castToType(InitVal, VarType, getType());
-            if (declaredInfo.requiresARC())
-              emitManagedStore(Alloca, InitVal, declaredInfo, getName());
-            else
+            const bool initializerIsTemporary =
+                getInitializer() && getInitializer()->isTemporary();
+            if (declaredInfo.requiresARC()) {
+              if (initializerIsTemporary)
+                Builder->CreateStore(InitVal, Alloca);
+              else
+                emitManagedStore(Alloca, InitVal, declaredInfo, getName());
+            } else {
               Builder->CreateStore(InitVal, Alloca);
+            }
           }
         }
 
@@ -12521,6 +12858,7 @@ llvm::Type *StructAST::codegen() {
   compositeInfo.descriptor.isAbstract = IsAbstract;
   compositeInfo.descriptor.isInterface = (kind == AggregateKind::Interface);
   compositeInfo.descriptor.constructors.clear();
+  compositeInfo.destructorVtableSlot = std::numeric_limits<unsigned>::max();
 
   if (compositeInfo.hasClassDescriptor) {
     llvm::StructType *TypeDescTy = getTypeDescriptorType();
@@ -12570,6 +12908,8 @@ llvm::Type *StructAST::codegen() {
             baseInfo->fieldDeclarationInitializers;
         compositeInfo.hasARCHeader = baseInfo->hasARCHeader;
         compositeInfo.headerFieldIndex = baseInfo->headerFieldIndex;
+        compositeInfo.destructorVtableSlot =
+            baseInfo->destructorVtableSlot;
       } else {
         compositeInfo.hasARCHeader = true;
         compositeInfo.headerFieldIndex = 0;
@@ -12893,6 +13233,44 @@ llvm::Type *StructAST::codegen() {
       NonNullFacts.clear();
       continue;
     }
+    if (MethodDef.getKind() == MethodKind::Destructor) {
+      PrototypeAST *Proto = MethodDef.getPrototype();
+      if (!Proto)
+        continue;
+
+      if (MethodDef.needsInstanceThis() && !MethodDef.hasImplicitThis()) {
+        Parameter thisParam;
+        thisParam.Type = typeKey;
+        thisParam.Name = "__hybrid_this";
+        thisParam.IsRef = true;
+        TypeInfo thisInfo = makeTypeInfo(typeKey);
+        thisInfo.refStorage = RefStorageClass::RefAlias;
+        thisInfo.declaredRef = true;
+        thisParam.DeclaredType = thisInfo;
+        Proto->prependImplicitParameter(std::move(thisParam));
+        MethodDef.markImplicitThisInjected();
+      }
+
+      if (!MethodDef.hasBody()) {
+        reportCompilerError("Destructor for '" + typeKey +
+                            "' must declare a body");
+        return nullptr;
+      }
+
+      FunctionAST *Method = MethodDef.get();
+      if (!Method)
+        continue;
+
+      ScopedCompositeContext methodScope(typeKey, MethodKind::Destructor, false);
+      llvm::Function *GeneratedFunction = Method->codegen();
+      if (!GeneratedFunction)
+        return nullptr;
+
+      metadata.hasDestructor = true;
+      metadata.destructorFunctionName = Proto->getMangledName();
+      metadata.destructorModifiers = MethodDef.getModifiers();
+      continue;
+    }
 
     PrototypeAST *Proto = MethodDef.getPrototype();
     if (!Proto)
@@ -13097,6 +13475,11 @@ llvm::Type *StructAST::codegen() {
 
 // Generate code for member access expressions
 llvm::Value *MemberAccessExprAST::codegen() {
+  if (isDestructorAccess()) {
+    reportCompilerError("Destructor access is only valid as a call expression");
+    return nullptr;
+  }
+
   const CompositeTypeInfo *info = nullptr;
   const MemberModifiers *modifiers = nullptr;
   bool isStaticField = false;
@@ -13284,6 +13667,11 @@ llvm::Value *MemberAccessExprAST::codegen() {
 }
 
 llvm::Value *MemberAccessExprAST::codegen_ptr() {
+  if (isDestructorAccess()) {
+    reportCompilerError("Destructor access is only valid as a call expression");
+    return nullptr;
+  }
+
   const CompositeTypeInfo *info = nullptr;
   const MemberModifiers *modifiers = nullptr;
   bool isStaticField = false;

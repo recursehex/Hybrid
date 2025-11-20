@@ -100,6 +100,7 @@ struct CompositeTypeInfo {
   std::map<std::string, unsigned> vtableSlotMap;
   std::string vtableGlobalName;
   std::string descriptorGlobalName;
+  unsigned destructorVtableSlot = std::numeric_limits<unsigned>::max();
   std::map<std::string, std::string> interfaceTableGlobals;
   std::vector<std::string> interfaceMethodOrder;
   std::map<std::string, unsigned> interfaceMethodSlotMap;
@@ -107,6 +108,10 @@ struct CompositeTypeInfo {
   unsigned headerFieldIndex = std::numeric_limits<unsigned>::max();
   bool hasARCHeader = false;
   std::string deallocFunctionName;
+  bool hasDestructor = false;
+  MemberModifiers destructorModifiers;
+  std::string destructorFunctionName;
+  bool manualDestructorCallSeen = false;
   std::optional<std::string> thisOverride;
   std::map<std::string, TypeInfo> typeArgumentBindings;
   std::map<std::string, std::vector<std::string>> genericMethodInstantiations;

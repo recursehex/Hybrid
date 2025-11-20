@@ -859,6 +859,17 @@ public:
   ExprAST *getOperand() const { return Operand.get(); }
 };
 
+class FreeExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  explicit FreeExprAST(std::unique_ptr<ExprAST> Operand)
+      : Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+};
+
 class MemberAccessExprAST;
 
 /// CallExprAST - Expression class for function calls.
@@ -866,6 +877,8 @@ class CallExprAST : public ExprAST {
   std::string Callee;
   std::unique_ptr<ExprAST> CalleeExpr;
   std::vector<std::unique_ptr<ExprAST>> Args;
+  bool IsDestructorCall = false;
+  std::string DestructorTypeName;
 
 public:
   CallExprAST(const std::string &Callee,
@@ -881,6 +894,12 @@ public:
   ExprAST *getCalleeExpr() const { return CalleeExpr.get(); }
   bool hasCalleeExpr() const { return static_cast<bool>(CalleeExpr); }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+  bool isDestructorCall() const { return IsDestructorCall; }
+  const std::string &getDestructorTypeName() const { return DestructorTypeName; }
+  void markDestructorCall(std::string typeName) {
+    IsDestructorCall = true;
+    DestructorTypeName = std::move(typeName);
+  }
 
 private:
   llvm::Value *emitResolvedCall(const std::string &callee,
@@ -998,13 +1017,16 @@ class MemberAccessExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Object;
   std::string MemberName;
   std::string GenericArguments;
+  bool IsDestructor = false;
 
 public:
   MemberAccessExprAST(std::unique_ptr<ExprAST> Object, std::string MemberName,
-                      std::string GenericArguments = {})
+                      std::string GenericArguments = {},
+                      bool IsDestructor = false)
       : Object(std::move(Object)),
         MemberName(std::move(MemberName)),
-        GenericArguments(std::move(GenericArguments)) {}
+        GenericArguments(std::move(GenericArguments)),
+        IsDestructor(IsDestructor) {}
   
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
@@ -1012,6 +1034,7 @@ public:
   const std::string &getMemberName() const { return MemberName; }
   bool hasExplicitGenerics() const { return !GenericArguments.empty(); }
   const std::string &getGenericArguments() const { return GenericArguments; }
+  bool isDestructorAccess() const { return IsDestructor; }
 };
 
 /// NullSafeAccessExprAST - Expression class for null-safe member access (e.g. obj?.field).
@@ -1053,7 +1076,8 @@ private:
 enum class MethodKind : uint8_t {
   Constructor,
   Regular,
-  ThisOverride
+  ThisOverride,
+  Destructor
 };
 
 struct ConstructorInitializer {
@@ -1138,6 +1162,7 @@ class StructAST {
   std::optional<TypeInfo> BaseClassInfo;
   std::vector<TypeInfo> InterfaceTypeInfos;
   bool IsAbstract = false;
+  int DestructorIndex = -1;
   mutable bool LayoutUsageComputed = false;
   mutable std::vector<bool> LayoutParameterUsage;
   ClassInheritanceMetadata InheritanceMetadata;
@@ -1170,9 +1195,20 @@ public:
   const ClassInheritanceMetadata &getInheritanceMetadata() const {
     return InheritanceMetadata;
   }
+  bool hasDestructor() const { return DestructorIndex >= 0; }
   bool isAbstract() const { return IsAbstract; }
   bool isInterface() const { return Kind == AggregateKind::Interface; }
   bool isGenericTemplate() const { return !GenericParameters.empty(); }
+  MethodDefinition *getDestructor() {
+    if (!hasDestructor())
+      return nullptr;
+    return &Methods[static_cast<size_t>(DestructorIndex)];
+  }
+  const MethodDefinition *getDestructor() const {
+    if (!hasDestructor())
+      return nullptr;
+    return &Methods[static_cast<size_t>(DestructorIndex)];
+  }
   const std::vector<bool> &layoutParameterUsage() const;
 
   void setBaseClass(std::optional<std::string> Base) { BaseClass = std::move(Base); }
@@ -1186,6 +1222,7 @@ public:
   void setInheritanceMetadata(ClassInheritanceMetadata metadata) {
     InheritanceMetadata = std::move(metadata);
   }
+  void setDestructorIndex(int index) { DestructorIndex = index; }
 };
 
 // Initialize LLVM module

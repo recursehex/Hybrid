@@ -43,6 +43,7 @@ struct VariableLifetimePlan {
   bool needsZeroing = false;
   bool explicitRetainSeen = false;
   bool explicitReleaseSeen = false;
+  bool manualDestructorCalled = false;
   UniqueState uniqueState = UniqueState::Unknown;
   std::vector<LifetimeEvent> events;
 };

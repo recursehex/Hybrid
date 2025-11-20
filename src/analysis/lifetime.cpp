@@ -1,5 +1,6 @@
 #include "analysis/lifetime.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "compiler_session.h"
@@ -18,6 +19,10 @@ std::unique_ptr<LifetimePlan> LifetimeAnalyzer::analyzeFunction(FunctionAST &fun
   if (auto *body = function.getBody()) {
     walkBlock(*body, *plan);
   }
+  if (!plan->diagnostics.empty()) {
+    for (const auto &msg : plan->diagnostics)
+      reportCompilerError(msg);
+  }
   finalizePlan(*plan);
   activePlan = nullptr;
   return plan;
@@ -28,6 +33,23 @@ void LifetimeAnalyzer::reset() {
   activePlan = nullptr;
   blockVariableStack.clear();
   pendingBlockVariables.clear();
+}
+
+static std::string stripNullable(std::string name) {
+  name.erase(std::remove(name.begin(), name.end(), '?'), name.end());
+  return name;
+}
+
+static bool hasDestructorFor(const TypeInfo &type) {
+  std::string key = type.baseTypeName.empty() ? type.typeName : type.baseTypeName;
+  key = stripNullable(key);
+  if (key.empty())
+    return false;
+  const auto &meta = currentCodegen().compositeMetadata;
+  auto it = meta.find(key);
+  if (it == meta.end())
+    return false;
+  return it->second.hasDestructor;
 }
 
 void LifetimeAnalyzer::insertRetainRelease(BlockStmtAST * /*block*/,
@@ -160,6 +182,37 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
     return;
   }
   if (auto *call = dynamic_cast<CallExprAST *>(&expr)) {
+    if (call->isDestructorCall()) {
+      if (auto *member =
+              dynamic_cast<MemberAccessExprAST *>(call->getCalleeExpr())) {
+        if (auto *varObj =
+                dynamic_cast<VariableExprAST *>(member->getObject())) {
+          TypeInfo maybeType;
+          maybeType.typeName = varObj->getTypeName();
+          finalizeTypeInfoMetadata(maybeType);
+          auto &entry =
+              ensureVariable(varObj->getName(), &maybeType, plan);
+          if (entry.manualDestructorCalled) {
+            plan.diagnostics.push_back(
+                "Destructor for '" + entry.name +
+                "' is invoked multiple times in the same scope");
+          }
+          if (maybeType.smartPointerKind != SmartPointerKind::None) {
+            plan.diagnostics.push_back(
+                "Manual destructor calls are not allowed on smart pointer '" +
+                entry.name + "'");
+          }
+          if (maybeType.ownership != OwnershipQualifier::Strong) {
+            plan.diagnostics.push_back(
+                "Manual destructor call on non-strong reference '" +
+                entry.name + "'");
+          }
+          entry.manualDestructorCalled = true;
+          emitEvent(entry.name, plan, LifetimeEvent::Kind::ManualRelease,
+                    "manual destructor");
+        }
+      }
+    }
     for (const auto &arg : call->getArgs()) {
       if (arg)
         walkExpression(*arg, plan);
@@ -223,6 +276,22 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
       }
       walkExpression(*operand, plan);
     }
+    return;
+  }
+  if (auto *freeExpr = dynamic_cast<FreeExprAST *>(&expr)) {
+    if (auto *var = dynamic_cast<VariableExprAST *>(freeExpr->getOperand())) {
+      TypeInfo maybeType;
+      maybeType.typeName = var->getTypeName();
+      finalizeTypeInfoMetadata(maybeType);
+      auto &entry = ensureVariable(var->getName(), &maybeType, plan);
+      if (maybeType.smartPointerKind != SmartPointerKind::None) {
+        plan.diagnostics.push_back(
+            "Cannot free smart pointer '" + entry.name + "' directly");
+      }
+      emitEvent(entry.name, plan, LifetimeEvent::Kind::ManualRelease, "free");
+    }
+    if (auto *op = freeExpr->getOperand())
+      walkExpression(*op, plan);
     return;
   }
   if (auto *unary = dynamic_cast<UnaryExprAST *>(&expr)) {
@@ -411,14 +480,12 @@ void LifetimeAnalyzer::releaseSymbol(VariableLifetimePlan &var,
 }
 
 bool LifetimeAnalyzer::shouldTrack(const VariableLifetimePlan &var) const {
-  if (!var.type.participatesInARC())
-    return false;
-  if (var.type.ownership == OwnershipQualifier::Weak ||
-      var.type.ownership == OwnershipQualifier::Unowned)
-    return false;
-  if (var.type.smartPointerKind == SmartPointerKind::Weak)
-    return false;
-  return pointerSemantics.shouldRelease(var.type);
+  bool arcEligible = var.type.participatesInARC() &&
+                     pointerSemantics.shouldRelease(var.type) &&
+                     var.type.ownership == OwnershipQualifier::Strong &&
+                     var.type.smartPointerKind != SmartPointerKind::Weak;
+  bool needsDtor = hasDestructorFor(var.type);
+  return arcEligible || needsDtor;
 }
 
 void LifetimeAnalyzer::markEscape(const std::string &symbol,

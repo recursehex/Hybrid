@@ -149,6 +149,10 @@ std::string describeTokenForDiagnostics(int token) {
       if (!lex.identifierStr.empty())
         return "identifier '" + lex.identifierStr + "'";
       return "identifier";
+    case tok_tilde_identifier:
+      if (!lex.identifierStr.empty())
+        return "destructor name '~" + lex.identifierStr + "'";
+      return "destructor name";
     case tok_number:
       return "numeric literal '" + lex.numericLiteral.getSpelling() + "'";
     case tok_string_literal:
