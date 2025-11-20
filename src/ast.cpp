@@ -3410,7 +3410,7 @@ static bool emitCompositeDealloc(const std::string &typeKey,
         return false;
       }
       llvm::Value *typedFnPtr = Builder->CreateBitCast(
-          slotFnPtr, dtorFn->getFunctionType()->getPointerTo(),
+          slotFnPtr, pointerType(dtorFn->getFunctionType()),
           "dealloc.dtor.func");
       if (dtorFn->arg_empty()) {
         Builder->CreateCall(dtorFn->getFunctionType(), typedFnPtr, {});
@@ -10337,8 +10337,7 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
             pointerType(), vtablePtr, slotIndex, "dtor.vslot");
         llvm::Value *slotFnPtr =
             Builder->CreateLoad(pointerType(), slotPtr, "dtor.fptr");
-        llvm::Type *fnPtrTy =
-            dtorFn->getFunctionType()->getPointerTo();
+        llvm::Type *fnPtrTy = pointerType(dtorFn->getFunctionType());
         dispatchTarget =
             Builder->CreateBitCast(slotFnPtr, fnPtrTy, "dtor.target");
       }
