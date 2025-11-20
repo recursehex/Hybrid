@@ -58,17 +58,21 @@ std::string buildCycleMessage(const CycleReport &report,
 }
 
 std::string buildCycleHint(const CycleReport &report) {
+  const std::string destructorNote =
+      " Destructors will not run while the cycle remains.";
   for (const auto &edge : report.path) {
     if (looksLikeBackReference(edge.fieldName)) {
       return "Consider marking '" + edge.fieldName +
-             "' as 'weak' to break the retain cycle.";
+             "' as 'weak' to break the retain cycle." + destructorNote;
     }
   }
   if (!report.path.empty()) {
     return "Mark back-references like '" + report.path.back().fieldName +
-           "' as 'weak' or move them into weak smart pointers.";
+           "' as 'weak' or move them into weak smart pointers." +
+           destructorNote;
   }
-  return "Use weak references for delegate/parent fields to avoid retain cycles.";
+  return "Use weak references for delegate/parent fields to avoid retain cycles." +
+         destructorNote;
 }
 
 std::string makeFingerprint(const std::vector<const CycleEdge *> &path,

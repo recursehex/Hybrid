@@ -182,6 +182,8 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
     return;
   }
   if (auto *call = dynamic_cast<CallExprAST *>(&expr)) {
+    if (call->hasCalleeExpr() && call->getCalleeExpr())
+      walkExpression(*call->getCalleeExpr(), plan);
     if (call->isDestructorCall()) {
       if (auto *member =
               dynamic_cast<MemberAccessExprAST *>(call->getCalleeExpr())) {
@@ -192,24 +194,25 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
           finalizeTypeInfoMetadata(maybeType);
           auto &entry =
               ensureVariable(varObj->getName(), &maybeType, plan);
-          if (entry.manualDestructorCalled) {
-            plan.diagnostics.push_back(
-                "Destructor for '" + entry.name +
-                "' is invoked multiple times in the same scope");
-          }
           if (maybeType.smartPointerKind != SmartPointerKind::None) {
             plan.diagnostics.push_back(
                 "Manual destructor calls are not allowed on smart pointer '" +
-                entry.name + "'");
+                entry.name + "'; destroying the control block manually can double-drop its payload");
           }
           if (maybeType.ownership != OwnershipQualifier::Strong) {
             plan.diagnostics.push_back(
                 "Manual destructor call on non-strong reference '" +
                 entry.name + "'");
           }
+          bool repeated = entry.manualDestructorCalled;
+          if (repeated && !entry.manualDestructorDoubleReported) {
+            plan.diagnostics.push_back(
+                "Destructor for '" + entry.name +
+                "' is invoked multiple times in the same scope");
+            entry.manualDestructorDoubleReported = true;
+          }
           entry.manualDestructorCalled = true;
-          emitEvent(entry.name, plan, LifetimeEvent::Kind::ManualRelease,
-                    "manual destructor");
+          recordManualRelease(entry, plan, "manual destructor", repeated);
         }
       }
     }
@@ -217,8 +220,6 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
       if (arg)
         walkExpression(*arg, plan);
     }
-    if (call->hasCalleeExpr() && call->getCalleeExpr())
-      walkExpression(*call->getCalleeExpr(), plan);
     return;
   }
   if (auto *member = dynamic_cast<MemberAccessExprAST *>(&expr)) {
@@ -267,31 +268,32 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
   }
   if (auto *releaseExpr = dynamic_cast<ReleaseExprAST *>(&expr)) {
     if (auto *operand = releaseExpr->getOperand()) {
+      walkExpression(*operand, plan);
       if (auto *var = dynamic_cast<VariableExprAST *>(operand)) {
         auto &entry = ensureVariable(var->getName(), nullptr, plan);
         pointerSemantics.noteExplicitRelease(entry.name);
         entry.explicitReleaseSeen = true;
-        emitEvent(entry.name, plan, LifetimeEvent::Kind::ManualRelease,
-                  "explicit release()");
+        recordManualRelease(entry, plan, "explicit release()");
       }
-      walkExpression(*operand, plan);
     }
     return;
   }
   if (auto *freeExpr = dynamic_cast<FreeExprAST *>(&expr)) {
-    if (auto *var = dynamic_cast<VariableExprAST *>(freeExpr->getOperand())) {
+    ExprAST *operand = freeExpr->getOperand();
+    if (operand)
+      walkExpression(*operand, plan);
+    if (auto *var = dynamic_cast<VariableExprAST *>(operand)) {
       TypeInfo maybeType;
       maybeType.typeName = var->getTypeName();
       finalizeTypeInfoMetadata(maybeType);
       auto &entry = ensureVariable(var->getName(), &maybeType, plan);
       if (maybeType.smartPointerKind != SmartPointerKind::None) {
         plan.diagnostics.push_back(
-            "Cannot free smart pointer '" + entry.name + "' directly");
+            "Cannot free smart pointer '" + entry.name +
+            "' directly because its control block owns the payload");
       }
-      emitEvent(entry.name, plan, LifetimeEvent::Kind::ManualRelease, "free");
+      recordManualRelease(entry, plan, "free");
     }
-    if (auto *op = freeExpr->getOperand())
-      walkExpression(*op, plan);
     return;
   }
   if (auto *unary = dynamic_cast<UnaryExprAST *>(&expr)) {
@@ -452,6 +454,26 @@ VariableLifetimePlan &LifetimeAnalyzer::ensureVariable(
   return it->second;
 }
 
+void LifetimeAnalyzer::recordManualRelease(VariableLifetimePlan &entry,
+                                           LifetimePlan &plan,
+                                           const std::string &note,
+                                           bool suppressDuplicateWarning) {
+  if (entry.manuallyReleased && !entry.manualDoubleReleaseReported &&
+      !suppressDuplicateWarning) {
+    std::string message =
+        "Value '" + entry.name + "' is released multiple times";
+    if (!entry.lastManualReleaseNote.empty())
+      message += " (previously via " + entry.lastManualReleaseNote + ")";
+    if (!note.empty())
+      message += " (again via " + note + ")";
+    plan.diagnostics.push_back(message);
+    entry.manualDoubleReleaseReported = true;
+  }
+  entry.manuallyReleased = true;
+  entry.lastManualReleaseNote = note;
+  emitEvent(entry.name, plan, LifetimeEvent::Kind::ManualRelease, note);
+}
+
 void LifetimeAnalyzer::enterBlock() {
   blockVariableStack.emplace_back();
 }
@@ -514,6 +536,15 @@ void LifetimeAnalyzer::finalizePlan(LifetimePlan &plan) {
 void LifetimeAnalyzer::visitVariableExpr(VariableExprAST &varExpr,
                                          LifetimePlan &plan) {
   auto &entry = ensureVariable(varExpr.getName(), nullptr, plan);
+  if (entry.manuallyReleased && !entry.useAfterManualReleaseReported) {
+    std::string note = entry.lastManualReleaseNote.empty()
+                           ? ""
+                           : " after " + entry.lastManualReleaseNote;
+    plan.diagnostics.push_back("Value '" + entry.name +
+                               "' was manually released" + note +
+                               " and cannot be used afterwards");
+    entry.useAfterManualReleaseReported = true;
+  }
   if (isUniqueMoved(entry)) {
     reportCompilerError("unique pointer '" + entry.name +
                         "' was moved and cannot be used until reassigned");

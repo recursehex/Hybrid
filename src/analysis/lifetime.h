@@ -44,6 +44,11 @@ struct VariableLifetimePlan {
   bool explicitRetainSeen = false;
   bool explicitReleaseSeen = false;
   bool manualDestructorCalled = false;
+  bool manualDestructorDoubleReported = false;
+  bool manuallyReleased = false;
+  bool manualDoubleReleaseReported = false;
+  bool useAfterManualReleaseReported = false;
+  std::string lastManualReleaseNote;
   UniqueState uniqueState = UniqueState::Unknown;
   std::vector<LifetimeEvent> events;
 };
@@ -100,6 +105,9 @@ private:
   void markUniqueMoved(VariableLifetimePlan &var);
   void markUniqueReinitialized(VariableLifetimePlan &var);
   bool isUniqueMoved(const VariableLifetimePlan &var) const;
+  void recordManualRelease(VariableLifetimePlan &entry, LifetimePlan &plan,
+                           const std::string &note,
+                           bool suppressDuplicateWarning = false);
 };
 
 } // namespace analysis

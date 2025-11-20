@@ -166,6 +166,14 @@ static llvm::PointerType *pointerType(llvm::Type * /*elementType*/,
   return llvm::PointerType::get(*TheContext, addressSpace);
 }
 
+static llvm::PointerType *getDeallocFunctionPointerType() {
+  auto *opaquePtrTy = pointerType();
+  auto *deallocFnTy =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext),
+                              {opaquePtrTy}, false);
+  return pointerType(deallocFnTy);
+}
+
 static llvm::FunctionCallee getHybridRetainFunction();
 static llvm::FunctionCallee getHybridReleaseFunction();
 static llvm::FunctionCallee getHybridAutoreleaseFunction();
@@ -1220,7 +1228,8 @@ static llvm::StructType *getInterfaceEntryType() {
                        opaquePtrPtrTy,
                        llvm::Type::getInt32Ty(*TheContext),
                        pointerType(interfaceEntryTy),
-                       llvm::Type::getInt32Ty(*TheContext)});
+                       llvm::Type::getInt32Ty(*TheContext),
+                       getDeallocFunctionPointerType()});
   return interfaceEntryTy;
 }
 
@@ -1482,11 +1491,13 @@ static bool emitInterfaceDescriptor(const std::string &typeName,
       llvm::ConstantPointerNull::get(ifaceEntryPtrTy);
   llvm::Constant *ifaceCountConst =
       llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+  llvm::Constant *deallocConst =
+      llvm::ConstantPointerNull::get(getDeallocFunctionPointerType());
 
   auto *descriptorConst = llvm::ConstantStruct::get(
       typeDescTy,
       {typeNameConst, baseConst, vtableConst, vtableSizeConst, ifaceMapConst,
-       ifaceCountConst});
+       ifaceCountConst, deallocConst});
 
   descriptorGV->setInitializer(descriptorConst);
   descriptorGV->setConstant(true);
@@ -1733,11 +1744,25 @@ static bool emitClassRuntimeStructures(const std::string &typeName,
 
   llvm::Constant *vtableSizeConst = llvm::ConstantInt::get(
       int32Ty, static_cast<uint32_t>(metadata.vtableOrder.size()));
+  llvm::Constant *deallocConst =
+      llvm::ConstantPointerNull::get(getDeallocFunctionPointerType());
+  if (!metadata.deallocFunctionName.empty()) {
+    llvm::Function *deallocFn =
+        TheModule->getFunction(metadata.deallocFunctionName);
+    if (!deallocFn) {
+      reportCompilerError("Internal error: dealloc helper '" +
+                          metadata.deallocFunctionName +
+                          "' missing while building class '" + typeName + "'");
+      return false;
+    }
+    deallocConst = llvm::ConstantExpr::getBitCast(
+        deallocFn, getDeallocFunctionPointerType());
+  }
 
   auto *descriptorConst = llvm::ConstantStruct::get(
       typeDescTy,
       {typeNameConst, baseConst, vtablePtrConst, vtableSizeConst,
-       ifaceMapConst, ifaceCountConst});
+       ifaceMapConst, ifaceCountConst, deallocConst});
 
   descriptorGV->setInitializer(descriptorConst);
   descriptorGV->setConstant(true);
@@ -2275,8 +2300,12 @@ static void popArcScope(bool emitReleases, std::string_view label) {
     if (!slot.type.requiresARC() && !slot.type.isSmartPointer() &&
         !hasDestructor)
       continue;
-    if (slot.lifetimeInfo && slot.lifetimeInfo->escapes)
-      continue;
+    if (slot.lifetimeInfo) {
+      if (slot.lifetimeInfo->escapes)
+        continue;
+      if (slot.lifetimeInfo->manuallyReleased)
+        continue;
+    }
 
     auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(slot.storage);
     if (!alloca)
@@ -3378,27 +3407,89 @@ static bool emitCompositeDealloc(const std::string &typeKey,
       }
     };
 
-    if (metadata.kind == AggregateKind::Class &&
-        metadata.destructorVtableSlot !=
-            std::numeric_limits<unsigned>::max()) {
+    llvm::Value *descriptor = nullptr;
+    llvm::Value *descriptorMatches = nullptr;
+    if (metadata.kind == AggregateKind::Class) {
       llvm::StructType *headerTy = getArcHeaderType();
       llvm::Value *headerPtr = Builder->CreateStructGEP(
           structTy, typedPtr, metadata.headerFieldIndex, "dealloc.header");
       llvm::Value *descAddr = Builder->CreateStructGEP(
           headerTy, headerPtr, 2, "dealloc.desc.addr");
-      llvm::Value *descriptor = Builder->CreateLoad(
+      descriptor = Builder->CreateLoad(
           pointerType(getTypeDescriptorType()), descAddr, "dealloc.desc");
-      llvm::Value *vtableAddr = Builder->CreateStructGEP(
-          getTypeDescriptorType(), descriptor, 2, "dealloc.vtable.addr");
-      llvm::Value *vtablePtr =
-          Builder->CreateLoad(pointerType(), vtableAddr, "dealloc.vtable");
-      llvm::Value *slotIndex = llvm::ConstantInt::get(
-          llvm::Type::getInt64Ty(*TheContext),
-          static_cast<uint64_t>(metadata.destructorVtableSlot));
-      llvm::Value *slotPtr = Builder->CreateInBoundsGEP(
-          pointerType(), vtablePtr, slotIndex, "dealloc.vslot");
-      llvm::Value *slotFnPtr =
-          Builder->CreateLoad(pointerType(), slotPtr, "dealloc.fptr");
+      if (metadata.descriptorGlobalName.empty()) {
+        reportCompilerError("Internal error: missing descriptor symbol for '" +
+                            typeKey + "' during destructor dispatch");
+        restoreInsertPoint();
+        return false;
+      }
+      llvm::GlobalVariable *selfDescriptorGV =
+          TheModule->getGlobalVariable(metadata.descriptorGlobalName, true);
+      if (!selfDescriptorGV) {
+        reportCompilerError("Internal error: descriptor '" +
+                            metadata.descriptorGlobalName +
+                            "' missing while emitting dealloc for '" + typeKey +
+                            "'");
+        restoreInsertPoint();
+        return false;
+      }
+      llvm::Value *selfDescriptor = llvm::ConstantExpr::getBitCast(
+          selfDescriptorGV, pointerType(getTypeDescriptorType()));
+      descriptorMatches = Builder->CreateICmpEQ(
+          descriptor, selfDescriptor, "dealloc.is_exact");
+    }
+
+    auto emitDestructorCall = [&]() {
+      if (metadata.kind == AggregateKind::Class &&
+          metadata.destructorVtableSlot !=
+              std::numeric_limits<unsigned>::max()) {
+        if (!descriptor) {
+          reportCompilerError("Internal error: descriptor unavailable during destructor dispatch for '" +
+                              typeKey + "'");
+          return false;
+        }
+        llvm::Value *vtableAddr = Builder->CreateStructGEP(
+            getTypeDescriptorType(), descriptor, 2, "dealloc.vtable.addr");
+        llvm::Value *vtablePtr =
+            Builder->CreateLoad(pointerType(), vtableAddr, "dealloc.vtable");
+        llvm::Value *slotIndex = llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(*TheContext),
+            static_cast<uint64_t>(metadata.destructorVtableSlot));
+        llvm::Value *slotPtr = Builder->CreateInBoundsGEP(
+            pointerType(), vtablePtr, slotIndex, "dealloc.vslot");
+        llvm::Value *slotFnPtr =
+            Builder->CreateLoad(pointerType(), slotPtr, "dealloc.fptr");
+        llvm::Function *dtorFn =
+            TheModule->getFunction(metadata.destructorFunctionName);
+        if (!dtorFn) {
+          reportCompilerError("Internal error: destructor '" +
+                              metadata.destructorFunctionName +
+                              "' not found while emitting dealloc for '" +
+                              typeKey + "'");
+          return false;
+        }
+        llvm::Value *typedFnPtr = Builder->CreateBitCast(
+            slotFnPtr, pointerType(dtorFn->getFunctionType()),
+            "dealloc.dtor.func");
+        if (dtorFn->arg_empty()) {
+          Builder->CreateCall(dtorFn->getFunctionType(), typedFnPtr, {});
+        } else {
+          llvm::Value *dtorThis = typedPtr;
+          llvm::Type *expected = dtorFn->getFunctionType()->getParamType(0);
+          if (dtorThis->getType() != expected)
+            dtorThis = Builder->CreateBitCast(
+                typedPtr, expected, "dealloc.dtor.this");
+          Builder->CreateCall(dtorFn->getFunctionType(), typedFnPtr,
+                              {dtorThis});
+        }
+        return true;
+      }
+
+      if (metadata.destructorFunctionName.empty()) {
+        reportCompilerError("Internal error: destructor symbol missing for '" +
+                            typeKey + "' during dealloc emission");
+        return false;
+      }
       llvm::Function *dtorFn =
           TheModule->getFunction(metadata.destructorFunctionName);
       if (!dtorFn) {
@@ -3406,30 +3497,30 @@ static bool emitCompositeDealloc(const std::string &typeKey,
                             metadata.destructorFunctionName +
                             "' not found while emitting dealloc for '" +
                             typeKey + "'");
+        return false;
+      }
+      callDestructor(dtorFn, typedPtr);
+      return true;
+    };
+
+    if (descriptorMatches && metadata.kind == AggregateKind::Class) {
+      llvm::Function *parentFn = Builder->GetInsertBlock()->getParent();
+      llvm::BasicBlock *exactBB =
+          llvm::BasicBlock::Create(*TheContext, "dealloc.dtor.exact", parentFn);
+      llvm::BasicBlock *chainBB =
+          llvm::BasicBlock::Create(*TheContext, "dealloc.dtor.chain", parentFn);
+      llvm::BasicBlock *afterBB =
+          llvm::BasicBlock::Create(*TheContext, "dealloc.dtor.after", parentFn);
+      Builder->CreateCondBr(descriptorMatches, exactBB, chainBB);
+
+      Builder->SetInsertPoint(exactBB);
+      if (!emitDestructorCall()) {
         restoreInsertPoint();
         return false;
       }
-      llvm::Value *typedFnPtr = Builder->CreateBitCast(
-          slotFnPtr, pointerType(dtorFn->getFunctionType()),
-          "dealloc.dtor.func");
-      if (dtorFn->arg_empty()) {
-        Builder->CreateCall(dtorFn->getFunctionType(), typedFnPtr, {});
-      } else {
-        llvm::Value *dtorThis = typedPtr;
-        llvm::Type *expected = dtorFn->getFunctionType()->getParamType(0);
-        if (dtorThis->getType() != expected)
-          dtorThis = Builder->CreateBitCast(
-              typedPtr, expected, "dealloc.dtor.this");
-        Builder->CreateCall(dtorFn->getFunctionType(), typedFnPtr,
-                            {dtorThis});
-      }
-    } else {
-      if (metadata.destructorFunctionName.empty()) {
-        reportCompilerError("Internal error: destructor symbol missing for '" +
-                            typeKey + "' during dealloc emission");
-        restoreInsertPoint();
-        return false;
-      }
+      Builder->CreateBr(afterBB);
+
+      Builder->SetInsertPoint(chainBB);
       llvm::Function *dtorFn =
           TheModule->getFunction(metadata.destructorFunctionName);
       if (!dtorFn) {
@@ -3441,6 +3532,14 @@ static bool emitCompositeDealloc(const std::string &typeKey,
         return false;
       }
       callDestructor(dtorFn, typedPtr);
+      Builder->CreateBr(afterBB);
+
+      Builder->SetInsertPoint(afterBB);
+    } else {
+      if (!emitDestructorCall()) {
+        restoreInsertPoint();
+        return false;
+      }
     }
   }
 
@@ -9808,8 +9907,9 @@ llvm::Value *FreeExprAST::codegen() {
   TypeInfo info = makeTypeInfo(Operand->getTypeName());
   finalizeTypeInfoMetadata(info);
   if (info.smartPointerKind != SmartPointerKind::None) {
-    reportCompilerError("Cannot free smart pointer values directly",
-                        "Let the smart pointer manage its lifetime instead of using 'free'.");
+    reportCompilerError(
+        "Cannot free smart pointer values directly",
+        "The smart pointer's control block owns the payload; use the wrapper operations instead of 'free' to avoid double releases.");
     return nullptr;
   }
   if (info.refStorage == RefStorageClass::None && info.pointerDepth == 0) {
@@ -10261,9 +10361,11 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   };
 
   if (isDtorCall && info->smartPointerKind != SmartPointerKind::None) {
-    reportCompilerError("Manual destructor calls are not allowed on smart pointers",
-                        "Let the smart pointer manage lifetime instead of invoking '~" +
-                            member.getMemberName() + "()' manually.");
+    reportCompilerError(
+        "Manual destructor calls are not allowed on smart pointers",
+        "Control blocks manage the payload; calling '~" +
+            member.getMemberName() +
+            "()' manually can double-drop or corrupt the managed value.");
     return nullptr;
   }
 
@@ -10313,7 +10415,8 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
     }
 
     llvm::Value *dispatchTarget = nullptr;
-    if (info->kind == AggregateKind::Class &&
+    if (!info->baseClass &&
+        info->kind == AggregateKind::Class &&
         info->destructorVtableSlot !=
             std::numeric_limits<unsigned>::max()) {
       auto structIt = StructTypes.find(ownerName);
@@ -10369,6 +10472,109 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
       callValue = dtorFn->arg_empty()
                       ? Builder->CreateCall(dtorFn)
                       : Builder->CreateCall(dtorFn, {retained});
+    }
+    const CompositeTypeInfo *baseCursor = info;
+    llvm::Value *basePtr = thisPtr;
+    while (baseCursor && baseCursor->baseClass) {
+      auto baseStructIt = StructTypes.find(*baseCursor->baseClass);
+      if (baseStructIt != StructTypes.end() &&
+          basePtr->getType() != pointerType(baseStructIt->second)) {
+        basePtr = Builder->CreateBitCast(
+            basePtr, pointerType(baseStructIt->second),
+            ownerName + ".dtor.base.ptr");
+      }
+      const CompositeTypeInfo *baseInfo =
+          lookupCompositeInfo(*baseCursor->baseClass);
+      if (baseInfo && baseInfo->hasDestructor &&
+          !baseInfo->destructorFunctionName.empty()) {
+        llvm::Function *baseDtor =
+            TheModule->getFunction(baseInfo->destructorFunctionName);
+        if (!baseDtor) {
+          reportCompilerError("Internal error: base destructor '" +
+                              baseInfo->destructorFunctionName +
+                              "' missing during manual call");
+          break;
+        }
+        llvm::Value *baseThis = basePtr;
+        if (!baseDtor->arg_empty()) {
+          llvm::Type *expected =
+              baseDtor->getFunctionType()->getParamType(0);
+          if (baseThis->getType() != expected)
+            baseThis = Builder->CreateBitCast(
+                basePtr, expected, ownerName + ".dtor.base.this");
+          Builder->CreateCall(baseDtor, {baseThis});
+        } else {
+          Builder->CreateCall(baseDtor, {});
+        }
+      }
+      baseCursor = baseInfo;
+    }
+    if (info->kind == AggregateKind::Class &&
+        info->destructorVtableSlot !=
+            std::numeric_limits<unsigned>::max()) {
+      auto structIt = StructTypes.find(ownerName);
+      if (structIt != StructTypes.end()) {
+        llvm::StructType *structTy = structIt->second;
+        llvm::StructType *headerTy = getArcHeaderType();
+        llvm::Value *headerPtr = Builder->CreateStructGEP(
+            structTy, thisPtr, info->headerFieldIndex,
+            ownerName + ".dtor.base.header");
+        llvm::Value *descAddr = Builder->CreateStructGEP(
+            headerTy, headerPtr, 2, ownerName + ".dtor.base.desc.addr");
+        llvm::Value *dynamicDesc = Builder->CreateLoad(
+            pointerType(getTypeDescriptorType()), descAddr,
+            ownerName + ".dtor.base.desc");
+        llvm::Value *baseDescAddr = Builder->CreateStructGEP(
+            getTypeDescriptorType(), dynamicDesc, 1,
+            ownerName + ".dtor.parent.addr");
+        llvm::Value *baseDescriptor = Builder->CreateLoad(
+            pointerType(getTypeDescriptorType()), baseDescAddr,
+            ownerName + ".dtor.parent");
+        llvm::Value *hasBase = Builder->CreateICmpNE(
+            baseDescriptor,
+            llvm::ConstantPointerNull::get(
+                pointerType(getTypeDescriptorType())),
+            ownerName + ".dtor.has.parent");
+        llvm::Function *parentFn = Builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock *baseCallBB = llvm::BasicBlock::Create(
+            *TheContext, ownerName + ".dtor.base.call", parentFn);
+        llvm::BasicBlock *baseSkipBB = llvm::BasicBlock::Create(
+            *TheContext, ownerName + ".dtor.base.skip", parentFn);
+        Builder->CreateCondBr(hasBase, baseCallBB, baseSkipBB);
+        Builder->SetInsertPoint(baseCallBB);
+        llvm::Value *baseVtableAddr = Builder->CreateStructGEP(
+            getTypeDescriptorType(), baseDescriptor, 2,
+            ownerName + ".dtor.base.vtable.addr");
+        llvm::Value *baseVtable =
+            Builder->CreateLoad(pointerType(), baseVtableAddr,
+                                ownerName + ".dtor.base.vtable");
+        llvm::Value *slotIndex = llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(*TheContext),
+            static_cast<uint64_t>(info->destructorVtableSlot));
+        llvm::Value *baseSlotPtr = Builder->CreateInBoundsGEP(
+            pointerType(), baseVtable, slotIndex,
+            ownerName + ".dtor.base.vslot");
+        llvm::Value *baseSlotFn =
+            Builder->CreateLoad(pointerType(), baseSlotPtr,
+                                ownerName + ".dtor.base.fn");
+        llvm::Value *baseTypedFn = Builder->CreateBitCast(
+            baseSlotFn, pointerType(dtorFn->getFunctionType()),
+            ownerName + ".dtor.base.target");
+        llvm::Value *baseThis = thisPtr;
+        if (!dtorFn->arg_empty()) {
+          llvm::Type *expected =
+              dtorFn->getFunctionType()->getParamType(0);
+          if (baseThis->getType() != expected)
+            baseThis = Builder->CreateBitCast(
+                thisPtr, expected, ownerName + ".dtor.base.this");
+          Builder->CreateCall(dtorFn->getFunctionType(), baseTypedFn,
+                              {baseThis});
+        } else {
+          Builder->CreateCall(dtorFn->getFunctionType(), baseTypedFn, {});
+        }
+        Builder->CreateBr(baseSkipBB);
+        Builder->SetInsertPoint(baseSkipBB);
+      }
     }
     emitArcRelease(retained, ownerInfo,
                    ownerName + ".dtor.manual.release");
@@ -13236,6 +13442,28 @@ llvm::Type *StructAST::codegen() {
       PrototypeAST *Proto = MethodDef.getPrototype();
       if (!Proto)
         continue;
+      if (metadata.hasDestructor) {
+        reportCompilerError("Type '" + typeKey +
+                            "' cannot declare more than one destructor");
+        return nullptr;
+      }
+
+      if (!Proto->getGenericParameters().empty()) {
+        reportCompilerError("Destructor for '" + typeKey +
+                            "' cannot declare generic parameters");
+        return nullptr;
+      }
+      if (!Proto->getArgs().empty()) {
+        reportCompilerError("Destructor for '" + typeKey +
+                            "' cannot declare parameters");
+        return nullptr;
+      }
+      const TypeInfo &dtorReturn = Proto->getReturnTypeInfo();
+      if (Proto->returnsByRef() || dtorReturn.typeName != "void") {
+        reportCompilerError("Destructor for '" + typeKey +
+                            "' must return void");
+        return nullptr;
+      }
 
       if (MethodDef.needsInstanceThis() && !MethodDef.hasImplicitThis()) {
         Parameter thisParam;
@@ -13449,6 +13677,13 @@ llvm::Type *StructAST::codegen() {
     return nullptr;
   }
 
+  if (metadata.kind != AggregateKind::Interface) {
+    if (!emitCompositeDealloc(typeKey, StructType, metadata)) {
+      abandonStructDefinition();
+      return nullptr;
+    }
+  }
+
   if (metadata.kind == AggregateKind::Interface) {
     if (!emitInterfaceDescriptor(typeKey, metadata)) {
       abandonStructDefinition();
@@ -13457,13 +13692,6 @@ llvm::Type *StructAST::codegen() {
   } else if (metadata.kind == AggregateKind::Class ||
              metadata.kind == AggregateKind::Struct) {
     if (!emitClassRuntimeStructures(typeKey, StructType, metadata)) {
-      abandonStructDefinition();
-      return nullptr;
-    }
-  }
-
-  if (metadata.kind != AggregateKind::Interface) {
-    if (!emitCompositeDealloc(typeKey, StructType, metadata)) {
       abandonStructDefinition();
       return nullptr;
     }
