@@ -2281,15 +2281,8 @@ static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
 
 static void pushArcScope() { CG.arcScopeStack.emplace_back(); }
 
-static void popArcScope(bool emitReleases, std::string_view label) {
-  if (CG.arcScopeStack.empty())
-    return;
-  std::vector<ARCLifetimeSlot> slots =
-      std::move(CG.arcScopeStack.back());
-  CG.arcScopeStack.pop_back();
-  if (!emitReleases)
-    return;
-
+static void drainArcSlots(const std::vector<ARCLifetimeSlot> &slots,
+                          std::string_view label) {
   for (auto it = slots.rbegin(); it != slots.rend(); ++it) {
     const ARCLifetimeSlot &slot = *it;
     if (slot.isTemporary)
@@ -2316,11 +2309,9 @@ static void popArcScope(bool emitReleases, std::string_view label) {
     const bool storedIsPointer = storedTy->isPointerTy();
     if (slot.type.requiresARC() && storedIsPointer) {
       llvm::Value *current = Builder->CreateLoad(
-          storedTy, slot.storage,
-          buildArcOpLabel(label, "scope.load"));
-      emitArcRelease(
-          current, slot.type,
-          buildArcOpLabel(label, "scope.release"));
+          storedTy, slot.storage, buildArcOpLabel(label, "scope.load"));
+      emitArcRelease(current, slot.type,
+                     buildArcOpLabel(label, "scope.release"));
       Builder->CreateStore(llvm::Constant::getNullValue(storedTy),
                            slot.storage);
     } else if (hasDestructor) {
@@ -2333,11 +2324,16 @@ static void popArcScope(bool emitReleases, std::string_view label) {
             TheModule->getFunction(meta->destructorFunctionName);
         if (dtor) {
           llvm::Value *dtorArg = slot.storage;
+          if (storedIsPointer) {
+            dtorArg = Builder->CreateLoad(
+                storedTy, slot.storage,
+                buildArcOpLabel(label, "scope.dtor.load"));
+          }
           if (!dtor->arg_empty()) {
             llvm::Type *expected = dtor->getFunctionType()->getParamType(0);
             if (dtorArg->getType() != expected)
               dtorArg = Builder->CreateBitCast(
-                  slot.storage, expected,
+                  dtorArg, expected,
                   buildArcOpLabel(label, "scope.dtor.cast"));
             Builder->CreateCall(dtor, {dtorArg});
           } else {
@@ -2351,9 +2347,28 @@ static void popArcScope(bool emitReleases, std::string_view label) {
   }
 }
 
+static void popArcScope(bool emitReleases, std::string_view label) {
+  if (CG.arcScopeStack.empty())
+    return;
+  std::vector<ARCLifetimeSlot> slots = std::move(CG.arcScopeStack.back());
+  CG.arcScopeStack.pop_back();
+  if (!emitReleases)
+    return;
+
+  drainArcSlots(slots, label);
+}
+
 static void emitArcScopeDrainAll(std::string_view label) {
-  while (!CG.arcScopeStack.empty())
-    popArcScope(true, label);
+  if (CG.arcScopeStack.empty())
+    return;
+  llvm::IRBuilder<> *builderPtr = Builder.get();
+  if (!builderPtr || !builderPtr->GetInsertBlock())
+    return;
+
+  for (auto it = CG.arcScopeStack.rbegin();
+       it != CG.arcScopeStack.rend(); ++it) {
+    drainArcSlots(*it, label);
+  }
 }
 
 static void markArcSlotDestroyed(llvm::Value *storage) {
@@ -2395,8 +2410,25 @@ public:
   ~ArcScopeGuard() {
     if (!active)
       return;
-    if (CG.arcScopeStack.size() > originDepth)
+    if (CG.arcScopeStack.size() > originDepth) {
+      llvm::IRBuilder<> *builderPtr = Builder.get();
+      if (!builderPtr) {
+        CG.arcScopeStack.resize(originDepth);
+        return;
+      }
+      llvm::BasicBlock *block = builderPtr->GetInsertBlock();
+      if (!block) {
+        CG.arcScopeStack.resize(originDepth);
+        return;
+      }
+      if (block->getTerminator()) {
+        CG.arcScopeStack.resize(originDepth);
+        return;
+      }
       popArcScope(true, label);
+      if (CG.arcScopeStack.size() > originDepth)
+        CG.arcScopeStack.resize(originDepth);
+    }
   }
 
   void dismissWithoutDrain() {
@@ -3551,27 +3583,58 @@ static bool emitCompositeDealloc(const std::string &typeKey,
     return false;
   }
 
-  for (const auto &fieldEntry : metadata.fieldTypes) {
-    const std::string &fieldName = fieldEntry.first;
-    const std::string &fieldTypeName = fieldEntry.second;
-    auto fieldIndexIt = std::find_if(
-        indicesIt->second.begin(), indicesIt->second.end(),
-        [&](const auto &pair) { return pair.first == fieldName; });
-    if (fieldIndexIt == indicesIt->second.end())
-      continue;
-
-    TypeInfo fieldInfo = makeTypeInfo(fieldTypeName);
-    finalizeTypeInfoMetadata(fieldInfo);
-    if (!fieldInfo.requiresARC() && !fieldInfo.isSmartPointer())
-      continue;
-
-    unsigned index = fieldIndexIt->second;
+  auto releaseDeclaredField = [&](const InstanceFieldInfo &fieldInfo) {
+    if (fieldInfo.name.empty())
+      return;
+    if (fieldInfo.index >= structTy->getNumElements())
+      return;
+    TypeInfo info = fieldInfo.type;
+    finalizeTypeInfoMetadata(info);
+    if (!info.requiresARC() && !info.isSmartPointer())
+      return;
     llvm::Value *fieldPtr = Builder->CreateStructGEP(
-        structTy, typedPtr, index, fieldName + ".dtor.ptr");
-    llvm::Type *elementTy = structTy->getElementType(index);
+        structTy, typedPtr, fieldInfo.index, fieldInfo.name + ".dtor.ptr");
+    llvm::Type *elementTy = structTy->getElementType(fieldInfo.index);
     llvm::Value *fieldVal = Builder->CreateLoad(
-        elementTy, fieldPtr, fieldName + ".dtor.load");
-    emitArcRelease(fieldVal, fieldInfo, fieldName + ".dtor.release");
+        elementTy, fieldPtr, fieldInfo.name + ".dtor.load");
+    emitArcRelease(fieldVal, info, fieldInfo.name + ".dtor.release");
+  };
+
+  std::set<std::string> inheritedFields;
+  if (metadata.baseClass) {
+    if (const CompositeTypeInfo *baseMeta =
+            lookupCompositeInfo(*metadata.baseClass)) {
+      for (const auto &entry : baseMeta->fieldTypes)
+        inheritedFields.insert(entry.first);
+    }
+  }
+
+  auto shouldSkipInherited = [&](const std::string &name) {
+    return metadata.baseClass.has_value() && inheritedFields.count(name) > 0;
+  };
+
+  if (!metadata.instanceFields.empty()) {
+    for (const auto &fieldInfo : metadata.instanceFields)
+      if (!shouldSkipInherited(fieldInfo.name))
+        releaseDeclaredField(fieldInfo);
+  } else {
+    for (const auto &fieldEntry : metadata.fieldTypes) {
+      const std::string &fieldName = fieldEntry.first;
+      if (shouldSkipInherited(fieldName))
+        continue;
+      const std::string &fieldTypeName = fieldEntry.second;
+      auto fieldIndexIt = std::find_if(
+          indicesIt->second.begin(), indicesIt->second.end(),
+          [&](const auto &pair) { return pair.first == fieldName; });
+      if (fieldIndexIt == indicesIt->second.end())
+        continue;
+      InstanceFieldInfo info;
+      info.name = fieldName;
+      info.index = fieldIndexIt->second;
+      info.type = makeTypeInfo(fieldTypeName);
+      finalizeTypeInfoMetadata(info.type);
+      releaseDeclaredField(info);
+    }
   }
 
   if (metadata.baseClass) {
@@ -12858,6 +12921,9 @@ llvm::Function *FunctionAST::codegen() {
     }
 
     if (!functionCodegenSucceeded) {
+      if (Builder)
+        Builder->ClearInsertionPoint();
+      CG.arcScopeStack.clear();
       TheFunction->eraseFromParent();
       if (overloadEntry)
         overloadEntry->function = nullptr;

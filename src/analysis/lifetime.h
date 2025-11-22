@@ -46,6 +46,7 @@ struct VariableLifetimePlan {
   bool manualDestructorCalled = false;
   bool manualDestructorDoubleReported = false;
   bool manuallyReleased = false;
+  bool destroyed = false;
   bool manualDoubleReleaseReported = false;
   bool useAfterManualReleaseReported = false;
   std::string lastManualReleaseNote;

@@ -470,7 +470,9 @@ void LifetimeAnalyzer::recordManualRelease(VariableLifetimePlan &entry,
     entry.manualDoubleReleaseReported = true;
   }
   entry.manuallyReleased = true;
+  entry.destroyed = true;
   entry.lastManualReleaseNote = note;
+  emitEvent(entry.name, plan, LifetimeEvent::Kind::Release, note);
   emitEvent(entry.name, plan, LifetimeEvent::Kind::ManualRelease, note);
 }
 
@@ -498,6 +500,9 @@ void LifetimeAnalyzer::releaseSymbol(VariableLifetimePlan &var,
     return;
   if (var.escapes)
     return;
+  if (var.destroyed || var.manuallyReleased)
+    return;
+  var.destroyed = true;
   emitEvent(var.name, plan, LifetimeEvent::Kind::Release, note);
 }
 

@@ -384,10 +384,43 @@ int __hybrid_debug_strong_count(void *object) {
     return header ? (int)header->strongCount : 0;
 }
 
-void *hybrid_retain(void *obj) { return obj; }
-void hybrid_release(void *obj) { (void)obj; }
+void hybrid_dealloc(void *obj);
+
+void *hybrid_retain(void *obj) {
+    if (!obj)
+        return NULL;
+    HybridARCHeader *header = (HybridARCHeader *)obj;
+    header->strongCount += 1;
+    return obj;
+}
+
+void hybrid_release(void *obj) {
+    if (!obj)
+        return;
+    HybridARCHeader *header = (HybridARCHeader *)obj;
+    if (header->strongCount > 0)
+        header->strongCount -= 1;
+    if (header->strongCount == 0) {
+        const HybridTypeDescriptor *desc = header->descriptor;
+        if (desc && desc->dealloc) {
+            desc->dealloc(obj);
+        } else {
+            hybrid_dealloc(obj);
+        }
+    }
+}
+
 void *hybrid_autorelease(void *obj) { return obj; }
-void hybrid_dealloc(void *obj) { (void)obj; }
+
+void hybrid_dealloc(void *obj) {
+    if (!obj)
+        return;
+    HybridARCHeader *header = (HybridARCHeader *)obj;
+    if (header->weakCount > 0)
+        header->weakCount -= 1;
+    if (header->weakCount == 0)
+        free(obj);
+}
 
 typedef struct {
     int strong;
@@ -396,36 +429,67 @@ typedef struct {
 } HybridSharedControlForTests;
 
 void *__hybrid_shared_control_create(void *payload) {
+    if (!payload)
+        return NULL;
     HybridSharedControlForTests *ctrl =
-        (HybridSharedControlForTests *)malloc(sizeof(HybridSharedControlForTests));
+        (HybridSharedControlForTests *)calloc(1, sizeof(HybridSharedControlForTests));
     if (!ctrl)
         return NULL;
     ctrl->strong = 1;
     ctrl->weak = 1;
     ctrl->payload = payload;
+    hybrid_retain(payload);
     return ctrl;
 }
 
 void __hybrid_shared_control_retain_strong(void *control) {
-    (void)control;
+    HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
+    if (ctrl)
+        ctrl->strong += 1;
 }
+
+void __hybrid_shared_control_release_weak(void *control);
 
 void __hybrid_shared_control_release_strong(void *control) {
     HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
-    if (ctrl)
-        free(ctrl);
+    if (!ctrl)
+        return;
+    int previous = ctrl->strong;
+    if (previous > 0)
+        ctrl->strong -= 1;
+    if (previous == 1) {
+        void *payload = ctrl->payload;
+        ctrl->payload = NULL;
+        if (payload)
+            hybrid_release(payload);
+        __hybrid_shared_control_release_weak(control);
+    }
 }
 
-void __hybrid_shared_control_retain_weak(void *control) { (void)control; }
+void __hybrid_shared_control_retain_weak(void *control) {
+    HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
+    if (ctrl)
+        ctrl->weak += 1;
+}
 
 void __hybrid_shared_control_release_weak(void *control) {
-    (void)control;
+    HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
+    if (!ctrl)
+        return;
+    if (ctrl->weak > 0)
+        ctrl->weak -= 1;
+    if (ctrl->weak == 0)
+        free(ctrl);
 }
 
 void *__hybrid_shared_control_lock(void *control) {
     HybridSharedControlForTests *ctrl = (HybridSharedControlForTests *)control;
     if (!ctrl || ctrl->strong <= 0)
         return NULL;
+    if (!ctrl->payload)
+        return NULL;
+    ctrl->strong += 1;
+    hybrid_retain(ctrl->payload);
     return ctrl->payload;
 }
 
@@ -557,6 +621,8 @@ run_test() {
                     # Check if smart pointer runtime is needed
                     local needs_smart_ptr_runtime=0
                     if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
+                        needs_smart_ptr_runtime=1
+                    elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease" "$temp_ir"; then
                         needs_smart_ptr_runtime=1
                     fi
 
