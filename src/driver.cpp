@@ -4,6 +4,7 @@
 #include "toplevel.h"
 #include "ast.h"
 #include "compiler_session.h"
+#include "optimizer/arc_optimizer.h"
 
 #include <algorithm>
 #include <cctype>
@@ -20,6 +21,7 @@
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -108,6 +110,9 @@ void printUsage() {
   fprintf(stderr, "                     Fail when total generic instantiations exceed <n>\n");
   fprintf(stderr, "  --max-nested-generics <n>\n");
   fprintf(stderr, "                     Fail when nested generic depth exceeds <n>\n");
+  fprintf(stderr, "  --arc-optimizer    Enable ARC retain/release peephole pass\n");
+  fprintf(stderr, "  --arc-trace-retains\n");
+  fprintf(stderr, "                     Emit per-function retain/release/autorelease counts\n");
 }
 
 bool shouldEnableGenericsMetrics() {
@@ -199,6 +204,40 @@ void emitGenericsMetricsSummary(const CodegenContext &context) {
   }
 }
 
+static void emitArcTraceSummary(const CodegenContext &context) {
+  const ArcTraceState &trace = context.arcTrace;
+  if (!trace.traceEnabled)
+    return;
+
+  auto printEntry = [](const char *phase, const std::string &name,
+                       const ArcRetainCounts &counts) {
+    fprintf(stderr, "[arc-trace] %s %s retains=%llu releases=%llu autoreleases=%llu\n",
+            phase, name.c_str(),
+            static_cast<unsigned long long>(counts.retains),
+            static_cast<unsigned long long>(counts.releases),
+            static_cast<unsigned long long>(counts.autoreleases));
+  };
+
+  for (const auto &entry : trace.preOptimizationCounts)
+    printEntry("pre", entry.first, entry.second);
+
+  if (!trace.optimizerRan)
+    return;
+
+  std::map<std::string, ArcRetainCounts> merged = trace.postOptimizationCounts;
+  for (const auto &entry : trace.preOptimizationCounts) {
+    merged.emplace(entry.first, ArcRetainCounts{});
+  }
+
+  for (const auto &entry : merged) {
+    auto it = trace.postOptimizationCounts.find(entry.first);
+    const ArcRetainCounts &counts =
+        it != trace.postOptimizationCounts.end() ? it->second
+                                                 : ArcRetainCounts{};
+    printEntry("post", entry.first, counts);
+  }
+}
+
 }
 
 int main(int argc, char **argv) {
@@ -211,6 +250,8 @@ int main(int argc, char **argv) {
   uint64_t maxGenericInstantiations = 0;
   unsigned maxNestedGenerics = 0;
   unsigned maxGenericDepth = 0;
+  bool enableArcOptimizer = false;
+  bool enableArcTrace = false;
 
   session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
@@ -309,6 +350,10 @@ int main(int argc, char **argv) {
         popCompilerSession();
         return 1;
       }
+    } else if (arg == "--arc-optimizer") {
+      enableArcOptimizer = true;
+    } else if (arg == "--arc-trace-retains") {
+      enableArcTrace = true;
     } else if (arg == "-o") {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: -o requires an output path\n");
@@ -341,6 +386,38 @@ int main(int argc, char **argv) {
     diagConfig.instantiationBudget = maxGenericInstantiations;
   if (maxNestedGenerics)
     diagConfig.nestedDepthBudget = maxNestedGenerics;
+  if (enableArcTrace)
+    codegenCtx.arcTrace.traceEnabled = true;
+  if (enableArcOptimizer)
+    codegenCtx.arcTrace.optimizerEnabled = true;
+
+  auto runArcPasses = [&](llvm::Module *module) {
+    if (!module)
+      return;
+    const bool arcDebug = std::getenv("HYBRID_ARC_OPT_DEBUG") != nullptr;
+    if (codegenCtx.arcTrace.traceEnabled)
+      collectArcRetainReleaseCounts(
+          *module, codegenCtx.arcTrace.preOptimizationCounts);
+    if (codegenCtx.arcTrace.optimizerEnabled) {
+      if (arcDebug)
+        fprintf(stderr, "[arc-opt] begin optimization pass\n");
+      runARCOptimizationPass(*module);
+      codegenCtx.arcTrace.optimizerRan = true;
+      if (codegenCtx.arcTrace.traceEnabled) {
+        if (arcDebug)
+          fprintf(stderr, "[arc-opt] collecting post-optimization counts\n");
+        collectArcRetainReleaseCounts(
+            *module, codegenCtx.arcTrace.postOptimizationCounts);
+      }
+      if (arcDebug) {
+        if (llvm::verifyModule(*module, &llvm::errs()))
+          fprintf(stderr,
+                  "[arc-opt] module verification failed after optimizer\n");
+        else
+          fprintf(stderr, "[arc-opt] module verification succeeded\n");
+      }
+    }
+  };
 
   if (!outputPath.empty())
     emitLLVM = emitLLVM || outputPath == "-" || endsWith(outputPath, ".ll") || endsWith(outputPath, ".bc");
@@ -359,6 +436,8 @@ int main(int argc, char **argv) {
 
     for (std::size_t idx = 0; idx < sourceFiles.size(); ++idx) {
       std::string source;
+      if (std::getenv("HYBRID_ARC_OPT_DEBUG"))
+        fprintf(stderr, "[arc-opt] compiling %s\n", sourceFiles[idx].c_str());
       if (!loadSourceFile(sourceFiles[idx].c_str(), source)) {
         fprintf(stderr, "Error: Failed to open source file '%s'\n", sourceFiles[idx].c_str());
         hadFailure = true;
@@ -379,7 +458,10 @@ int main(int argc, char **argv) {
 
     if (!hadFailure) {
       FinalizeTopLevelExecution();
+      if (std::getenv("HYBRID_ARC_OPT_DEBUG"))
+        fprintf(stderr, "[arc-opt] finalized module\n");
       llvm::Module *module = getModule();
+      runArcPasses(module);
 
       std::string targetOutput;
       if (!outputPath.empty())
@@ -547,12 +629,14 @@ int main(int argc, char **argv) {
 
     if (!currentParser().hadError) {
       FinalizeTopLevelExecution();
+      runArcPasses(getModule());
       fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
       getModule()->print(llvm::errs(), nullptr);
     }
   }
 
   emitGenericsMetricsSummary(session.codegen());
+  emitArcTraceSummary(session.codegen());
   popCompilerSession();
 
   return exitCode;

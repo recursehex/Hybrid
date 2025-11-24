@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ast.h"
+#include "optimizer/arc_optimizer.h"
 
 namespace analysis {
 struct LifetimePlan;
@@ -152,6 +153,14 @@ struct GenericsMetrics {
   bool enabled = false;
 };
 
+struct ArcTraceState {
+  bool traceEnabled = false;
+  bool optimizerEnabled = false;
+  bool optimizerRan = false;
+  std::map<std::string, ArcRetainCounts> preOptimizationCounts;
+  std::map<std::string, ArcRetainCounts> postOptimizationCounts;
+};
+
 struct ActiveCompositeContext {
   std::string name;
   MethodKind kind = MethodKind::Regular;
@@ -197,6 +206,7 @@ struct CodegenContext {
   std::vector<std::vector<ARCLifetimeSlot>> arcScopeStack;
   std::vector<ActiveReturnMetadata> functionReturnStack;
   const analysis::LifetimePlan *currentLifetimePlan = nullptr;
+  ArcTraceState arcTrace;
 
   void reset();
 };
@@ -253,6 +263,11 @@ inline void CodegenContext::reset() {
   arcScopeStack.clear();
   functionReturnStack.clear();
   currentLifetimePlan = nullptr;
+  const bool arcTraceEnabled = arcTrace.traceEnabled;
+  const bool arcOptimizerEnabled = arcTrace.optimizerEnabled;
+  arcTrace = {};
+  arcTrace.traceEnabled = arcTraceEnabled;
+  arcTrace.optimizerEnabled = arcOptimizerEnabled;
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

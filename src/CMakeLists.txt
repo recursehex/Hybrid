@@ -13,6 +13,7 @@ set(HYBRID_SOURCES
     analysis/cycles.cpp
     analysis/semantics.cpp
     analysis/smart_pointers.cpp
+    optimizer/arc_optimizer.cpp
 )
 
 # Define header files

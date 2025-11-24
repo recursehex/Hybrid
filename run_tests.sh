@@ -595,6 +595,22 @@ run_test() {
         has_errors=1
     fi
 
+    local expected_output=()
+    while IFS= read -r line; do
+        line=${line#"// EXPECT_OUTPUT:"}
+        line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        if [ -n "$line" ]; then
+            expected_output+=("$line")
+        fi
+    done < <(grep -E "^// EXPECT_OUTPUT:" "$test_file" || true)
+
+    for expected in "${expected_output[@]}"; do
+        if ! grep -F -q "$expected" <<< "$output"; then
+            has_errors=1
+            output="${output}"$'\n'"[test-expectation] missing: ${expected}"
+        fi
+    done
+
     # If compilation succeeded and test is not expected to fail, compile and run with clang
     local runtime_exit_code=0
     local runtime_output=""
@@ -609,7 +625,7 @@ run_test() {
             fi
 
             if [ -n "$module_start" ]; then
-                local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics")
+                local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]")
 
                 local temp_ir=$(mktemp /tmp/hybrid_test.XXXXXX)
                 mv "$temp_ir" "${temp_ir}.ll"
@@ -669,7 +685,7 @@ run_test() {
                 fi
 
                 if [ -n "$module_start" ]; then
-                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics")
+                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]")
 
                     local temp_ir=$(mktemp /tmp/hybrid_test_fail.XXXXXX)
                     mv "$temp_ir" "${temp_ir}.ll"
