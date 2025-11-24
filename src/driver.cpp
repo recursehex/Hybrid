@@ -618,8 +618,18 @@ int main(int argc, char **argv) {
 #ifdef HYBRID_REFCOUNT_SOURCE
           command += " \"" + std::string(HYBRID_REFCOUNT_SOURCE) + "\"";
 #endif
+#ifdef HYBRID_WEAK_TABLE_SOURCE
+          command += " \"" + std::string(HYBRID_WEAK_TABLE_SOURCE) + "\"";
+#endif
 #ifdef HYBRID_SOURCE_DIR
           command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "\"";
+#endif
+#ifdef HYBRID_RUNTIME_INCLUDE_DIR
+          command += " -I\"" + std::string(HYBRID_RUNTIME_INCLUDE_DIR) + "\"";
+#else
+#ifdef HYBRID_SOURCE_DIR
+          command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "/../runtime/include\"";
+#endif
 #endif
           command += " -std=c++17 -o \"" + targetOutput + "\"";
 #else

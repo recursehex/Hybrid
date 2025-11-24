@@ -4,11 +4,6 @@
 
 namespace hybrid::memory {
 
-namespace {
-constexpr std::memory_order kAcquireRelease = std::memory_order_acq_rel;
-constexpr std::memory_order kRelaxed = std::memory_order_relaxed;
-} // namespace
-
 RefCount::RefCount(ARCHeader *header) : header_(header) {}
 
 void RefCount::reset(ARCHeader *header) { header_ = header; }
@@ -18,66 +13,40 @@ bool RefCount::isValid() const { return header_ != nullptr; }
 ARCHeader *RefCount::header() const { return header_; }
 
 const HybridTypeDescriptor *RefCount::descriptor() const {
-  return header_ ? header_->typeDescriptor : nullptr;
+  return header_ ? header_->descriptor : nullptr;
 }
 
 void RefCount::setDescriptor(const HybridTypeDescriptor *descriptor) {
   if (header_)
-    header_->typeDescriptor = descriptor;
+    header_->descriptor = descriptor;
 }
 
 void RefCount::initialize(const HybridTypeDescriptor *descriptor) {
-  if (!header_)
-    return;
-  header_->strongCount.store(1, kRelaxed);
-  header_->weakCount.store(1, kRelaxed);
-  header_->typeDescriptor = descriptor;
+  hybrid_refcount_init(header_, descriptor);
 }
 
 void RefCount::retainStrong() const {
-  if (header_)
-    header_->strongCount.fetch_add(1, kRelaxed);
+  hybrid_refcount_retain_strong(header_);
 }
 
 bool RefCount::releaseStrong() const {
-  if (!header_)
-    return false;
-  const std::uint32_t previous =
-      header_->strongCount.fetch_sub(1, kAcquireRelease);
-  if (previous == 0) {
-    header_->strongCount.store(0, kRelaxed);
-    return false;
-  }
-  return previous == 1;
+  return hybrid_refcount_release_strong(header_);
 }
 
 void RefCount::retainWeak() const {
-  if (header_)
-    header_->weakCount.fetch_add(1, kRelaxed);
+  hybrid_refcount_retain_weak(header_);
 }
 
 bool RefCount::releaseWeak() const {
-  if (!header_)
-    return false;
-  const std::uint32_t previous =
-      header_->weakCount.fetch_sub(1, kAcquireRelease);
-  if (previous == 0) {
-    header_->weakCount.store(0, kRelaxed);
-    return false;
-  }
-  return previous == 1;
+  return hybrid_refcount_release_weak(header_);
 }
 
 std::uint32_t RefCount::strongCount() const {
-  if (!header_)
-    return 0;
-  return header_->strongCount.load(std::memory_order_acquire);
+  return hybrid_refcount_strong_count(header_);
 }
 
 std::uint32_t RefCount::weakCount() const {
-  if (!header_)
-    return 0;
-  return header_->weakCount.load(std::memory_order_acquire);
+  return hybrid_refcount_weak_count(header_);
 }
 
 ARCHeader *RefCount::headerFromObject(void *object) {

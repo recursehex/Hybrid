@@ -1,22 +1,11 @@
 #ifndef HYBRID_MEMORY_REF_COUNT_H
 #define HYBRID_MEMORY_REF_COUNT_H
 
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
-
-struct HybridTypeDescriptor;
+#include "hybrid_runtime.h"
 
 namespace hybrid::memory {
 
-struct ARCHeader {
-  std::atomic<std::uint32_t> strongCount;
-  std::atomic<std::uint32_t> weakCount;
-  const HybridTypeDescriptor *typeDescriptor;
-};
-
-static_assert(sizeof(std::atomic<std::uint32_t>) == sizeof(std::uint32_t),
-              "ARCHeader layout requires lock-free 32-bit atomics");
+using ARCHeader = hybrid_refcount_t;
 
 class RefCount {
 public:

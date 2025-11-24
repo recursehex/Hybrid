@@ -75,6 +75,7 @@ VERBOSE_MODE=0
 FAILURES_ONLY=1
 TEST_PATTERN=""
 RUN_MULTI_UNIT_TESTS=1
+MULTI_UNIT_FILTER=""
 EXTRA_COMPILER_ARGS=()
 FORCE_VERBOSE_FROM_ENV=0
 VERBOSE_FROM_ARGS=0
@@ -512,6 +513,22 @@ cleanup_runtime() {
 }
 trap cleanup_runtime EXIT
 
+recount_multi_unit() {
+    local filter="$1"
+    local count=0
+    if [ -d "test/multi_unit" ]; then
+        while IFS= read -r -d '' multi_dir; do
+            if [ -n "$filter" ] && [ "$(basename "$multi_dir")" != "$filter" ]; then
+                continue
+            fi
+            if find "$multi_dir" -maxdepth 1 -name "*.hy" -type f | grep -q .; then
+                count=$((count + 1))
+            fi
+        done < <(find test/multi_unit -mindepth 1 -maxdepth 1 -type d -print0)
+    fi
+    echo "$count"
+}
+
 # Find all test files in test/ directory and subdirectories
 TEST_FILES=$(find test/ -path 'test/multi_unit' -prune -o -name "*.hy" -type f -print | sort)
 
@@ -520,14 +537,7 @@ if [ -z "$TEST_FILES" ]; then
     exit 1
 fi
 
-MULTI_UNIT_TEST_COUNT=0
-if [ -d "test/multi_unit" ]; then
-    while IFS= read -r -d '' multi_dir; do
-        if find "$multi_dir" -maxdepth 1 -name "*.hy" -type f | grep -q .; then
-            MULTI_UNIT_TEST_COUNT=$((MULTI_UNIT_TEST_COUNT + 1))
-        fi
-    done < <(find test/multi_unit -mindepth 1 -maxdepth 1 -type d -print0)
-fi
+MULTI_UNIT_TEST_COUNT=$(recount_multi_unit "$MULTI_UNIT_FILTER")
 
 # Count tests by category
 echo "Test categories:"
@@ -645,7 +655,7 @@ run_test() {
                     local clang_success=0
                     if [ $needs_smart_ptr_runtime -eq 1 ]; then
                         # Smart pointer tests use C++ runtime - don't include stub runtime library
-                        if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                        if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
                             clang_success=1
                         fi
                     else
@@ -703,7 +713,7 @@ run_test() {
                         local clang_success=0
                         if [ $needs_smart_ptr_runtime -eq 1 ]; then
                             # Smart pointer tests use C++ runtime - don't include stub runtime library
-                            if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/memory/ref_count.cpp -Isrc -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                            if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
                                 clang_success=1
                             fi
                         else
@@ -857,6 +867,9 @@ run_multi_unit_tests() {
         [ -d "$dir" ] || continue
 
         local test_name=$(basename "$dir")
+        if [ -n "$MULTI_UNIT_FILTER" ] && [ "$test_name" != "$MULTI_UNIT_FILTER" ]; then
+            continue
+        fi
         local suite_start=$(date +%s)
         local expect="pass"
         if [ -f "${dir}/EXPECT_FAIL" ] || [[ "$test_name" == *_fail ]]; then
@@ -1009,11 +1022,16 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            TEST_PATTERN="$1"
-            shift
-            ;;
+        TEST_PATTERN="$1"
+        shift
+        ;;
     esac
 done
+
+if [[ "$TEST_PATTERN" == multi_unit/* ]]; then
+    MULTI_UNIT_FILTER="${TEST_PATTERN#multi_unit/}"
+    TEST_PATTERN="multi_unit"
+fi
 
 if [ $FORCE_VERBOSE_FROM_ENV -eq 1 ] && [ $VERBOSE_FROM_ARGS -eq 0 ]; then
     VERBOSE_MODE=1
@@ -1026,7 +1044,11 @@ if [ -n "$TEST_PATTERN" ]; then
     if [ -d "test/$TEST_PATTERN" ]; then
         if [ "$TEST_PATTERN" = "multi_unit" ]; then
             TEST_FILES=""
-            echo "Running multi-unit manifest tests"
+            if [ -n "$MULTI_UNIT_FILTER" ]; then
+                echo "Running multi-unit manifest tests (filtered to '$MULTI_UNIT_FILTER')"
+            else
+                echo "Running multi-unit manifest tests"
+            fi
             RUN_MULTI_UNIT_TESTS=1
         else
             # Run all tests in that category
@@ -1056,6 +1078,8 @@ if [ -n "$TEST_PATTERN" ]; then
     fi
     echo
 fi
+
+MULTI_UNIT_TEST_COUNT=$(recount_multi_unit "$MULTI_UNIT_FILTER")
 
 SINGLE_TEST_COUNT=0
 if [ -n "$TEST_FILES" ]; then

@@ -1,35 +1,14 @@
 // This file implements runtime support helpers for generated Hybrid code, including string utilities and interface dispatch.
 
+#include "hybrid_runtime.h"
+
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cmath>
 
 extern "C" {
-
-struct HybridTypeDescriptor;
-
-struct HybridInterfaceEntry {
-  const HybridTypeDescriptor *interfaceType;
-  const void **methodTable;
-};
-
-struct HybridTypeDescriptor {
-  const char *typeName;
-  const HybridTypeDescriptor *baseType;
-  const void **vtable;
-  std::uint32_t vtableSize;
-  const HybridInterfaceEntry *interfaces;
-  std::uint32_t interfaceCount;
-  void (*dealloc)(void *);
-};
-
-struct HybridARCHeader {
-  std::uint32_t strongCount;
-  std::uint32_t weakCount;
-  const HybridTypeDescriptor *descriptor;
-};
 
 static uint16_t *dup_utf16_from_utf8(const char *utf8);
 static char *dup_utf8_from_utf16(const uint16_t *utf16);
@@ -85,7 +64,7 @@ int __hybrid_debug_descriptor_matches(void *object,
                                       const uint16_t *expectedName) {
   if (!object)
     return 0;
-  auto *header = static_cast<HybridARCHeader *>(object);
+  auto *header = static_cast<hybrid_refcount_t *>(object);
   if (!header || !header->descriptor || !header->descriptor->typeName)
     return 0;
   char *expectedUtf8 = dup_utf8_from_utf16(expectedName);
@@ -100,10 +79,8 @@ int __hybrid_debug_descriptor_matches(void *object,
 int __hybrid_debug_strong_count(void *object) {
   if (!object)
     return 0;
-  auto *header = static_cast<HybridARCHeader *>(object);
-  if (!header)
-    return 0;
-  return static_cast<int>(header->strongCount);
+  auto *header = static_cast<hybrid_refcount_t *>(object);
+  return static_cast<int>(hybrid_refcount_strong_count(header));
 }
 
 static uint16_t *alloc_utf16_buffer(size_t len) {
