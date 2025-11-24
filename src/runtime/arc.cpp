@@ -126,7 +126,6 @@ __hybrid_shared_control_create(void *payload) {
   block->strongCount.store(1, std::memory_order_relaxed);
   block->weakCount.store(1, std::memory_order_relaxed);
   block->payload = payload;
-  hybrid_retain(payload);
   return block;
 }
 

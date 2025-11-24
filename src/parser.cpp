@@ -2942,6 +2942,12 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseSwitchStatement();
   case tok_unsafe:
     return ParseUnsafeBlock();
+  case '{': {
+    auto Block = ParseBlock();
+    if (!Block)
+      return nullptr;
+    return Block;
+  }
   case tok_autoreleasepool: {
     getNextToken(); // eat '@autoreleasepool'
     while (CurTok == tok_newline)
