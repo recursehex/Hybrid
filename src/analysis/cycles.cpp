@@ -1,3 +1,5 @@
+// This file implements ARC cycle detection for aggregates to surface ownership warnings.
+
 #include "analysis/cycles.h"
 
 #include <algorithm>

@@ -1,3 +1,5 @@
+// This file implements top-level handlers that drive parsing and LLVM IR emission in interactive or batch mode.
+
 #include "toplevel.h"
 #include "parser.h"
 #include "lexer.h"

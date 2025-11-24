@@ -1,3 +1,5 @@
+// This file implements the Hybrid language parser that builds AST nodes and manages parsing state.
+
 #include "parser.h"
 #include "lexer.h"
 #include "compiler_session.h"

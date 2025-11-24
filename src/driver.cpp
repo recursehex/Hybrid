@@ -1,3 +1,5 @@
+// This file implements the command-line driver that configures compiler sessions, parses inputs, and compiles source files.
+
 #include "parser.h"
 #include "toplevel.h"
 #include "ast.h"

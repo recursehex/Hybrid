@@ -1,3 +1,5 @@
+// This file implements reference counting helpers and ARC header utilities used by the runtime.
+
 #include "memory/ref_count.h"
 
 namespace hybrid::memory {

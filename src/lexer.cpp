@@ -1,3 +1,5 @@
+// This file implements the Hybrid lexer that tokenizes source text while tracking source locations.
+
 #include "lexer.h"
 
 #include <algorithm>

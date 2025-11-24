@@ -1,3 +1,5 @@
+// This file implements smart pointer classification utilities to describe ownership semantics of types.
+
 #include "analysis/smart_pointers.h"
 
 #include <utility>

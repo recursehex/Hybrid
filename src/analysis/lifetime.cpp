@@ -1,3 +1,5 @@
+// This file implements the lifetime analyzer that builds retain/release plans by walking statements and expressions.
+
 #include "analysis/lifetime.h"
 
 #include <algorithm>

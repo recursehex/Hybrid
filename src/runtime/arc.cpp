@@ -1,3 +1,5 @@
+// This file implements ARC runtime routines for allocating objects and managing shared and weak reference counts.
+
 #include "memory/ref_count.h"
 
 #include <atomic>

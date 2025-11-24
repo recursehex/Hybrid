@@ -1,3 +1,5 @@
+// This file implements runtime support helpers for generated Hybrid code, including string utilities and interface dispatch.
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>

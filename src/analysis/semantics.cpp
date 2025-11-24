@@ -1,3 +1,5 @@
+// This file implements the semantic analysis driver that coordinates lifetime planning and cycle detection.
+
 #include "analysis/semantics.h"
 
 namespace analysis {

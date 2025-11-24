@@ -1,3 +1,5 @@
+// This file implements compiler session management, wiring per-thread lexer, parser, and codegen state.
+
 #include "compiler_session.h"
 
 #include <cctype>

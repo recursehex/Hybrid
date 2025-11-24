@@ -1,3 +1,5 @@
+// This file implements AST node behaviors, including semantic hooks and LLVM IR generation for Hybrid constructs.
+
 #include "ast.h"
 #include <iostream>
 
