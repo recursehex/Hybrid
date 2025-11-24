@@ -7,14 +7,22 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 using hybrid::memory::RefCount;
+
+int hybrid_debug_leaks = 0;
+int hybrid_debug_reftrace = 0;
+int hybrid_debug_verify = 0;
+int hybrid_debug_pool = 0;
 
 extern "C" void hybrid_release(void *obj);
 
@@ -29,6 +37,40 @@ namespace {
 
 std::mutex DescriptorMutex;
 std::map<std::string, const HybridTypeDescriptor *> DescriptorCache;
+std::once_flag LeakAtexitRegistration;
+
+std::mutex &getLeakRegistryMutex() {
+  static auto *mutexPtr = new std::mutex();
+  return *mutexPtr;
+}
+
+std::map<void *, std::thread::id> &getLeakRegistry() {
+  static auto *registryPtr = new std::map<void *, std::thread::id>();
+  return *registryPtr;
+}
+
+const HybridTypeDescriptor *getFallbackDescriptor() {
+  static const HybridTypeDescriptor anonDesc{
+      "<anonymous>", nullptr, nullptr, 0, nullptr, 0, nullptr};
+  return &anonDesc;
+}
+
+struct LeakInfo {
+  const HybridTypeDescriptor *descriptor = nullptr;
+  std::thread::id threadId{};
+};
+
+struct TraceEvent {
+  const char *op = nullptr;
+  const char *label = nullptr;
+  const HybridTypeDescriptor *descriptor = nullptr;
+  void *object = nullptr;
+  std::uint32_t strong = 0;
+  std::uint32_t weak = 0;
+};
+
+thread_local std::vector<TraceEvent> TraceBuffer;
+thread_local const char *PendingTraceLabel = nullptr;
 
 const HybridTypeDescriptor *
 canonicalizeDescriptor(const HybridTypeDescriptor *descriptor) {
@@ -52,20 +94,115 @@ bool descriptorLooksValid(const HybridTypeDescriptor *descriptor) {
   return true;
 }
 
+bool descriptorRegistered(const HybridTypeDescriptor *descriptor) {
+  if (!descriptor)
+    return false;
+  std::lock_guard<std::mutex> lock(DescriptorMutex);
+  for (const auto &entry : DescriptorCache) {
+    if (entry.second == descriptor)
+      return true;
+  }
+  return false;
+}
+
 struct AutoreleasePool {
   std::vector<void *> objects;
 };
 
 thread_local std::vector<AutoreleasePool> AutoreleasePools;
 
+static const char *consumeTraceLabel(const char *label) {
+  if (PendingTraceLabel) {
+    const char *pending = PendingTraceLabel;
+    PendingTraceLabel = nullptr;
+    return pending;
+  }
+  return label;
+}
+
+void recordTraceEvent(const char *op, void *object,
+                      const HybridTypeDescriptor *descriptor,
+                      const char *label, std::uint32_t strong,
+                      std::uint32_t weak) {
+  if (!hybrid_debug_reftrace)
+    return;
+  TraceEvent event;
+  event.op = op;
+  event.object = object;
+  event.descriptor = descriptor;
+  event.strong = strong;
+  event.weak = weak;
+  event.label = consumeTraceLabel(label);
+  TraceBuffer.push_back(event);
+}
+
+void ensureLeakAtexitRegistered() {
+  std::call_once(LeakAtexitRegistration,
+                 []() { std::atexit(hybrid_arc_dump_leaks_default); });
+}
+
+void registerLeak(void *object, const HybridTypeDescriptor *descriptor,
+                  const RefCount &counts) {
+  if (!hybrid_debug_leaks || !object)
+    return;
+  ensureLeakAtexitRegistered();
+  std::lock_guard<std::mutex> lock(getLeakRegistryMutex());
+  (void)descriptor;
+  (void)counts;
+  getLeakRegistry()[object] = std::this_thread::get_id();
+}
+
+void unregisterLeak(void *object) {
+  if (!hybrid_debug_leaks || !object)
+    return;
+  std::lock_guard<std::mutex> lock(getLeakRegistryMutex());
+  getLeakRegistry().erase(object);
+}
+
 void drainPool(AutoreleasePool &pool) {
   for (void *obj : pool.objects) {
     hybrid_release(obj);
   }
   pool.objects.clear();
+  if (hybrid_debug_reftrace)
+    hybrid_arc_trace_flush(nullptr);
 }
 
 } // namespace
+
+static bool verifyObjectPointer(void *object, std::string &reason) {
+  reason.clear();
+  if (!object) {
+    reason = "null object";
+    return false;
+  }
+  RefCount counts = RefCount::fromObject(object);
+  const HybridTypeDescriptor *descriptor = counts.descriptor();
+  if (!descriptor || !descriptor->typeName) {
+    reason = "missing descriptor";
+    return true;
+  }
+  if (!descriptorLooksValid(descriptor)) {
+    reason = "descriptor layout invalid";
+    return false;
+  }
+  if (!descriptorRegistered(descriptor)) {
+    const HybridTypeDescriptor *canonical =
+        hybrid_register_type_descriptor(descriptor);
+    if (canonical != descriptor) {
+      RefCount writable = counts;
+      writable.setDescriptor(canonical);
+      descriptor = canonical;
+    }
+  }
+
+  const std::uint32_t strong = counts.strongCount();
+  if (strong == 0) {
+    reason = "zero refcount";
+    return false;
+  }
+  return true;
+}
 
 struct HybridSharedControlBlock {
   std::atomic<std::uint32_t> strongCount;
@@ -76,6 +213,91 @@ struct HybridSharedControlBlock {
 extern "C" {
 
 void hybrid_dealloc(void *obj);
+
+void hybrid_arc_set_debug_flags(int leakDetect, int refTrace, int verify,
+                                int poolDebug) {
+  hybrid_debug_leaks = leakDetect ? 1 : 0;
+  hybrid_debug_reftrace = refTrace ? 1 : 0;
+  hybrid_debug_verify = verify ? 1 : 0;
+  hybrid_debug_pool = poolDebug ? 1 : 0;
+  if (hybrid_debug_leaks)
+    ensureLeakAtexitRegistered();
+}
+
+void hybrid_arc_trace_set_label(const char *label) {
+  PendingTraceLabel = label;
+}
+
+void hybrid_arc_trace_flush(FILE *sink) {
+  if (!hybrid_debug_reftrace)
+    return;
+  FILE *target = sink ? sink : stderr;
+  for (const TraceEvent &event : TraceBuffer) {
+    const char *typeName =
+        event.descriptor && event.descriptor->typeName
+            ? event.descriptor->typeName
+            : "<unknown>";
+    const char *label =
+        event.label && event.label[0] ? event.label : "-";
+    std::fprintf(target,
+                 "[arc-trace] op=%s ptr=%p type=%s strong=%u weak=%u "
+                 "label=%s\n",
+                 event.op ? event.op : "-", event.object, typeName,
+                 static_cast<unsigned>(event.strong),
+                 static_cast<unsigned>(event.weak), label);
+  }
+  TraceBuffer.clear();
+  std::fflush(target);
+}
+
+void hybrid_arc_trace_flush_default(void) { hybrid_arc_trace_flush(nullptr); }
+
+void hybrid_arc_dump_leaks(FILE *sink) {
+  if (!hybrid_debug_leaks)
+    return;
+  FILE *target = sink ? sink : stderr;
+  std::lock_guard<std::mutex> lock(getLeakRegistryMutex());
+  auto &registry = getLeakRegistry();
+  if (registry.empty()) {
+    std::fprintf(target, "[arc-leak] no outstanding objects\n");
+    std::fflush(target);
+    return;
+  }
+  for (const auto &entry : registry) {
+    void *ptr = entry.first;
+    RefCount counts = RefCount::fromObject(ptr);
+    const HybridTypeDescriptor *desc = counts.descriptor();
+    const char *typeName =
+        desc && desc->typeName ? desc->typeName : "<unknown>";
+    std::ostringstream tid;
+    tid << entry.second;
+    std::fprintf(target,
+                 "[arc-leak] ptr=%p type=%s thread=%s strong=%u weak=%u\n",
+                 ptr, typeName, tid.str().c_str(),
+                 static_cast<unsigned>(counts.strongCount()),
+                 static_cast<unsigned>(counts.weakCount()));
+  }
+  std::fflush(target);
+}
+
+void hybrid_arc_dump_leaks_default(void) { hybrid_arc_dump_leaks(nullptr); }
+
+int hybrid_arc_verify_object(void *object) {
+  std::string reason;
+  bool ok = verifyObjectPointer(object, reason);
+  if (!ok && hybrid_debug_verify) {
+    std::fprintf(stderr, "[arc-verify] %s (ptr=%p)\n", reason.c_str(),
+                 object);
+  }
+  return ok ? 1 : 0;
+}
+
+void hybrid_autorelease_pool_scoped_debug(const char *label) {
+  if (!hybrid_debug_pool && !hybrid_debug_reftrace)
+    return;
+  std::fprintf(stderr, "[arc-pool] depth=%zu label=%s\n",
+               AutoreleasePools.size(), label ? label : "-");
+}
 
 const HybridTypeDescriptor *
 hybrid_register_type_descriptor(const HybridTypeDescriptor *descriptor) {
@@ -94,7 +316,8 @@ int hybrid_verify_descriptor_layout(void) {
 void *hybrid_alloc_object(std::size_t totalSize,
                           const HybridTypeDescriptor *descriptor) {
   const HybridTypeDescriptor *canonical =
-      hybrid_register_type_descriptor(descriptor);
+      hybrid_register_type_descriptor(
+          descriptor ? descriptor : getFallbackDescriptor());
   if (totalSize == 0)
     return nullptr;
   if (totalSize < hybrid::memory::headerSize())
@@ -108,13 +331,17 @@ void *hybrid_alloc_object(std::size_t totalSize,
 
   RefCount counts = RefCount::fromObject(memory);
   counts.initialize(canonical);
+  registerLeak(memory, canonical, counts);
+  recordTraceEvent("alloc.object", memory, canonical, nullptr,
+                   counts.strongCount(), counts.weakCount());
   return memory;
 }
 
 void *hybrid_alloc_array(std::size_t elementSize, std::size_t elementCount,
                          const HybridTypeDescriptor *descriptor) {
   const HybridTypeDescriptor *canonical =
-      hybrid_register_type_descriptor(descriptor);
+      hybrid_register_type_descriptor(
+          descriptor ? descriptor : getFallbackDescriptor());
   if (elementSize == 0 || elementCount == 0)
     return nullptr;
   if (elementSize > std::numeric_limits<std::size_t>::max() / elementCount)
@@ -131,6 +358,9 @@ void *hybrid_alloc_array(std::size_t elementSize, std::size_t elementCount,
 
   RefCount counts = RefCount::fromObject(memory);
   counts.initialize(canonical);
+  registerLeak(memory, canonical, counts);
+  recordTraceEvent("alloc.array", memory, canonical, nullptr,
+                   counts.strongCount(), counts.weakCount());
   return memory;
 }
 
@@ -147,18 +377,30 @@ void *hybrid_new_array(std::size_t elementSize, std::size_t elementCount,
 void *hybrid_retain(void *obj) {
   if (!obj)
     return nullptr;
+  if (hybrid_debug_verify && !hybrid_arc_verify_object(obj)) {
+    std::abort();
+  }
   RefCount counts = RefCount::fromObject(obj);
+  registerLeak(obj, counts.descriptor(), counts);
   counts.retainStrong();
+  recordTraceEvent("retain", obj, counts.descriptor(), nullptr,
+                   counts.strongCount(), counts.weakCount());
   return obj;
 }
 
 void hybrid_release(void *obj) {
   if (!obj)
     return;
+  if (hybrid_debug_verify && !hybrid_arc_verify_object(obj)) {
+    std::abort();
+  }
   RefCount counts = RefCount::fromObject(obj);
-  if (counts.releaseStrong()) {
+  const HybridTypeDescriptor *desc = counts.descriptor();
+  const bool shouldDealloc = counts.releaseStrong();
+  recordTraceEvent("release", obj, desc, nullptr,
+                   counts.strongCount(), counts.weakCount());
+  if (shouldDealloc) {
     hybrid_zero_weak_refs(obj);
-    const HybridTypeDescriptor *desc = counts.descriptor();
     if (desc && desc->dealloc)
       desc->dealloc(obj);
     else
@@ -172,12 +414,18 @@ void hybrid_dealloc(void *obj) {
   if (!obj)
     return;
   RefCount counts = RefCount::fromObject(obj);
+  unregisterLeak(obj);
+  recordTraceEvent("dealloc", obj, counts.descriptor(), nullptr,
+                   counts.strongCount(), counts.weakCount());
   if (counts.releaseWeak()) {
     std::free(obj);
   }
 }
 
-void hybrid_autorelease_pool_push(void) { AutoreleasePools.emplace_back(); }
+void hybrid_autorelease_pool_push(void) {
+  AutoreleasePools.emplace_back();
+  hybrid_autorelease_pool_scoped_debug("push");
+}
 
 void hybrid_autorelease_pool_pop(void) {
   if (AutoreleasePools.empty())
@@ -185,17 +433,25 @@ void hybrid_autorelease_pool_pop(void) {
   AutoreleasePool pool = std::move(AutoreleasePools.back());
   AutoreleasePools.pop_back();
   drainPool(pool);
+  hybrid_autorelease_pool_scoped_debug("pop");
 }
 
 void hybrid_autorelease_pool_drain(void) {
   if (AutoreleasePools.empty())
     return;
+  hybrid_autorelease_pool_scoped_debug("drain");
   drainPool(AutoreleasePools.back());
 }
 
 void *hybrid_autorelease(void *obj) {
   if (!obj)
     return nullptr;
+  if (hybrid_debug_verify && !hybrid_arc_verify_object(obj)) {
+    std::abort();
+  }
+  RefCount counts = RefCount::fromObject(obj);
+  recordTraceEvent("autorelease", obj, counts.descriptor(), nullptr,
+                   counts.strongCount(), counts.weakCount());
   if (AutoreleasePools.empty())
     return obj;
   AutoreleasePools.back().objects.push_back(obj);
@@ -287,6 +543,20 @@ std::uint32_t __hybrid_shared_control_use_count(
   if (!control)
     return 0;
   return control->strongCount.load(HYBRID_ACQUIRE);
+}
+
+void __hybrid_shared_control_debug_dump(HybridSharedControlBlock *control,
+                                        FILE *sink) {
+  if (!control)
+    return;
+  FILE *target = sink ? sink : stderr;
+  std::fprintf(target,
+               "[arc-shared] control=%p strong=%u weak=%u payload=%p\n",
+               static_cast<void *>(control),
+               static_cast<unsigned>(control->strongCount.load(HYBRID_ACQUIRE)),
+               static_cast<unsigned>(control->weakCount.load(HYBRID_ACQUIRE)),
+               control->payload);
+  std::fflush(target);
 }
 
 } // extern "C"

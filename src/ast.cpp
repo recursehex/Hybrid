@@ -18,11 +18,13 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <cmath>
 #include <climits>
@@ -182,6 +184,9 @@ static llvm::FunctionCallee getHybridAutoreleaseFunction();
 static llvm::FunctionCallee getHybridDeallocFunction();
 static llvm::FunctionCallee getHybridAllocObjectFunction();
 static llvm::FunctionCallee getHybridAllocArrayFunction();
+static llvm::FunctionCallee getHybridArcDebugConfigFunction();
+static llvm::FunctionCallee getHybridArcTraceLabelFunction();
+static llvm::FunctionCallee getHybridArcVerifyRuntimeFunction();
 static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
                                   std::string_view label);
 static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
@@ -1912,6 +1917,34 @@ static llvm::Type *getSizeType() {
   return TheModule->getOrInsertFunction("hybrid_alloc_array", fnType);
 }
 
+[[maybe_unused]] static llvm::FunctionCallee
+getHybridArcDebugConfigFunction() {
+  auto *intTy = llvm::Type::getInt32Ty(*TheContext);
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext),
+      {intTy, intTy, intTy, intTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_arc_set_debug_flags",
+                                        fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee
+getHybridArcTraceLabelFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_arc_trace_set_label",
+                                        fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee
+getHybridArcVerifyRuntimeFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getInt32Ty(*TheContext), {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_arc_verify_object",
+                                        fnType);
+}
+
 static llvm::FunctionCallee getSharedControlCreateFunction() {
   auto *opaquePtrTy = pointerType();
   auto *fnType =
@@ -2189,9 +2222,19 @@ static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
   if (!value->getType()->isPointerTy())
     return value;
 
+  const ArcDebugOptions &arcDebug = CG.arcDebug;
+  if (arcDebug.runtimeTracing) {
+    llvm::Value *labelConst = Builder->CreateGlobalString(
+        std::string(label), buildArcOpLabel(label, "trace.label"));
+    Builder->CreateCall(getHybridArcTraceLabelFunction(), {labelConst});
+  }
+
   llvm::Value *castValue =
       Builder->CreateBitCast(value, pointerType(),
                              buildArcOpLabel(label, "retain.cast"));
+  if (arcDebug.runtimeVerify) {
+    Builder->CreateCall(getHybridArcVerifyRuntimeFunction(), {castValue});
+  }
   llvm::Value *retained =
       Builder->CreateCall(getHybridRetainFunction(), {castValue},
                           buildArcOpLabel(label, "retain.call"));
@@ -2251,9 +2294,19 @@ static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
   if (!value->getType()->isPointerTy())
     return;
 
+  const ArcDebugOptions &arcDebug = CG.arcDebug;
+  if (arcDebug.runtimeTracing) {
+    llvm::Value *labelConst = Builder->CreateGlobalString(
+        std::string(label), buildArcOpLabel(label, "trace.label"));
+    Builder->CreateCall(getHybridArcTraceLabelFunction(), {labelConst});
+  }
+
   llvm::Value *castValue =
       Builder->CreateBitCast(value, pointerType(),
                              buildArcOpLabel(label, "release.cast"));
+  if (arcDebug.runtimeVerify) {
+    Builder->CreateCall(getHybridArcVerifyRuntimeFunction(), {castValue});
+  }
   Builder->CreateCall(getHybridReleaseFunction(), {castValue});
 }
 
@@ -5912,6 +5965,35 @@ static void updateKnownNonNullOnAssignment(const std::string &name,
   }
 }
 
+static void emitArcDebugInitializer() {
+  if (!TheModule || !TheContext)
+    return;
+  const ArcDebugOptions &debug = CG.arcDebug;
+  if (!debug.runtimeTracing && !debug.leakDetection &&
+      !debug.runtimeVerify && !debug.poolDebug)
+    return;
+
+  auto *fnType =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+  llvm::Function *initFn = llvm::Function::Create(
+      fnType, llvm::GlobalValue::InternalLinkage,
+      "__hybrid_arc_debug_init", TheModule.get());
+  llvm::BasicBlock *entry =
+      llvm::BasicBlock::Create(*TheContext, "entry", initFn);
+  llvm::IRBuilder<> initBuilder(entry);
+  auto flag = [&](bool enabled) {
+    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext),
+                                  enabled ? 1 : 0);
+  };
+
+  initBuilder.CreateCall(
+      getHybridArcDebugConfigFunction(),
+      {flag(debug.leakDetection), flag(debug.runtimeTracing),
+       flag(debug.runtimeVerify), flag(debug.poolDebug)});
+  initBuilder.CreateRetVoid();
+  llvm::appendToGlobalCtors(*TheModule, initFn, 0);
+}
+
 // Initialize LLVM
 void InitializeModule() {
   CG.reset();
@@ -5953,6 +6035,8 @@ void InitializeModule() {
   printStringOverload.isExtern = true;
   printStringOverload.function = PrintStringFunc;
   CG.functionOverloads["print"].push_back(std::move(printStringOverload));
+
+  emitArcDebugInitializer();
 }
 
 // Get the LLVM module for printing

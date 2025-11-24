@@ -161,6 +161,13 @@ struct ArcTraceState {
   std::map<std::string, ArcRetainCounts> postOptimizationCounts;
 };
 
+struct ArcDebugOptions {
+  bool runtimeTracing = false;
+  bool leakDetection = false;
+  bool runtimeVerify = false;
+  bool poolDebug = false;
+};
+
 struct ActiveCompositeContext {
   std::string name;
   MethodKind kind = MethodKind::Regular;
@@ -207,6 +214,7 @@ struct CodegenContext {
   std::vector<ActiveReturnMetadata> functionReturnStack;
   const analysis::LifetimePlan *currentLifetimePlan = nullptr;
   ArcTraceState arcTrace;
+  ArcDebugOptions arcDebug;
 
   void reset();
 };
@@ -268,6 +276,8 @@ inline void CodegenContext::reset() {
   arcTrace = {};
   arcTrace.traceEnabled = arcTraceEnabled;
   arcTrace.optimizerEnabled = arcOptimizerEnabled;
+  const ArcDebugOptions preservedDebug = arcDebug;
+  arcDebug = preservedDebug;
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

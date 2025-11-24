@@ -115,6 +115,10 @@ void printUsage() {
   fprintf(stderr, "  --arc-trace-retains\n");
   fprintf(stderr, "                     Emit per-function retain/release/autorelease counts\n");
   fprintf(stderr, "  --arc-escape-debug Enable ARC escape analysis logging\n");
+  fprintf(stderr, "  --arc-debug        Enable runtime ARC debugging (trace, verify, leaks)\n");
+  fprintf(stderr, "  --arc-leak-detect  Track live ARC objects and dump leaks on exit\n");
+  fprintf(stderr, "  --arc-verify-runtime\n");
+  fprintf(stderr, "                     Enable runtime ARC header/descriptor verification\n");
 }
 
 bool shouldEnableGenericsMetrics() {
@@ -255,6 +259,11 @@ int main(int argc, char **argv) {
   bool enableArcOptimizer = false;
   bool enableArcTrace = false;
   bool enableArcEscapeDebug = false;
+  bool enableArcRuntimeTrace = false;
+  bool enableArcLeakDetect = false;
+  bool enableArcVerifyRuntime = false;
+  bool enableArcDebugUmbrella = false;
+  bool enableArcPoolDebug = false;
 
   session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
@@ -357,8 +366,19 @@ int main(int argc, char **argv) {
       enableArcOptimizer = true;
     } else if (arg == "--arc-trace-retains") {
       enableArcTrace = true;
+      enableArcRuntimeTrace = true;
     } else if (arg == "--arc-escape-debug") {
       enableArcEscapeDebug = true;
+    } else if (arg == "--arc-debug") {
+      enableArcDebugUmbrella = true;
+      enableArcRuntimeTrace = true;
+      enableArcLeakDetect = true;
+      enableArcVerifyRuntime = true;
+      enableArcPoolDebug = true;
+    } else if (arg == "--arc-leak-detect") {
+      enableArcLeakDetect = true;
+    } else if (arg == "--arc-verify-runtime") {
+      enableArcVerifyRuntime = true;
     } else if (arg == "-o") {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: -o requires an output path\n");
@@ -395,6 +415,14 @@ int main(int argc, char **argv) {
     codegenCtx.arcTrace.traceEnabled = true;
   if (enableArcOptimizer)
     codegenCtx.arcTrace.optimizerEnabled = true;
+  codegenCtx.arcDebug.runtimeTracing =
+      enableArcRuntimeTrace || enableArcDebugUmbrella;
+  codegenCtx.arcDebug.leakDetection =
+      enableArcLeakDetect || enableArcDebugUmbrella;
+  codegenCtx.arcDebug.runtimeVerify =
+      enableArcVerifyRuntime || enableArcDebugUmbrella;
+  codegenCtx.arcDebug.poolDebug =
+      enableArcPoolDebug || enableArcDebugUmbrella;
 
   auto runArcPasses = [&](llvm::Module *module) {
     if (!module)

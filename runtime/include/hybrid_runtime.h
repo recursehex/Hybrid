@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #define HYBRID_STATIC_ASSERT static_assert
 using hybrid_atomic_u32 = std::atomic<std::uint32_t>;
 constexpr auto HYBRID_RELAXED = std::memory_order_relaxed;
@@ -15,6 +16,7 @@ constexpr auto HYBRID_ACQUIRE = std::memory_order_acquire;
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 #define HYBRID_STATIC_ASSERT _Static_assert
 typedef _Atomic(uint32_t) hybrid_atomic_u32;
 #define HYBRID_RELAXED memory_order_relaxed
@@ -45,6 +47,13 @@ typedef struct hybrid_refcount_t {
   hybrid_atomic_u32 weakCount;
   const HybridTypeDescriptor *descriptor;
 } hybrid_refcount_t;
+
+typedef struct HybridARCDebugConfig {
+  int leakDetect;
+  int refTrace;
+  int verify;
+  int poolDebug;
+} HybridARCDebugConfig;
 
 HYBRID_STATIC_ASSERT(sizeof(hybrid_atomic_u32) == sizeof(uint32_t),
                      "Refcount atomics must be lock-free u32");
@@ -173,6 +182,7 @@ void hybrid_unregister_weak_slot(void *object, void **slot);
 void hybrid_autorelease_pool_push(void);
 void hybrid_autorelease_pool_pop(void);
 void hybrid_autorelease_pool_drain(void);
+void hybrid_autorelease_pool_scoped_debug(const char *label);
 
 void *hybrid_alloc_object(size_t totalSize,
                           const HybridTypeDescriptor *descriptor);
@@ -195,6 +205,22 @@ void __hybrid_shared_control_retain_weak(HybridSharedControlBlock *control);
 void __hybrid_shared_control_release_weak(HybridSharedControlBlock *control);
 void *__hybrid_shared_control_lock(HybridSharedControlBlock *control);
 uint32_t __hybrid_shared_control_use_count(HybridSharedControlBlock *control);
+void __hybrid_shared_control_debug_dump(HybridSharedControlBlock *control,
+                                        FILE *sink);
+
+extern int hybrid_debug_leaks;
+extern int hybrid_debug_reftrace;
+extern int hybrid_debug_verify;
+extern int hybrid_debug_pool;
+
+void hybrid_arc_set_debug_flags(int leakDetect, int refTrace, int verify,
+                                int poolDebug);
+void hybrid_arc_trace_set_label(const char *label);
+void hybrid_arc_trace_flush(FILE *sink);
+void hybrid_arc_trace_flush_default(void);
+void hybrid_arc_dump_leaks(FILE *sink);
+void hybrid_arc_dump_leaks_default(void);
+int hybrid_arc_verify_object(void *object);
 
 #ifdef __cplusplus
 } // extern "C"

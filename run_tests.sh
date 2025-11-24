@@ -54,6 +54,7 @@ update_progress_display() {
     printf -v hashes '%*s' "$completed_chars" ''
     hashes=${hashes// /#}
     printf -v spaces '%*s' "$remaining_chars" ''
+    spaces=${spaces// /.}
 
     printf "\rProgress: [%s%s] %d/%d" "$hashes" "$spaces" "$PROGRESS_COUNT" "$PROGRESS_TOTAL"
     PROGRESS_VISIBLE=1
@@ -79,6 +80,7 @@ MULTI_UNIT_FILTER=""
 EXTRA_COMPILER_ARGS=()
 FORCE_VERBOSE_FROM_ENV=0
 VERBOSE_FROM_ARGS=0
+ARC_RUNTIME_REQUIRED=0
 
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
 echo "==============================="
@@ -110,6 +112,43 @@ if [[ -n "${HYBRID_SHOW_GENERIC_METRICS+x}" ]]; then
     if [[ -z "$lower" || ( "$lower" != "0" && "$lower" != "false" && "$lower" != "off" ) ]]; then
         EXTRA_COMPILER_ARGS+=("--diagnostics" "generics")
         FORCE_VERBOSE_FROM_ENV=1
+    fi
+fi
+
+if [[ -n "${HYBRID_ARC_DEBUG+x}" ]]; then
+    value=$(printf "%s" "$HYBRID_ARC_DEBUG" | tr -d '[:space:]')
+    lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+    if [[ -z "$lower" || ( "$lower" != "0" && "$lower" != "false" && "$lower" != "off" ) ]]; then
+        EXTRA_COMPILER_ARGS+=("--arc-debug")
+        ARC_RUNTIME_REQUIRED=1
+        FORCE_VERBOSE_FROM_ENV=1
+    fi
+fi
+
+if [[ -n "${HYBRID_ARC_TRACE_RUNTIME+x}" ]]; then
+    value=$(printf "%s" "$HYBRID_ARC_TRACE_RUNTIME" | tr -d '[:space:]')
+    lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+    if [[ -z "$lower" || ( "$lower" != "0" && "$lower" != "false" && "$lower" != "off" ) ]]; then
+        EXTRA_COMPILER_ARGS+=("--arc-trace-retains")
+        ARC_RUNTIME_REQUIRED=1
+    fi
+fi
+
+if [[ -n "${HYBRID_ARC_LEAK_DETECT+x}" ]]; then
+    value=$(printf "%s" "$HYBRID_ARC_LEAK_DETECT" | tr -d '[:space:]')
+    lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+    if [[ -z "$lower" || ( "$lower" != "0" && "$lower" != "false" && "$lower" != "off" ) ]]; then
+        EXTRA_COMPILER_ARGS+=("--arc-leak-detect")
+        ARC_RUNTIME_REQUIRED=1
+    fi
+fi
+
+if [[ -n "${HYBRID_ARC_VERIFY_RUNTIME+x}" ]]; then
+    value=$(printf "%s" "$HYBRID_ARC_VERIFY_RUNTIME" | tr -d '[:space:]')
+    lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+    if [[ -z "$lower" || ( "$lower" != "0" && "$lower" != "false" && "$lower" != "off" ) ]]; then
+        EXTRA_COMPILER_ARGS+=("--arc-verify-runtime")
+        ARC_RUNTIME_REQUIRED=1
     fi
 fi
 
@@ -614,6 +653,15 @@ run_test() {
         fi
     done < <(grep -E "^// EXPECT_OUTPUT:" "$test_file" || true)
 
+    local expected_runtime=()
+    while IFS= read -r line; do
+        line=${line#"// EXPECT_RUNTIME:"}
+        line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        if [ -n "$line" ]; then
+            expected_runtime+=("$line")
+        fi
+    done < <(grep -E "^// EXPECT_RUNTIME:" "$test_file" || true)
+
     for expected in "${expected_output[@]}"; do
         if ! grep -F -q "$expected" <<< "$output"; then
             has_errors=1
@@ -645,7 +693,14 @@ run_test() {
 
                 if grep -q "define i32 @main" "$temp_ir"; then
                     # Check if smart pointer runtime is needed
-                    local needs_smart_ptr_runtime=0
+                    local needs_smart_ptr_runtime=$ARC_RUNTIME_REQUIRED
+                    for opt in "${run_opts[@]}"; do
+                        case "$opt" in
+                            --arc-debug|--arc-leak-detect|--arc-verify-runtime|--arc-trace-retains)
+                                needs_smart_ptr_runtime=1
+                                ;;
+                        esac
+                    done
                     if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
                         needs_smart_ptr_runtime=1
                     elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease" "$temp_ir"; then
@@ -705,8 +760,17 @@ run_test() {
 
                     if grep -q "define i32 @main" "$temp_ir"; then
                         # Check if smart pointer runtime is needed
-                        local needs_smart_ptr_runtime=0
+                        local needs_smart_ptr_runtime=$ARC_RUNTIME_REQUIRED
+                        for opt in "${run_opts[@]}"; do
+                            case "$opt" in
+                                --arc-debug|--arc-leak-detect|--arc-verify-runtime|--arc-trace-retains)
+                                    needs_smart_ptr_runtime=1
+                                    ;;
+                            esac
+                        done
                         if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
+                            needs_smart_ptr_runtime=1
+                        elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease" "$temp_ir"; then
                             needs_smart_ptr_runtime=1
                         fi
 
@@ -739,6 +803,20 @@ run_test() {
                     rm -f "$temp_ir" "$temp_bin"
                 fi
             fi
+        fi
+    fi
+
+    if [ ${#expected_runtime[@]} -gt 0 ]; then
+        if [ -z "$runtime_output" ]; then
+            has_errors=1
+            output="${output}"$'\n'"[runtime-expectation] missing runtime output"
+        else
+            for expected in "${expected_runtime[@]}"; do
+                if ! grep -F -q "$expected" <<< "$runtime_output"; then
+                    has_errors=1
+                    output="${output}"$'\n'"[runtime-expectation] missing: ${expected}"
+                fi
+            done
         fi
     fi
 
