@@ -14,6 +14,7 @@ set(HYBRID_SOURCES
     analysis/semantics.cpp
     analysis/smart_pointers.cpp
     optimizer/arc_optimizer.cpp
+    optimizer/escape_analysis.cpp
 )
 
 # Define header files

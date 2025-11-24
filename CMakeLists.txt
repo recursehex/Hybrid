@@ -25,7 +25,7 @@ add_definitions(${LLVM_DEFINITIONS})
 include_directories(${LLVM_INCLUDE_DIRS})
 
 # Get LLVM components
-llvm_map_components_to_libnames(llvm_libs core support)
+llvm_map_components_to_libnames(llvm_libs core support analysis transformutils)
 
 # Add source directory
 add_subdirectory(src)

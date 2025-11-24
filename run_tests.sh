@@ -625,7 +625,7 @@ run_test() {
             fi
 
             if [ -n "$module_start" ]; then
-                local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]")
+                local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]" | grep -v "^\\[arc-escape\\]")
 
                 local temp_ir=$(mktemp /tmp/hybrid_test.XXXXXX)
                 mv "$temp_ir" "${temp_ir}.ll"
@@ -685,7 +685,7 @@ run_test() {
                 fi
 
                 if [ -n "$module_start" ]; then
-                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]")
+                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]" | grep -v "^\\[arc-escape\\]")
 
                     local temp_ir=$(mktemp /tmp/hybrid_test_fail.XXXXXX)
                     mv "$temp_ir" "${temp_ir}.ll"

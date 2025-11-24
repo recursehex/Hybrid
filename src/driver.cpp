@@ -5,6 +5,7 @@
 #include "ast.h"
 #include "compiler_session.h"
 #include "optimizer/arc_optimizer.h"
+#include "optimizer/escape_analysis.h"
 
 #include <algorithm>
 #include <cctype>
@@ -113,6 +114,7 @@ void printUsage() {
   fprintf(stderr, "  --arc-optimizer    Enable ARC retain/release peephole pass\n");
   fprintf(stderr, "  --arc-trace-retains\n");
   fprintf(stderr, "                     Emit per-function retain/release/autorelease counts\n");
+  fprintf(stderr, "  --arc-escape-debug Enable ARC escape analysis logging\n");
 }
 
 bool shouldEnableGenericsMetrics() {
@@ -252,6 +254,7 @@ int main(int argc, char **argv) {
   unsigned maxGenericDepth = 0;
   bool enableArcOptimizer = false;
   bool enableArcTrace = false;
+  bool enableArcEscapeDebug = false;
 
   session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
@@ -354,6 +357,8 @@ int main(int argc, char **argv) {
       enableArcOptimizer = true;
     } else if (arg == "--arc-trace-retains") {
       enableArcTrace = true;
+    } else if (arg == "--arc-escape-debug") {
+      enableArcEscapeDebug = true;
     } else if (arg == "-o") {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: -o requires an output path\n");
@@ -395,20 +400,28 @@ int main(int argc, char **argv) {
     if (!module)
       return;
     const bool arcDebug = std::getenv("HYBRID_ARC_OPT_DEBUG") != nullptr;
+    const bool escapeDebug = enableArcEscapeDebug || arcDebug;
     if (codegenCtx.arcTrace.traceEnabled)
       collectArcRetainReleaseCounts(
           *module, codegenCtx.arcTrace.preOptimizationCounts);
+
+    bool arcPassesRan = false;
+    if (codegenCtx.arcTrace.optimizerEnabled || escapeDebug) {
+      if (arcDebug)
+        fprintf(stderr, "[arc-opt] begin escape analysis\n");
+      ArcEscapeSummary escapeSummary{};
+      bool escapeChanged =
+          runARCEscapeAnalysis(*module, escapeDebug, &escapeSummary);
+      arcPassesRan = arcPassesRan || escapeChanged || escapeDebug;
+      if (arcDebug && escapeSummary.removedCalls == 0 && !escapeChanged)
+        fprintf(stderr, "[arc-opt] escape analysis made no changes\n");
+    }
+
     if (codegenCtx.arcTrace.optimizerEnabled) {
       if (arcDebug)
         fprintf(stderr, "[arc-opt] begin optimization pass\n");
       runARCOptimizationPass(*module);
-      codegenCtx.arcTrace.optimizerRan = true;
-      if (codegenCtx.arcTrace.traceEnabled) {
-        if (arcDebug)
-          fprintf(stderr, "[arc-opt] collecting post-optimization counts\n");
-        collectArcRetainReleaseCounts(
-            *module, codegenCtx.arcTrace.postOptimizationCounts);
-      }
+      arcPassesRan = true;
       if (arcDebug) {
         if (llvm::verifyModule(*module, &llvm::errs()))
           fprintf(stderr,
@@ -417,6 +430,15 @@ int main(int argc, char **argv) {
           fprintf(stderr, "[arc-opt] module verification succeeded\n");
       }
     }
+
+    if (arcPassesRan && codegenCtx.arcTrace.traceEnabled) {
+      if (arcDebug)
+        fprintf(stderr, "[arc-opt] collecting post-optimization counts\n");
+      collectArcRetainReleaseCounts(
+          *module, codegenCtx.arcTrace.postOptimizationCounts);
+    }
+    codegenCtx.arcTrace.optimizerRan =
+        codegenCtx.arcTrace.optimizerRan || arcPassesRan;
   };
 
   if (!outputPath.empty())
