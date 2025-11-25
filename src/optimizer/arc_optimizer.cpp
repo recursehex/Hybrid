@@ -1,3 +1,5 @@
+// This file implements an ARC optimization pass that prunes redundant retain/release chains and collects ARC runtime call counts.
+
 #include "optimizer/arc_optimizer.h"
 
 #include <cstdlib>

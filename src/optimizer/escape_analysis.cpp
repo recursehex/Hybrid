@@ -1,3 +1,5 @@
+// This file implements ARC escape analysis to detect stack-only values and trim ARC runtime calls that cannot escape.
+
 #include "optimizer/escape_analysis.h"
 
 #include <utility>
