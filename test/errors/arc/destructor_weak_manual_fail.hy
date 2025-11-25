@@ -1,4 +1,4 @@
-// manual destructor on weak reference should be rejected
+// manual destructor on weak smart pointer should be rejected
 
 class Manual
 {
@@ -8,7 +8,7 @@ class Manual
 
 int main()
 {
-    weak Manual ref
+    weak<Manual> ref = weak<Manual>()
     ref.~Manual()
     return 0
 }

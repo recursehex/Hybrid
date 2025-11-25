@@ -3040,10 +3040,6 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
       trimLeadingWhitespace();
       return true;
     };
-
-    if (tryConsume("weak"))
-      return;
-    tryConsume("unowned");
   };
 
   stripOwnershipQualifier();
@@ -5758,6 +5754,11 @@ static bool validateTypeForGenerics(const TypeInfo &info,
   } else if (StructAST *templateAst = FindGenericTemplate(info.baseTypeName)) {
     expectedArguments = templateAst->getGenericParameters().size();
     hasDefinition = expectedArguments > 0;
+  }
+
+  if (info.isSmartPointer()) {
+    hasDefinition = true;
+    expectedArguments = 1;
   }
 
   if (info.hasTypeArguments()) {

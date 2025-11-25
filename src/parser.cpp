@@ -279,8 +279,7 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
     return true;
   };
 
-  tryConsumeQualifier("weak", OwnershipQualifier::Weak) ||
-      tryConsumeQualifier("unowned", OwnershipQualifier::Unowned);
+  tryConsumeQualifier("weak", OwnershipQualifier::Weak);
 
   std::string normalized(working.begin(), working.end());
   std::string sanitized;
@@ -496,16 +495,17 @@ bool IsValidType()
   if (IsBuiltInType())
     return true;
 
-  if (CurTok == tok_unique || CurTok == tok_shared ||
-      CurTok == tok_weak || CurTok == tok_unowned)
+  if (CurTok == tok_unique || CurTok == tok_shared || CurTok == tok_weak)
     return true;
 
-  return CurTok == tok_identifier &&
-         (StructNames.contains(IdentifierStr) ||
-          ClassNames.contains(IdentifierStr) ||
-          IsActiveStructName(IdentifierStr) ||
-          IsActiveClassName(IdentifierStr) ||
-          currentParser().isGenericParameter(IdentifierStr));
+  if (CurTok != tok_identifier)
+    return false;
+
+  return StructNames.contains(IdentifierStr) ||
+         ClassNames.contains(IdentifierStr) ||
+         IsActiveStructName(IdentifierStr) ||
+         IsActiveClassName(IdentifierStr) ||
+         currentParser().isGenericParameter(IdentifierStr);
 }
 
 enum class AccessSpecifier {
@@ -842,46 +842,8 @@ static bool ParseGenericParameterList(std::vector<std::string> &parameters) {
   return true;
 }
 
-/// Helper function to parse a complete type including array and pointer modifiers
-/// Returns the full type string (e.g. "int@", "int@2", "int[]", "float@[]")
-static bool weakTokenStartsSmartPointer() {
-  if (CurTok != tok_weak)
-    return false;
-
-  TokenReplayScope replay(true);
-  getNextToken();
-  while (CurTok == tok_newline)
-    getNextToken();
-  bool startsSmartPointer = (CurTok == tok_lt);
-  replay.rollback();
-  return startsSmartPointer;
-}
-
 std::string ParseCompleteType()
 {
-  OwnershipQualifier ownership = OwnershipQualifier::Strong;
-  bool hasOwnershipQualifier = false;
-
-  auto consumeOwnershipQualifier = [&]() {
-    if (CurTok == tok_unowned) {
-      ownership = OwnershipQualifier::Unowned;
-      hasOwnershipQualifier = true;
-      getNextToken();
-      SkipNewlines();
-      return true;
-    }
-    if (CurTok == tok_weak && !weakTokenStartsSmartPointer()) {
-      ownership = OwnershipQualifier::Weak;
-      hasOwnershipQualifier = true;
-      getNextToken();
-      SkipNewlines();
-      return true;
-    }
-    return false;
-  };
-
-  consumeOwnershipQualifier();
-
   if (!IsValidType())
     return "";
 
@@ -898,39 +860,10 @@ std::string ParseCompleteType()
   if (!AppendTypeSuffix(Type, pointerSeen))
     return "";
 
-  if (hasOwnershipQualifier) {
-    const char *prefix =
-        (ownership == OwnershipQualifier::Weak) ? "weak " : "unowned ";
-    Type.insert(0, prefix);
-  }
-
   return Type;
 }
 
 static bool ParseNewTypeName(std::string &OutType, bool stopBeforeArrayBounds) {
-  OwnershipQualifier ownership = OwnershipQualifier::Strong;
-  bool hasOwnershipQualifier = false;
-
-  auto consumeOwnershipQualifier = [&]() {
-    if (CurTok == tok_unowned) {
-      ownership = OwnershipQualifier::Unowned;
-      hasOwnershipQualifier = true;
-      getNextToken();
-      SkipNewlines();
-      return true;
-    }
-    if (CurTok == tok_weak && !weakTokenStartsSmartPointer()) {
-      ownership = OwnershipQualifier::Weak;
-      hasOwnershipQualifier = true;
-      getNextToken();
-      SkipNewlines();
-      return true;
-    }
-    return false;
-  };
-
-  consumeOwnershipQualifier();
-
   if (!IsValidType())
     return false;
 
@@ -986,12 +919,6 @@ static bool ParseNewTypeName(std::string &OutType, bool stopBeforeArrayBounds) {
     break;
   }
 
-  if (hasOwnershipQualifier) {
-    const char *prefix =
-        (ownership == OwnershipQualifier::Weak) ? "weak " : "unowned ";
-    Type.insert(0, prefix);
-  }
-
   OutType = std::move(Type);
   return true;
 }
@@ -1003,11 +930,7 @@ static std::unique_ptr<ExprAST> ParseNewExpression() {
   bool sawType = false;
   std::string typeName;
 
-  auto typeTokenStartsNewTarget = []() {
-    return CurTok == tok_weak || CurTok == tok_unowned || IsValidType();
-  };
-
-  if (CurTok != '[' && typeTokenStartsNewTarget()) {
+  if (CurTok != '[' && IsValidType()) {
     if (!ParseNewTypeName(typeName, /*stopBeforeArrayBounds=*/true))
       return nullptr;
     sawType = !typeName.empty();

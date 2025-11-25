@@ -265,8 +265,6 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("ref");
     case tok_weak:
       return makeKeyword("weak");
-    case tok_unowned:
-      return makeKeyword("unowned");
     case tok_unique:
       return makeKeyword("unique");
     case tok_shared:

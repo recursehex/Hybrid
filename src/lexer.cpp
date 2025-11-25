@@ -476,8 +476,6 @@ int gettok() {
       return tok_ref;
     if (lex.identifierStr == "weak")
       return tok_weak;
-    if (lex.identifierStr == "unowned")
-      return tok_unowned;
     if (lex.identifierStr == "unique")
       return tok_unique;
     if (lex.identifierStr == "shared")

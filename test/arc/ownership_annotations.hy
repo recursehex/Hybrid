@@ -1,23 +1,23 @@
+// Smart-pointer based ownership annotations without bare ownership keywords
+
 struct Node
 {
-    weak Node? parent
-    unowned Node? owner
+    weak<int> watcher
 
     Node()
     {
-        this.parent = null
-        this.owner = null
+        this.watcher = weak<int>()
     }
 }
 
 int main()
 {
-    weak Node? parent = null
-    unowned Node? owner = null
+    shared<int> payload = shared<int>(7)
 
     Node node = Node()
-    node.parent = parent
-    node.owner = owner
+    node.watcher = weak<int>(payload)
+
+    weak<int> copy = node.watcher
 
     return 0
 }

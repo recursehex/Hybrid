@@ -64,16 +64,16 @@ std::string buildCycleHint(const CycleReport &report) {
       " Destructors will not run while the cycle remains.";
   for (const auto &edge : report.path) {
     if (looksLikeBackReference(edge.fieldName)) {
-      return "Consider marking '" + edge.fieldName +
-             "' as 'weak' to break the retain cycle." + destructorNote;
+      return "Consider using a 'weak<T>' smart pointer for '" +
+             edge.fieldName + "' to break the retain cycle." + destructorNote;
     }
   }
   if (!report.path.empty()) {
-    return "Mark back-references like '" + report.path.back().fieldName +
-           "' as 'weak' or move them into weak smart pointers." +
+    return "Wrap back-references like '" + report.path.back().fieldName +
+           "' in 'weak<T>' smart pointers to avoid retain cycles." +
            destructorNote;
   }
-  return "Use weak references for delegate/parent fields to avoid retain cycles." +
+  return "Use 'weak<T>' smart pointers for delegate/parent fields to avoid retain cycles." +
          destructorNote;
 }
 
