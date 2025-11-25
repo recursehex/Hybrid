@@ -280,20 +280,20 @@ Hybrid/
     - `class Box<T> { ... }` - generic classes
     - `void Assign<T>(ref T target, T value)` - generic functions
     - Explicit invocations such as `Box<int>` and `Assign<int>(ref target, 7)`
+- Smart pointers
+    - `unique`
+    - `shared`
+    - `weak`
+- Heap allocation keywords
+    - `new`
+    - `free`
 
 **Planned Features**
 - Stuctures
     - `enum`
     - `namespace`
-- Heap allocation keywords
-    - `new`
-    - `free`
 - 128 bit base 10 floating point type
     - `decimal`
-- Smart pointers
-    - `unique`
-    - `shared`
-    - `weak`
 - Tuples
     - `(type1, type2) var`
 - Type checking
