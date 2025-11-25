@@ -34,6 +34,7 @@ static void RecoverAfterExpressionError();
 static void SkipNewlines();
 static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args);
 static std::string ParseCompleteType();
+static std::unique_ptr<ExprAST> ParseNewExpression();
 static bool ParseGenericParameterList(std::vector<std::string> &parameters);
 static bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
                                              bool allowDisambiguation = false);
@@ -906,6 +907,167 @@ std::string ParseCompleteType()
   return Type;
 }
 
+static bool ParseNewTypeName(std::string &OutType, bool stopBeforeArrayBounds) {
+  OwnershipQualifier ownership = OwnershipQualifier::Strong;
+  bool hasOwnershipQualifier = false;
+
+  auto consumeOwnershipQualifier = [&]() {
+    if (CurTok == tok_unowned) {
+      ownership = OwnershipQualifier::Unowned;
+      hasOwnershipQualifier = true;
+      getNextToken();
+      SkipNewlines();
+      return true;
+    }
+    if (CurTok == tok_weak && !weakTokenStartsSmartPointer()) {
+      ownership = OwnershipQualifier::Weak;
+      hasOwnershipQualifier = true;
+      getNextToken();
+      SkipNewlines();
+      return true;
+    }
+    return false;
+  };
+
+  consumeOwnershipQualifier();
+
+  if (!IsValidType())
+    return false;
+
+  std::string Type = IdentifierStr;
+  getNextToken(); // eat base type
+
+  if (!ParseOptionalGenericArgumentList(Type))
+    return false;
+
+  SkipNewlines();
+
+  bool pointerSeen = false;
+  while (true) {
+    if (CurTok == tok_nullable) {
+      Type += "?";
+      getNextToken();
+      continue;
+    }
+
+    if (CurTok == tok_at && !pointerSeen) {
+      if (!isInUnsafeContext()) {
+        reportCompilerError(
+            "Pointer types can only be used within 'unsafe' contexts",
+            "Mark the surrounding function or block as 'unsafe' before using pointer types with 'new'.");
+        return false;
+      }
+
+      pointerSeen = true;
+      getNextToken(); // eat '@'
+
+      if (CurTok == tok_number) {
+        if (!LexedNumericLiteral.isInteger() ||
+            !LexedNumericLiteral.fitsInUnsignedBits(32) ||
+            LexedNumericLiteral.getUnsignedValue() == 0) {
+          reportCompilerError("Pointer level must be a positive integer");
+          return false;
+        }
+
+        uint64_t level = LexedNumericLiteral.getUnsignedValue();
+        Type += "@";
+        Type += std::to_string(level);
+        getNextToken(); // eat number
+      } else {
+        Type += "@";
+      }
+      SkipNewlines();
+      continue;
+    }
+
+    if (CurTok == '[' && stopBeforeArrayBounds)
+      break;
+
+    break;
+  }
+
+  if (hasOwnershipQualifier) {
+    const char *prefix =
+        (ownership == OwnershipQualifier::Weak) ? "weak " : "unowned ";
+    Type.insert(0, prefix);
+  }
+
+  OutType = std::move(Type);
+  return true;
+}
+
+static std::unique_ptr<ExprAST> ParseNewExpression() {
+  getNextToken(); // consume 'new'
+  SkipNewlines();
+
+  bool sawType = false;
+  std::string typeName;
+
+  auto typeTokenStartsNewTarget = []() {
+    return CurTok == tok_weak || CurTok == tok_unowned || IsValidType();
+  };
+
+  if (CurTok != '[' && typeTokenStartsNewTarget()) {
+    if (!ParseNewTypeName(typeName, /*stopBeforeArrayBounds=*/true))
+      return nullptr;
+    sawType = !typeName.empty();
+    SkipNewlines();
+  }
+
+  if (CurTok == '[') {
+    getNextToken(); // eat '['
+    SkipNewlines();
+
+    if (CurTok == tok_eof || CurTok == tok_newline || CurTok == ']') {
+      return LogError("Expected array size expression after '[' in 'new' expression",
+                      "Provide a length expression like 'new int[5]'.");
+    }
+
+    auto Length = ParseExpression();
+    if (!Length)
+      return nullptr;
+
+    SkipNewlines();
+    if (CurTok != ']') {
+      return LogError("Expected ']' after array size in 'new' expression");
+    }
+    getNextToken(); // eat ']'
+
+    auto NewExpr = std::make_unique<NewExprAST>(
+        typeName, std::vector<std::unique_ptr<ExprAST>>{}, std::move(Length),
+        true, !sawType);
+    if (!typeName.empty()) {
+      std::string resultType = typeName;
+      if (resultType.size() < 2 || resultType.substr(resultType.size() - 2) != "[]")
+        resultType += "[]";
+      NewExpr->setTypeName(resultType);
+    }
+    NewExpr->markTemporary();
+    return NewExpr;
+  }
+
+  if (CurTok != '(') {
+    if (sawType) {
+      return LogError("Expected constructor arguments after 'new'",
+                      "Add parentheses after 'new " + typeName +
+                          "' to invoke a constructor.");
+    }
+    return LogError("Expected target type or constructor after 'new'",
+                    "Provide a type name (e.g. 'new Box()') or array bounds (e.g. 'new[5]').");
+  }
+
+  std::vector<std::unique_ptr<ExprAST>> Args;
+  if (!ParseArgumentList(Args))
+    return nullptr;
+
+  auto NewExpr = std::make_unique<NewExprAST>(
+      typeName, std::move(Args), nullptr, false, !sawType);
+  if (!typeName.empty())
+    NewExpr->setTypeName(typeName);
+  NewExpr->markTemporary();
+  return NewExpr;
+}
+
 /// GetTokPrecedence - Get the precedence of the pending binary operator token.
 int GetTokPrecedence() {
   using enum Token;
@@ -1575,9 +1737,7 @@ std::unique_ptr<ExprAST> ParsePrimary() {
       return std::move(Result);
     }
   case tok_new:
-    getNextToken(); // consume 'new'
-    return LogError("The 'new' keyword is reserved for upcoming ARC support",
-                    "Automatic allocation will be enabled once ARC lowering is implemented.");
+    return ParseNewExpression();
   case tok_interpolated_string_start:
     return ParseInterpolatedStringExpr();
   case tok_char_literal:

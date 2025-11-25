@@ -2,7 +2,7 @@
 
 Hybrid supports classes that extend the struct model with member functions (methods), access modifiers, and formatter support for full object-oriented programming. Unlike structs, which are restricted to only member variables and constructors, classes allow you to define instance methods, static methods, and properties to create rich, encapsulated types. Classes continue to use value semantics by default, but add rules around initialization and visibility that mirror familiar behaviour while enforcing safer guarantees.
 
-**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities. Because member variables do not receive implicit default values, every class must include at least one constructor (empty or otherwise) so instances can initialize their state. Classes may define multiple constructors, but each one must leave every instance field initialized before returning.
+**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities. Classes may define multiple constructors, but each one must leave every instance field initialized before returning.
 
 ## Quick Example
 
@@ -45,9 +45,17 @@ Door front = (2)    // shorthand for Door front = Door(2)
 Door copy = (front) // invokes the copy constructor when available
 ```
 
+## Heap Allocation with `new` and `free`
+
+- `new ClassName(args)` allocates a heap instance, runs the class constructor, and returns a strong ARC-managed reference. The type can be inferred from the assignment target using `new(args)`.
+- `new StructName(args)` works the same way for structs when you want a heap-backed instance instead of stack storage.
+- Polymorphic construction is supported: `Shape s = new Rectangle(2, 4)` calls the `Rectangle` constructor while producing a base-typed reference with the correct vtable/descriptor metadata.
+- Manual release is optional. `free instance` schedules an explicit ARC release; destructors still run automatically when the last strong reference is lost.
+- `free` is rejected for stack values, smart pointers, and other non-ARC-managed types.
+
 ## Member Initialization Rules
 
-Hybrid now tracks whether a member has been initialized before allowing mutations.
+Hybrid tracks whether a member has been initialized before allowing mutations.
 
 | Scenario | Requirement | Diagnostic |
 | --- | --- | --- |
@@ -185,6 +193,13 @@ class Ticker
 - The existing access-control diagnostics (`read-only outside definition`, `Cannot call private member`, etc.) remain unchanged.
 
 These rules keep classes aligned with the modern expectations of type and memory safety. Static fields require initialization before use, and instance fields must be handled in every constructor, but Hybrid strengthens them with explicit compiler tracking so that mistakes surface immediately rather than resulting in default-initialized values at runtime.
+
+## Destructors and `free`
+
+- Declare a single destructor per type with `~TypeName() { ... }`; parameters, generics, return types, `static`, and `abstract` are rejected.
+- ARC runs destructors automatically when the last strong reference is released, including when a `shared<T>` control block drops to zero and when scope teardown releases locals.
+- Manual calls (`value.~TypeName()`) retain and release around the call; they require a strong, non-smart-pointer receiver and must not be repeated on the same value.
+- `free expr` lowers to the same ARC release path that triggers destructors; freeing smart pointer handles or non-ARC/stack values is diagnosed, and mixes of `free` plus manual destructor calls surface as double releases.
 
 ## Inheritance
 

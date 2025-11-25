@@ -870,6 +870,38 @@ public:
   ExprAST *getOperand() const { return Operand.get(); }
 };
 
+class NewExprAST : public ExprAST {
+  std::string RequestedTypeName;
+  std::vector<std::unique_ptr<ExprAST>> Args;
+  std::unique_ptr<ExprAST> ArraySizeExpr;
+  bool ArrayForm = false;
+  bool TypeElided = false;
+
+public:
+  NewExprAST(std::string TypeName,
+             std::vector<std::unique_ptr<ExprAST>> Args,
+             std::unique_ptr<ExprAST> ArraySizeExpr,
+             bool IsArray,
+             bool WasTypeElided)
+      : RequestedTypeName(std::move(TypeName)), Args(std::move(Args)),
+        ArraySizeExpr(std::move(ArraySizeExpr)), ArrayForm(IsArray),
+        TypeElided(WasTypeElided) {}
+
+  llvm::Value *codegen() override;
+  [[nodiscard]] bool isArray() const { return ArrayForm; }
+  [[nodiscard]] bool hasExplicitType() const {
+    return !RequestedTypeName.empty() && !TypeElided;
+  }
+  [[nodiscard]] bool typeWasElided() const { return TypeElided && RequestedTypeName.empty(); }
+  [[nodiscard]] const std::string &getRequestedTypeName() const { return RequestedTypeName; }
+  [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+  [[nodiscard]] ExprAST *getArraySize() const { return ArraySizeExpr.get(); }
+  void setInferredType(std::string TypeName) {
+    if (RequestedTypeName.empty())
+      RequestedTypeName = std::move(TypeName);
+  }
+};
+
 class MemberAccessExprAST;
 
 /// CallExprAST - Expression class for function calls.

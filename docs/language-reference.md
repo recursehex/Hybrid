@@ -77,13 +77,23 @@ The following keywords are reserved:
   - Basic types: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
   - Sized integers: `byte`, `sbyte`, `short`, `ushort`, `uint`, `long`, `ulong`
   - Sized characters: `schar`, `lchar`
-- Control flow: `if`, `else`, `for`, `in`, `to`, `by`, `while`, `break`, `skip`, `switch`, `case`, `default`
-- Function keywords: `return`, `extern`, `ref`
+- Control flow:
+  - If-else: `if`, `else`
+  - For and foreach loops: `for`, `in`, `to`, `by`
+  - While loops: `while`
+  - Loop control: `break`, `skip`
+  - Switch statements and expressions: `switch`, `case`, `default`
+- Function keywords: `return`, `extern`
 - Structure keywords: `use`, `struct`, `this`
+- Class keywords: `class`, `inherits`, `base`, `interface`, `abstract`, `virtual`, `override`
+- Access modifiers: `public`, `private`, `protected`, `const`, `static`
 - Boolean literals: `true`, `false`
 - Null literal: `null`
 - Exception handling: `assert`
+- Pass by reference: `ref`
 - Memory safety: `unsafe`
+- Memory management: `new`, `free`
+- Smart pointers: `unique`, `shared`, `weak`
 
 ## Literals
 
@@ -204,6 +214,16 @@ int y         // Compilation error - no initialization
 ### Static Type Checking
 
 All types are checked at compile time, preventing type-related runtime errors.
+
+## Heap Allocation and Release
+
+Hybrid exposes `new` and `free` for explicit heap management on top of ARC:
+
+- `new Type(args)` or `new(args)` allocate ARC-managed objects and run constructors. The type can be inferred from the assignment target.
+- `new Type[len]` or `new[len]` allocate a 1-D array, zero-initialized with the length stored alongside the data for bounds checks.
+- `free expr` schedules an explicit ARC release. Its use is rare, as ARC still releases automatically, and is only valid for ARC-managed references (classes, arrays, and pointers to those). Smart pointers and stack values reject `free`.
+
+See `docs/memory/new_free.md` for full semantics and diagnostics.
 
 ## Nullability
 

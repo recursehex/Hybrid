@@ -303,6 +303,19 @@ int getGlobalScore(int index)
 }
 ```
 
+## Heap Allocation
+
+- `new T[len]` allocates a 1-D array of length `len`, zero-initialized, and returns the `{ ptr, len, dims }` array value Hybrid uses in codegen.
+- `new[len]` is target-typed: the element type is inferred from the assignment target.
+- Arrays allocated with `new` are ARC-managed references. They participate in the same retain/release flow as class instances, but explicit `free` is optional, as ARC releases automatically when the last strong reference goes out of scope. `free` is only valid on ARC-managed references; stack arrays and smart pointers reject it.
+
+```cs
+int[] numbers = new int[5]  // Allocates an int array of length 5
+int[] inferred = new[10]    // Type inferred from target
+
+free numbers                // Optional explicit release
+```
+
 ## Implementation Details
 
 ### Memory Representation
@@ -353,7 +366,6 @@ Array indexing uses `getelementptr` instruction:
 ### Future Enhancements
 
 Planned features include:
-- Dynamic array allocation with `new[]`
 - Array length property `size`
 - Bounds checking support for additional unsafe scenarios
 - Array slicing operations

@@ -399,7 +399,8 @@ static void assignARCEligibility(TypeInfo &info) {
   if (!meta)
     return;
 
-  if (meta->kind == AggregateKind::Class)
+  // Classes and structs are managed by ARC
+  if (meta->kind == AggregateKind::Class || meta->kind == AggregateKind::Struct)
     info.arcManaged = true;
   if (meta->hasClassDescriptor)
     info.classDescriptor = &meta->descriptor;
@@ -4178,6 +4179,23 @@ static bool validateInvariantAssignment(const TypeInfo &targetInfo,
   }
 
   return true;
+}
+
+static void propagateTypeToNewExpr(ExprAST *expr, const TypeInfo &targetInfo) {
+  if (!expr)
+    return;
+  auto *newExpr = dynamic_cast<NewExprAST *>(expr);
+  if (!newExpr || !newExpr->typeWasElided())
+    return;
+
+  std::string inferred = typeNameFromInfo(targetInfo);
+  if (inferred.empty())
+    inferred = targetInfo.typeName;
+  if (inferred.empty())
+    return;
+
+  newExpr->setInferredType(inferred);
+  newExpr->setTypeName(inferred);
 }
 
 static bool validateNullableAssignment(const TypeInfo &targetInfo,
@@ -10061,12 +10079,28 @@ llvm::Value *FreeExprAST::codegen() {
         "The smart pointer's control block owns the payload; use the wrapper operations instead of 'free' to avoid double releases.");
     return nullptr;
   }
-  if (info.refStorage == RefStorageClass::None && info.pointerDepth == 0) {
+
+  auto resolveArcInfo = [&](const TypeInfo &candidate) -> TypeInfo {
+    if (candidate.requiresARC())
+      return candidate;
+    if ((!candidate.baseTypeName.empty()) &&
+        (candidate.pointerDepth > 0 || candidate.isArray)) {
+      TypeInfo peeled = makeTypeInfo(candidate.baseTypeName);
+      finalizeTypeInfoMetadata(peeled);
+      return peeled;
+    }
+    return candidate;
+  };
+
+  TypeInfo arcInfo = resolveArcInfo(info);
+  const bool referenceLike = info.pointerDepth > 0 || info.isArray ||
+                             info.isReference() || arcInfo.participatesInARC();
+  if (!referenceLike) {
     reportCompilerError("The 'free' keyword requires a reference value",
                         "Only heap-managed references may be freed; stack values are released automatically.");
     return nullptr;
   }
-  if (!info.requiresARC()) {
+  if (!arcInfo.requiresARC()) {
     reportCompilerError("The 'free' keyword is only valid for ARC-managed references");
     return nullptr;
   }
@@ -10075,9 +10109,230 @@ llvm::Value *FreeExprAST::codegen() {
     return nullptr;
   }
 
-  emitArcRelease(value, info, "free");
+  if (auto *allocaPtr =
+          llvm::dyn_cast<llvm::AllocaInst>(value->stripPointerCasts())) {
+    reportCompilerError(
+        "Cannot free stack-allocated value",
+        "Only heap allocations produced by 'new' or ARC-managed references may be freed explicitly.");
+    (void)allocaPtr;
+    return nullptr;
+  }
+
+  emitArcRelease(value, arcInfo, "free");
   setTypeName("void");
   return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+}
+
+llvm::Value *NewExprAST::codegen() {
+  std::string targetType = RequestedTypeName.empty() ? getTypeName()
+                                                     : RequestedTypeName;
+  if (targetType.empty()) {
+    reportCompilerError(
+        "Cannot infer target type for 'new' expression",
+        "Provide an explicit type (e.g. 'new Box()') or assign to a typed target.");
+    return nullptr;
+  }
+
+  auto materializeDescriptor = [&](const std::string &compositeName)
+      -> std::pair<const CompositeTypeInfo *, llvm::Value *> {
+    const CompositeTypeInfo *metadata =
+        lookupCompositeInfo(compositeName, /*countHit=*/false);
+    if (!metadata) {
+      TypeInfo request = makeTypeInfo(compositeName);
+      metadata = materializeCompositeInstantiation(request);
+    }
+    if (!metadata) {
+      reportCompilerError("Unknown reference type '" + compositeName +
+                          "' for 'new' expression");
+      return {nullptr, nullptr};
+    }
+    if (metadata->descriptorGlobalName.empty()) {
+      reportCompilerError("Internal error: missing descriptor for '" +
+                          compositeName + "' during allocation");
+      return {nullptr, nullptr};
+    }
+
+    llvm::GlobalVariable *descriptorGV =
+        TheModule->getGlobalVariable(metadata->descriptorGlobalName, true);
+    if (!descriptorGV) {
+      reportCompilerError("Internal error: descriptor '" +
+                          metadata->descriptorGlobalName +
+                          "' missing while allocating '" + compositeName + "'");
+      return {nullptr, nullptr};
+    }
+
+    llvm::Value *descriptorPtr = llvm::ConstantExpr::getBitCast(
+        descriptorGV, pointerType(getTypeDescriptorType()));
+    return {metadata, descriptorPtr};
+  };
+
+  if (ArrayForm) {
+    std::string arrayTypeName = targetType;
+    if (arrayTypeName.find('[') == std::string::npos)
+      arrayTypeName += "[]";
+
+    TypeInfo arrayInfo = makeTypeInfo(arrayTypeName);
+    finalizeTypeInfoMetadata(arrayInfo);
+    ParsedTypeDescriptor desc = parseTypeString(arrayInfo.typeName);
+    if (!desc.isArray) {
+      reportCompilerError(
+          "Array form of 'new' requires an array type",
+          "Use 'new Type[size]' to allocate arrays.");
+      return nullptr;
+    }
+
+    std::string elementTypeName = removeLastArrayGroup(desc.sanitized);
+    if (elementTypeName.empty())
+      elementTypeName = arrayInfo.baseTypeName;
+    llvm::Type *elemType = getTypeFromString(elementTypeName);
+    if (!elemType) {
+      reportCompilerError("Unknown array element type '" + elementTypeName + "'");
+      return nullptr;
+    }
+
+    llvm::Value *lengthVal = nullptr;
+    if (ArraySizeExpr) {
+      lengthVal = ArraySizeExpr->codegen();
+      if (!lengthVal)
+        return nullptr;
+    }
+    if (!lengthVal) {
+      reportCompilerError("Array size expression could not be evaluated");
+      return nullptr;
+    }
+
+    if (!lengthVal->getType()->isIntegerTy()) {
+      lengthVal = castToType(lengthVal, llvm::Type::getInt32Ty(*TheContext),
+                             "int");
+      if (!lengthVal)
+        return nullptr;
+    }
+
+    llvm::Value *length32 = lengthVal;
+    if (!length32->getType()->isIntegerTy(32))
+      length32 = Builder->CreateTruncOrBitCast(
+          length32, llvm::Type::getInt32Ty(*TheContext), "new.array.len32");
+
+    if (auto *constLen = llvm::dyn_cast<llvm::ConstantInt>(length32)) {
+      if (constLen->isNegative()) {
+        reportCompilerError("Array size cannot be negative");
+        return nullptr;
+      }
+    }
+
+    const llvm::DataLayout &DL = TheModule->getDataLayout();
+    uint64_t elemSize = getTypeSizeInBytes(elemType);
+    if (elemSize == 0) {
+      reportCompilerError(
+          "Unable to determine element size for array allocation of '" +
+          elementTypeName + "'");
+      return nullptr;
+    }
+
+    uint64_t headerSize = DL.getTypeAllocSize(getArcHeaderType());
+    llvm::Value *elemSizeVal =
+        llvm::ConstantInt::get(getSizeType(), elemSize);
+    llvm::Value *lengthSize =
+        Builder->CreateZExt(length32, getSizeType(), "new.array.len");
+    llvm::Value *descriptorNull =
+        llvm::ConstantPointerNull::get(pointerType(getTypeDescriptorType()));
+    llvm::Value *rawPtr = Builder->CreateCall(
+        getHybridAllocArrayFunction(),
+        {elemSizeVal, lengthSize, descriptorNull}, "new.array.raw");
+
+    llvm::Value *rawBytePtr = Builder->CreateBitCast(
+        rawPtr, pointerType(llvm::Type::getInt8Ty(*TheContext)),
+        "new.array.byteptr");
+    llvm::Value *payloadBytePtr = Builder->CreateInBoundsGEP(
+        llvm::Type::getInt8Ty(*TheContext), rawBytePtr,
+        llvm::ConstantInt::get(getSizeType(), headerSize),
+        "new.array.payload.byte");
+    llvm::Value *dataPtr = Builder->CreateBitCast(
+        payloadBytePtr, pointerType(elemType), "new.array.payload");
+
+    unsigned rank =
+        desc.arrayRanks.empty() ? 1 : std::max(1u, desc.arrayRanks.back());
+    llvm::StructType *arrayStructTy = getArrayStructType(elemType, rank);
+    llvm::Value *arrayValue = llvm::UndefValue::get(arrayStructTy);
+    llvm::Value *opaqueDataPtr =
+        Builder->CreateBitCast(dataPtr, pointerType(), "new.array.ptr");
+    arrayValue = Builder->CreateInsertValue(arrayValue, opaqueDataPtr, {0});
+    arrayValue = Builder->CreateInsertValue(arrayValue, length32, {1});
+
+    for (unsigned i = 0; i < rank; ++i) {
+      llvm::Value *dimVal = (i == 0)
+                                ? static_cast<llvm::Value *>(length32)
+                                : llvm::ConstantInt::get(
+                                      llvm::Type::getInt32Ty(*TheContext), 0);
+      arrayValue = Builder->CreateInsertValue(arrayValue, dimVal, {2u, i});
+    }
+
+    setTypeName(typeNameFromInfo(arrayInfo));
+    return arrayValue;
+  }
+
+  std::string compositeName = sanitizeCompositeLookupName(targetType);
+  if (compositeName.empty()) {
+    reportCompilerError("Cannot determine allocation target for 'new'");
+    return nullptr;
+  }
+
+  TypeInfo allocationInfo = makeTypeInfo(compositeName);
+  finalizeTypeInfoMetadata(allocationInfo);
+  if (!allocationInfo.requiresARC()) {
+    reportCompilerError(
+        "The 'new' keyword is only supported for ARC-managed reference types",
+        "Use value construction without 'new' for stack values or enable ARC support on the target type.");
+    return nullptr;
+  }
+  if (allocationInfo.isSmartPointer()) {
+    reportCompilerError(
+        "Cannot allocate smart pointers with 'new'",
+        "Use the smart pointer helper functions to create managed values instead.");
+    return nullptr;
+  }
+
+  auto [metadata, descriptorPtr] = materializeDescriptor(compositeName);
+  if (!metadata || !descriptorPtr)
+    return nullptr;
+
+  auto structIt = StructTypes.find(compositeName);
+  if (structIt == StructTypes.end()) {
+    reportCompilerError("Internal error: missing struct type for '" +
+                        compositeName + "' during allocation");
+    return nullptr;
+  }
+  llvm::StructType *structTy = structIt->second;
+
+  const llvm::DataLayout &DL = TheModule->getDataLayout();
+  uint64_t typeSize = DL.getTypeAllocSize(structTy);
+  llvm::Value *sizeVal = llvm::ConstantInt::get(getSizeType(), typeSize);
+
+  std::vector<std::unique_ptr<ExprAST>> ctorArgs = std::move(Args);
+  auto ctorCall =
+      std::make_unique<CallExprAST>(compositeName, std::move(ctorArgs));
+  llvm::Value *constructed = ctorCall->codegen();
+  if (!constructed)
+    return nullptr;
+
+  llvm::Value *rawPtr = Builder->CreateCall(
+      getHybridAllocObjectFunction(), {sizeVal, descriptorPtr},
+      "new.object.raw");
+  llvm::Value *typedPtr =
+      Builder->CreateBitCast(rawPtr, pointerType(structTy), "new.object");
+
+  llvm::Value *initValue = constructed;
+  if (constructed->getType()->isPointerTy())
+    initValue = Builder->CreateLoad(structTy, constructed, "new.init");
+  else if (constructed->getType() != structTy)
+    initValue = castToType(constructed, structTy);
+
+  if (!initValue)
+    return nullptr;
+
+  Builder->CreateStore(initValue, typedPtr);
+  setTypeName(targetType);
+  return typedPtr;
 }
 
 static bool parseExplicitTypeArgumentSuffix(const std::string &text,
@@ -11056,6 +11311,70 @@ llvm::Value *ReturnStmtAST::codegen() {
       currentFunction = currentBlock->getParent();
 
     if (!isRef()) {
+      auto maybePromoteStackReturn = [&](llvm::Value *value) -> llvm::Value * {
+        if (!value)
+          return nullptr;
+        auto *allocaPtr = llvm::dyn_cast<llvm::AllocaInst>(value);
+        if (!allocaPtr)
+          return value;
+
+        std::string retTypeName = getReturnValue()->getTypeName();
+        TypeInfo retInfo = makeTypeInfo(retTypeName);
+        finalizeTypeInfoMetadata(retInfo);
+        if (!retInfo.requiresARC() || retInfo.isSmartPointer())
+          return value;
+
+        llvm::StructType *structTy =
+            llvm::dyn_cast<llvm::StructType>(allocaPtr->getAllocatedType());
+        if (!structTy)
+          return value;
+
+        std::string lookupName =
+            sanitizeCompositeLookupName(typeNameFromInfo(retInfo));
+        const CompositeTypeInfo *meta =
+            lookupCompositeInfo(lookupName, /*countHit=*/false);
+        if (!meta || !meta->hasARCHeader)
+          return value;
+
+        if (meta->descriptorGlobalName.empty()) {
+          reportCompilerError("Internal error: missing descriptor for '" +
+                              lookupName + "' while returning value");
+          return nullptr;
+        }
+
+        llvm::GlobalVariable *descriptorGV = TheModule->getGlobalVariable(
+            meta->descriptorGlobalName, true);
+        if (!descriptorGV) {
+          reportCompilerError("Internal error: descriptor '" +
+                              meta->descriptorGlobalName +
+                              "' missing while returning '" + lookupName + "'");
+          return nullptr;
+        }
+
+        const llvm::DataLayout &DL = TheModule->getDataLayout();
+        uint64_t typeSize = DL.getTypeAllocSize(structTy);
+        llvm::Value *sizeVal = llvm::ConstantInt::get(getSizeType(), typeSize);
+
+        llvm::Value *descriptorPtr = llvm::ConstantExpr::getBitCast(
+            descriptorGV, pointerType(getTypeDescriptorType()));
+
+        llvm::Value *rawPtr = Builder->CreateCall(
+            getHybridAllocObjectFunction(), {sizeVal, descriptorPtr},
+            "return.alloc");
+        llvm::Value *typedPtr =
+            Builder->CreateBitCast(rawPtr, pointerType(structTy),
+                                   "return.obj");
+
+        llvm::Value *initValue =
+            Builder->CreateLoad(structTy, allocaPtr, "return.init");
+        Builder->CreateStore(initValue, typedPtr);
+        return typedPtr;
+      };
+
+      Val = maybePromoteStackReturn(Val);
+      if (!Val)
+        return nullptr;
+
       if (currentFunction) {
         llvm::Type *expectedType = currentFunction->getReturnType();
         if (expectedType && !expectedType->isVoidTy() &&
@@ -11100,6 +11419,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
   // For ref variables, need to store a pointer to the actual type
   bool isRefVar = isRef();
+
+  propagateTypeToNewExpr(getInitializer(), declaredInfo);
 
   const ExprAST *InitializerExpr = getInitializer();
   const RefExprAST *RefInitializer = dynamic_cast<const RefExprAST*>(InitializerExpr);

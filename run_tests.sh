@@ -703,7 +703,7 @@ run_test() {
                     done
                     if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
                         needs_smart_ptr_runtime=1
-                    elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease" "$temp_ir"; then
+                    elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease\|hybrid_alloc_array\|hybrid_alloc_object" "$temp_ir"; then
                         needs_smart_ptr_runtime=1
                     fi
 
@@ -770,7 +770,7 @@ run_test() {
                         done
                         if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
                             needs_smart_ptr_runtime=1
-                        elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease" "$temp_ir"; then
+                        elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease\|hybrid_alloc_array\|hybrid_alloc_object" "$temp_ir"; then
                             needs_smart_ptr_runtime=1
                         fi
 
@@ -1198,7 +1198,7 @@ echo -e "Failed:       ${RED}$FAILED_TESTS${NC}"
 
 # Add note about failures-only mode
 if [ $FAILURES_ONLY -eq 1 ] && [ $FAILED_TESTS -eq 0 ]; then
-    echo -e "${GREEN}(No failures shown - all tests passed)${NC}"
+    echo -e "${GREEN}All tests passed!${NC}"
 fi
 
 if [ $TIMED_TESTS -gt 0 ]; then

@@ -1,13 +1,17 @@
-// free on stack value should be rejected
-
-class Foo
+class Box
 {
-    Foo() {}
+    int value
+
+    Box(int value)
+    {
+        this.value = value
+    }
 }
 
 int main()
 {
-    Foo local = Foo()
-    free local
+    Box instance = Box(42)
+    int value = instance.value
+    free value   // stack value cannot be freed
     return 0
 }
