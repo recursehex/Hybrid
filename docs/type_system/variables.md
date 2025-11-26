@@ -1,6 +1,6 @@
 # Variable Declarations
 
-All variables must be initialized when declared, except for struct members given they are initialized in all constructors:
+All variables must be initialized when declared, except for struct or class members given they are initialized in all constructors:
 
 ```cs
 // Valid declarations
@@ -32,10 +32,29 @@ struct Rectangle
     Point topLeft
     Point bottomRight
 
-    // Error: both members must be initialized in all constructors
+    // ERROR: both members must be initialized in all constructors
     Rectangle(Point topLeft)
     {
         this.topLeft = topLeft
+    }
+}
+
+class Person
+{
+    string name
+    int age
+
+    // Valid constructor initializing all members
+    Person(string name, int age)
+    {
+        this.name = name
+        this.age = age
+    }
+
+    // ERROR: Invalid constructor missing age initialization
+    Person(string name)
+    {
+        this.name = name
     }
 }
 ```

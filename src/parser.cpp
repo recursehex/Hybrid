@@ -2201,6 +2201,10 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
 
   TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
 
+  if (CurTok == ',') {
+    LogError("Expected '=' after variable name. Multiple variable declarations in a single statement are not allowed");
+  }
+
   if (CurTok != '=') {
     LogError("Expected '=' after variable name (all variables must be initialized)");
     return nullptr;
