@@ -198,6 +198,7 @@ These rules keep classes aligned with the modern expectations of type and memory
 
 - Declare a single destructor per type with `~TypeName() { ... }`; parameters, generics, return types, `static`, and `abstract` are rejected.
 - ARC runs destructors automatically when the last strong reference is released, including when a `shared<T>` control block drops to zero and when scope teardown releases locals.
+- Class destructors are always virtual: dispatch goes through the vtable slot stored in the runtime type descriptor, so `Base b = new Derived(); free b` (or any base reference going out of scope) invokes the derived destructor. This is intentional parity with best practices in C++ while removing the "forgot to mark it virtual" footgun. Struct destructors remain non-virtual as structs do not support inheritance.
 - Manual calls (`value.~TypeName()`) retain and release around the call; they require a strong, non-smart-pointer receiver and must not be repeated on the same value.
 - `free expr` lowers to the same ARC release path that triggers destructors; freeing smart pointer handles or non-ARC/stack values is diagnosed, and mixes of `free` plus manual destructor calls surface as double releases.
 
