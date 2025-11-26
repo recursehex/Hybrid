@@ -11959,6 +11959,17 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 }
 
 // Generate code for expression statements
+static std::string describeCallTarget(const CallExprAST &call) {
+  if (!call.getCallee().empty())
+    return call.getCallee();
+  if (call.hasCalleeExpr()) {
+    if (auto *member =
+            dynamic_cast<MemberAccessExprAST *>(call.getCalleeExpr()))
+      return member->getMemberName();
+  }
+  return {};
+}
+
 llvm::Value *ExpressionStmtAST::codegen() {
   if (builderInTopLevelContext())
     prepareTopLevelStatementContext();
@@ -11967,6 +11978,18 @@ llvm::Value *ExpressionStmtAST::codegen() {
   llvm::Value *V = getExpression()->codegen();
   if (!V)
     return nullptr;
+
+  if (auto *call = dynamic_cast<CallExprAST *>(getExpression())) {
+    if (!V->getType()->isVoidTy()) {
+      const std::string target = describeCallTarget(*call);
+      const std::string message =
+          target.empty() ? "Result of function call is unused"
+                         : "Result of call to '" + target + "' is unused";
+      reportCompilerWarning(
+          message,
+          "Assign the return value to a variable if you meant to use it.");
+    }
+  }
 
   // For void expressions (like assignments), return a dummy value
   if (V->getType()->isVoidTy()) {
