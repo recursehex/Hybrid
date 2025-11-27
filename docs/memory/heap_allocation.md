@@ -38,6 +38,7 @@ free box
 ## Diagnostics and unsupported cases
 - Smart pointers (`unique<T>`, `shared<T>`, `weak<T>`) reject `free` because their control blocks own the payload. Use the smart pointer APIs instead.
 - Stack values are not heap-managed; `free` reports an error when applied to locals allocated on the stack, even if the type is ARC-capable.
+- `free` is compile-time checked, so double frees and any subsequent use of a manually released value both emit diagnostics to prevent use-after-free bugs.
 - `new` requires an ARC-managed reference type. Attempting `new` on smart-pointer wrappers emits a diagnostic.
 - Array allocations expect a single length expression; negative lengths are rejected.
 
