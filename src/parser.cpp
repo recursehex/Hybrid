@@ -670,6 +670,28 @@ static bool isPascalCase(const std::string &name) {
 
 static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
   while (true) {
+    if (CurTok == tok_null_array_access) {
+      // Treat '?[' as nullable element type followed by array suffix
+      Type += "?";
+      std::string segment = "[";
+      getNextToken(); // advance to the token after '['
+
+      while (CurTok == ',') {
+        segment += ",";
+        getNextToken(); // eat ','
+      }
+
+      if (CurTok != ']') {
+        fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
+        return false;
+      }
+
+      getNextToken(); // eat ']'
+      segment += "]";
+      Type += segment;
+      continue;
+    }
+
     if (CurTok == tok_nullable) {
       Type += "?";
       getNextToken();
@@ -1302,7 +1324,7 @@ static std::string InferExprType(const ExprAST* expr)
 
   if (dynamic_cast<const NullExprAST*>(expr))
   {
-    return "string"; // null is used for string initialization
+    return ""; // null has no inherent type; defer to contextual typing
   }
 
   // Check for cast expressions

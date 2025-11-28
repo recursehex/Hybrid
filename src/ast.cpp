@@ -7231,19 +7231,31 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
                                                        const TypeInfo *DeclaredArrayInfo) {
   llvm::Type *ElemType = TargetElementType;
   std::string elementTypeName = TargetElementTypeName;
+  TypeInfo elementInfo;
+  std::string cleanElementTypeName;
+
+  auto refreshElementInfo = [&](const std::string &name) {
+    elementTypeName = name;
+    elementInfo = makeTypeInfo(elementTypeName);
+    if (DeclaredArrayInfo && DeclaredArrayInfo->elementNullable && !elementInfo.isNullable)
+      elementInfo.isNullable = true;
+    finalizeTypeInfoMetadata(elementInfo);
+    elementTypeName = typeNameFromInfo(elementInfo);
+    cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
+    if (cleanElementTypeName.empty())
+      cleanElementTypeName = elementTypeName;
+  };
 
   if (elementTypeName.empty())
     elementTypeName = getElementType();
+
+  refreshElementInfo(elementTypeName);
 
   if (!ElemType)
     ElemType = getTypeFromString(elementTypeName);
 
   if (!ElemType)
     return LogErrorV("Unknown element type in array literal");
-
-  std::string cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
-  if (cleanElementTypeName.empty())
-    cleanElementTypeName = elementTypeName;
 
   unsigned outerRank = 1;
   bool treatAsMultidimensional = false;
@@ -7294,10 +7306,7 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
       return LogErrorV("Unknown element type in multidimensional array literal");
 
     ElemType = ScalarType;
-    elementTypeName = baseElementName;
-    cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
-    if (cleanElementTypeName.empty())
-      cleanElementTypeName = elementTypeName;
+    refreshElementInfo(baseElementName);
 
     std::function<bool(const ArrayExprAST*, unsigned)> collect =
         [&](const ArrayExprAST *node, unsigned depth) -> bool {
@@ -7331,6 +7340,21 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     for (const auto &Elem : getElements())
       flatElements.push_back(Elem.get());
     dimensionSizes.push_back(flatElements.size());
+  }
+
+  const bool elementAllowsNull =
+      typeAllowsNull(elementInfo) || elementInfo.elementNullable ||
+      (DeclaredArrayInfo && DeclaredArrayInfo->elementNullable);
+  if (!elementAllowsNull) {
+    std::string reportedElementType =
+        elementTypeName.empty() ? cleanElementTypeName : elementTypeName;
+    for (const auto *Elem : flatElements) {
+      if (expressionIsNullable(unwrapRefExpr(Elem))) {
+        return LogErrorV(
+            "Array elements of type '" + reportedElementType + "' cannot be null",
+            "Remove null entries or mark the element type nullable with '?'.");
+      }
+    }
   }
 
   if (dimensionSizes.empty())
@@ -7383,8 +7407,6 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     llvm::Value *descriptorPtr =
         Builder->CreateCall(getHybridArrayDescriptorFunction(), {},
                             "array.literal.descriptor");
-    TypeInfo elementInfo = makeTypeInfo(elementTypeName);
-    finalizeTypeInfoMetadata(elementInfo);
     llvm::Value *releaseFn = selectArrayElementReleaseFunction(
         elementInfo, "array.literal.releasefn");
     llvm::Value *rawPtr = Builder->CreateCall(
@@ -8125,6 +8147,12 @@ llvm::Value *VariableExprAST::codegen() {
 // Helper function to cast a value to a target type
 llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
   llvm::Type* sourceType = value->getType();
+  if (llvm::isa<llvm::ConstantPointerNull>(value)) {
+    if (targetType->isPointerTy())
+      return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(targetType));
+    if (!targetType->isVoidTy())
+      return llvm::Constant::getNullValue(targetType);
+  }
   
   if (sourceType == targetType)
     return value;
@@ -8205,6 +8233,12 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
 // Overloaded castToType that knows the target type name for proper range checking
 llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::string& targetTypeName) {
   llvm::Type* sourceType = value->getType();
+  if (llvm::isa<llvm::ConstantPointerNull>(value)) {
+    if (targetType->isPointerTy())
+      return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(targetType));
+    if (!targetType->isVoidTy())
+      return llvm::Constant::getNullValue(targetType);
+  }
   
   if (sourceType == targetType)
     return value;
