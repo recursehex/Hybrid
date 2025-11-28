@@ -7233,6 +7233,7 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   std::string elementTypeName = TargetElementTypeName;
   TypeInfo elementInfo;
   std::string cleanElementTypeName;
+  bool hasElementInfo = false;
 
   auto refreshElementInfo = [&](const std::string &name) {
     elementTypeName = name;
@@ -7244,18 +7245,14 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
     if (cleanElementTypeName.empty())
       cleanElementTypeName = elementTypeName;
+    hasElementInfo = true;
   };
 
   if (elementTypeName.empty())
     elementTypeName = getElementType();
 
-  refreshElementInfo(elementTypeName);
-
-  if (!ElemType)
-    ElemType = getTypeFromString(elementTypeName);
-
-  if (!ElemType)
-    return LogErrorV("Unknown element type in array literal");
+  const bool elementTypeLocked =
+      TargetElementType != nullptr || !TargetElementTypeName.empty();
 
   unsigned outerRank = 1;
   bool treatAsMultidimensional = false;
@@ -7342,6 +7339,47 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     dimensionSizes.push_back(flatElements.size());
   }
 
+  size_t ArraySize = flatElements.size();
+  std::vector<llvm::Value *> elementValues(ArraySize, nullptr);
+
+  if (!hasElementInfo && !elementTypeName.empty())
+    refreshElementInfo(elementTypeName);
+
+  if (!ElemType && hasElementInfo)
+    ElemType = getTypeFromString(elementTypeName);
+
+  if (ArraySize > 0) {
+    llvm::Value *firstVal = flatElements[0]->codegen();
+    if (!firstVal)
+      return nullptr;
+    elementValues[0] = firstVal;
+    if (!ElemType ||
+        (!elementTypeLocked &&
+         (firstVal->getType() != ElemType ||
+          dynamic_cast<ArrayExprAST *>(flatElements[0])))) {
+      ElemType = firstVal->getType();
+    }
+    if (elementTypeName.empty() && !flatElements[0]->getTypeName().empty())
+      elementTypeName = flatElements[0]->getTypeName();
+    if (!hasElementInfo && !elementTypeName.empty())
+      refreshElementInfo(elementTypeName);
+  }
+
+  if (!ElemType) {
+    if (ArraySize == 0)
+      return LogErrorV("Cannot infer element type for empty array literal",
+                       "Specify the element type or add a typed element.");
+    return LogErrorV("Cannot infer element type for array literal elements",
+                     "Give the literal a declared element type or use typed elements.");
+  }
+
+  if (!hasElementInfo && !elementTypeName.empty())
+    refreshElementInfo(elementTypeName);
+
+  if (!hasElementInfo)
+    return LogErrorV("Cannot determine element type for array literal",
+                     "Specify the element type explicitly.");
+
   const bool elementAllowsNull =
       typeAllowsNull(elementInfo) || elementInfo.elementNullable ||
       (DeclaredArrayInfo && DeclaredArrayInfo->elementNullable);
@@ -7362,30 +7400,9 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   if (treatAsMultidimensional && dimensionSizes.size() < outerRank)
     dimensionSizes.resize(outerRank, 0);
 
-  size_t ArraySize = flatElements.size();
   llvm::Function *ContainingFunction =
       Builder->GetInsertBlock() ? Builder->GetInsertBlock()->getParent()
                                  : nullptr;
-
-  std::vector<llvm::Value *> elementValues(flatElements.size(), nullptr);
-  const bool elementTypeLocked = TargetElementType != nullptr;
-  if (ArraySize > 0) {
-    llvm::Value *firstVal = flatElements[0]->codegen();
-    if (!firstVal)
-      return nullptr;
-    elementValues[0] = firstVal;
-    if (!ElemType) {
-      ElemType = firstVal->getType();
-    } else if (!elementTypeLocked &&
-               (firstVal->getType() != ElemType ||
-                dynamic_cast<ArrayExprAST *>(flatElements[0]))) {
-      ElemType = firstVal->getType();
-    }
-    if (elementTypeName.empty() && !flatElements[0]->getTypeName().empty())
-      elementTypeName = flatElements[0]->getTypeName();
-    if (cleanElementTypeName.empty())
-      cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
-  }
 
   llvm::Value *ArrayDataPtr =
       llvm::ConstantPointerNull::get(pointerType(ElemType));
@@ -10883,6 +10900,15 @@ static llvm::Value *emitResolvedCallInternal(
           TypeInfo expectedInfo = overload.parameterTypes[idx];
           TypeInfo actualInfo =
               applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+          const bool expectedIsArray =
+              expectedInfo.isArray || expectedInfo.arrayDepth > 0;
+          const bool actualIsArray =
+              actualInfo.isArray || actualInfo.arrayDepth > 0;
+          if ((expectedIsArray || actualIsArray) &&
+              !typeInfoEquals(expectedInfo, actualInfo)) {
+            compatible = false;
+            break;
+          }
           const bool expectedHasGenerics = !expectedInfo.typeArguments.empty();
           const bool actualHasGenerics = !actualInfo.typeArguments.empty();
           if ((expectedHasGenerics || actualHasGenerics) &&

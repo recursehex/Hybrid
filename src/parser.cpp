@@ -1336,7 +1336,10 @@ static std::string InferExprType(const ExprAST* expr)
   // Check for array expressions
   if (const ArrayExprAST* arrayExpr = dynamic_cast<const ArrayExprAST*>(expr))
   {
-    return arrayExpr->getElementType() + "[]";
+    const std::string &elemType = arrayExpr->getElementType();
+    if (elemType.empty())
+      return "";
+    return elemType + "[]";
   }
 
   // For other expressions, can't determine type at parse time
@@ -1509,11 +1512,7 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
     ElementType = "double";
   }
 
-  // Default to int if couldn't determine type
-  if (ElementType.empty())
-  {
-    ElementType = "int";
-  }
+  // Leave ElementType empty when inference failed so codegen can use context or diagnose
 
   return std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
 }
