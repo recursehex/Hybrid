@@ -352,6 +352,10 @@ run_test() {
                     fi
                 fi
 
+                if [ $has_errors -ne 0 ] && [ -n "$temp_bin" ]; then
+                    cp "$temp_ir" /tmp/hybrid_fail.ll 2>/dev/null || true
+                    cp "$temp_bin" /tmp/hybrid_fail.bin 2>/dev/null || true
+                fi
                 rm -f "$temp_ir" "$temp_bin"
             fi
         fi

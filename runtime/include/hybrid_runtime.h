@@ -26,6 +26,7 @@ typedef _Atomic(uint32_t) hybrid_atomic_u32;
 
 typedef struct HybridTypeDescriptor HybridTypeDescriptor;
 typedef struct HybridSharedControlBlock HybridSharedControlBlock;
+typedef void (*hybrid_array_release_fn)(void *elementSlot);
 
 typedef struct HybridInterfaceEntry {
   const HybridTypeDescriptor *interfaceType;
@@ -48,6 +49,13 @@ typedef struct hybrid_refcount_t {
   const HybridTypeDescriptor *descriptor;
 } hybrid_refcount_t;
 
+typedef struct hybrid_array_header_t {
+  hybrid_refcount_t counts;
+  size_t length;
+  size_t elementSize;
+  hybrid_array_release_fn elementRelease;
+} hybrid_array_header_t;
+
 typedef struct HybridARCDebugConfig {
   int leakDetect;
   int refTrace;
@@ -62,6 +70,11 @@ HYBRID_STATIC_ASSERT(offsetof(hybrid_refcount_t, strongCount) == 0,
 HYBRID_STATIC_ASSERT(
     offsetof(hybrid_refcount_t, weakCount) == sizeof(hybrid_atomic_u32),
     "ARC header weak count offset mismatch");
+HYBRID_STATIC_ASSERT(
+    offsetof(hybrid_array_header_t, counts) == 0,
+    "Array header must start with ARC counts");
+HYBRID_STATIC_ASSERT(sizeof(hybrid_array_header_t) >= sizeof(hybrid_refcount_t),
+                     "Array header must wrap refcount header");
 
 #ifdef __cplusplus
 extern "C" {
@@ -192,6 +205,12 @@ void *hybrid_new_object(size_t totalSize,
                         const HybridTypeDescriptor *descriptor);
 void *hybrid_new_array(size_t elementSize, size_t elementCount,
                        const HybridTypeDescriptor *descriptor);
+size_t hybrid_array_payload_offset(void);
+const HybridTypeDescriptor *hybrid_array_type_descriptor(void);
+void hybrid_array_set_release(void *obj, hybrid_array_release_fn releaseFn);
+void hybrid_array_dealloc(void *obj);
+void hybrid_array_release_ref_slot(void *slot);
+void hybrid_array_release_array_slot(void *slot);
 void hybrid_free(void *obj);
 void *hybrid_retain(void *obj);
 void hybrid_release(void *obj);

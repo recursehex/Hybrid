@@ -23,6 +23,11 @@ int hybrid_debug_leaks = 0;
 int hybrid_debug_reftrace = 0;
 int hybrid_debug_verify = 0;
 int hybrid_debug_pool = 0;
+using ArrayHeader = hybrid_array_header_t;
+static const HybridTypeDescriptor *CachedArrayDescriptor = nullptr;
+static std::once_flag ArrayDescriptorInit;
+
+extern "C" void hybrid_array_dealloc(void *obj);
 
 extern "C" void hybrid_release(void *obj);
 
@@ -32,6 +37,8 @@ static_assert(
     offsetof(hybrid::memory::ARCHeader, descriptor) ==
         offsetof(hybrid_refcount_t, descriptor),
     "Descriptor pointer offset mismatch");
+static_assert(offsetof(ArrayHeader, counts) == 0,
+              "Array header must start with ARC counts");
 
 namespace {
 
@@ -213,6 +220,18 @@ struct HybridSharedControlBlock {
 extern "C" {
 
 void hybrid_dealloc(void *obj);
+size_t hybrid_array_payload_offset(void) { return sizeof(ArrayHeader); }
+
+const HybridTypeDescriptor *hybrid_array_type_descriptor(void) {
+  std::call_once(ArrayDescriptorInit, []() {
+    static HybridTypeDescriptor descriptor{"array", nullptr, nullptr, 0,
+                                           nullptr, 0, hybrid_array_dealloc};
+    CachedArrayDescriptor = hybrid_register_type_descriptor(&descriptor);
+    if (!CachedArrayDescriptor)
+      CachedArrayDescriptor = &descriptor;
+  });
+  return CachedArrayDescriptor;
+}
 
 void hybrid_arc_set_debug_flags(int leakDetect, int refTrace, int verify,
                                 int poolDebug) {
@@ -341,20 +360,26 @@ void *hybrid_alloc_array(std::size_t elementSize, std::size_t elementCount,
                          const HybridTypeDescriptor *descriptor) {
   const HybridTypeDescriptor *canonical =
       hybrid_register_type_descriptor(
-          descriptor ? descriptor : getFallbackDescriptor());
-  if (elementSize == 0 || elementCount == 0)
+          descriptor ? descriptor : hybrid_array_type_descriptor());
+  if (elementSize == 0)
     return nullptr;
-  if (elementSize > std::numeric_limits<std::size_t>::max() / elementCount)
+  if (elementCount > 0 &&
+      elementSize > std::numeric_limits<std::size_t>::max() / elementCount)
     return nullptr;
   if (!descriptorLooksValid(canonical))
     return nullptr;
 
   const std::size_t payloadSize = elementSize * elementCount;
-  const std::size_t totalSize = hybrid::memory::headerSize() + payloadSize;
+  const std::size_t totalSize = sizeof(ArrayHeader) + payloadSize;
 
   void *memory = std::calloc(1, totalSize);
   if (!memory)
     return nullptr;
+
+  auto *header = static_cast<ArrayHeader *>(memory);
+  header->length = elementCount;
+  header->elementSize = elementSize;
+  header->elementRelease = nullptr;
 
   RefCount counts = RefCount::fromObject(memory);
   counts.initialize(canonical);
@@ -372,6 +397,33 @@ void *hybrid_new_object(std::size_t totalSize,
 void *hybrid_new_array(std::size_t elementSize, std::size_t elementCount,
                        const HybridTypeDescriptor *descriptor) {
   return hybrid_alloc_array(elementSize, elementCount, descriptor);
+}
+
+void hybrid_array_set_release(void *obj,
+                              hybrid_array_release_fn releaseFn) {
+  if (!obj)
+    return;
+  auto *header = static_cast<ArrayHeader *>(obj);
+  header->elementRelease = releaseFn;
+}
+
+void hybrid_array_release_ref_slot(void *slot) {
+  if (!slot)
+    return;
+  void *value = *static_cast<void **>(slot);
+  if (value)
+    hybrid_release(value);
+}
+
+void hybrid_array_release_array_slot(void *slot) {
+  if (!slot)
+    return;
+  void *payloadPtr = *static_cast<void **>(slot);
+  if (!payloadPtr)
+    return;
+  auto *bytePtr = static_cast<std::byte *>(payloadPtr);
+  bytePtr -= static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
+  hybrid_release(static_cast<void *>(bytePtr));
 }
 
 void *hybrid_retain(void *obj) {
@@ -420,6 +472,23 @@ void hybrid_dealloc(void *obj) {
   if (counts.releaseWeak()) {
     std::free(obj);
   }
+}
+
+void hybrid_array_dealloc(void *obj) {
+  if (!obj)
+    return;
+  auto *header = static_cast<ArrayHeader *>(obj);
+  hybrid_array_release_fn releaseFn = header->elementRelease;
+  if (releaseFn) {
+    std::byte *payload = static_cast<std::byte *>(obj) +
+                         static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
+    const std::size_t elementSize = header->elementSize;
+    const std::size_t length = header->length;
+    for (std::size_t idx = 0; idx < length; ++idx) {
+      releaseFn(payload + idx * elementSize);
+    }
+  }
+  hybrid_dealloc(obj);
 }
 
 void hybrid_autorelease_pool_push(void) {

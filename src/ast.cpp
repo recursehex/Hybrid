@@ -170,6 +170,8 @@ static llvm::PointerType *pointerType(llvm::Type * /*elementType*/,
   return llvm::PointerType::get(*TheContext, addressSpace);
 }
 
+static llvm::Type *getSizeType();
+
 static llvm::PointerType *getDeallocFunctionPointerType() {
   auto *opaquePtrTy = pointerType();
   auto *deallocFnTy =
@@ -184,6 +186,10 @@ static llvm::FunctionCallee getHybridAutoreleaseFunction();
 static llvm::FunctionCallee getHybridDeallocFunction();
 static llvm::FunctionCallee getHybridAllocObjectFunction();
 static llvm::FunctionCallee getHybridAllocArrayFunction();
+static llvm::FunctionCallee getHybridArrayDescriptorFunction();
+static llvm::FunctionCallee getHybridArraySetReleaseFunction();
+static llvm::FunctionCallee getHybridArrayReleaseRefSlotFunction();
+static llvm::FunctionCallee getHybridArrayReleaseArraySlotFunction();
 static llvm::FunctionCallee getHybridArcDebugConfigFunction();
 static llvm::FunctionCallee getHybridArcTraceLabelFunction();
 static llvm::FunctionCallee getHybridArcVerifyRuntimeFunction();
@@ -194,7 +200,8 @@ static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
 static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
                                      llvm::Value *incoming,
                                      const TypeInfo &info,
-                                     std::string_view label);
+                                     std::string_view label,
+                                     bool incomingIsTemporary = false);
 static bool emitSmartPointerHelpers(const std::string &constructedName,
                                     llvm::StructType *structTy,
                                     CompositeTypeInfo &metadata,
@@ -372,7 +379,12 @@ static void assignARCEligibility(TypeInfo &info) {
   }
 
   info.arcManaged = false;
-  if (info.pointerDepth > 0 || info.isArray)
+  if (info.isArray) {
+    info.arcManaged = true;
+    return;
+  }
+
+  if (info.pointerDepth > 0)
     return;
 
   if (info.baseTypeName.empty())
@@ -1264,6 +1276,35 @@ static llvm::StructType *getArcHeaderType() {
   return headerTy;
 }
 
+static llvm::PointerType *getArrayReleaseCallbackPointerType() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext),
+                                       {voidPtrTy}, false);
+  return pointerType(fnTy);
+}
+
+static llvm::StructType *getArrayHeaderType() {
+  if (auto *existing = llvm::StructType::getTypeByName(*TheContext,
+                                                       "__HybridArrayHeader"))
+    return existing;
+  auto *headerTy = llvm::StructType::create(*TheContext, "__HybridArrayHeader");
+  auto *typeDescPtrTy = pointerType(getTypeDescriptorType());
+  auto *sizeTy = getSizeType();
+  auto *releasePtrTy = getArrayReleaseCallbackPointerType();
+  headerTy->setBody({llvm::Type::getInt32Ty(*TheContext),
+                     llvm::Type::getInt32Ty(*TheContext),
+                     typeDescPtrTy,
+                     sizeTy,
+                     sizeTy,
+                     releasePtrTy});
+  return headerTy;
+}
+
+static std::uint64_t getArrayPayloadOffsetBytes() {
+  const llvm::DataLayout &DL = TheModule->getDataLayout();
+  return DL.getTypeAllocSize(getArrayHeaderType());
+}
+
 static llvm::Constant *getOrCreateTypeNameConstant(const std::string &typeName) {
   std::string symbol = makeRuntimeSymbolName("__hybrid_type_name$", typeName);
   if (auto *existing = TheModule->getNamedGlobal(symbol))
@@ -1919,6 +1960,46 @@ static llvm::Type *getSizeType() {
 }
 
 [[maybe_unused]] static llvm::FunctionCallee
+getHybridArrayDescriptorFunction() {
+  auto *typeDescPtrTy = pointerType(getTypeDescriptorType());
+  auto *fnType =
+      llvm::FunctionType::get(typeDescPtrTy, {}, false);
+  return TheModule->getOrInsertFunction("hybrid_array_type_descriptor",
+                                        fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridArraySetReleaseFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *releaseFnTy =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext),
+                              {voidPtrTy}, false);
+  auto *releaseFnPtrTy = pointerType(releaseFnTy);
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext),
+      {voidPtrTy, releaseFnPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_array_set_release",
+                                        fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee
+getHybridArrayReleaseRefSlotFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_array_release_ref_slot",
+                                        fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee
+getHybridArrayReleaseArraySlotFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_array_release_array_slot",
+                                        fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee
 getHybridArcDebugConfigFunction() {
   auto *intTy = llvm::Type::getInt32Ty(*TheContext);
   auto *fnType = llvm::FunctionType::get(
@@ -2042,6 +2123,24 @@ static std::string buildArcOpLabel(std::string_view label,
     name.append(op);
   }
   return name;
+}
+
+static llvm::Value *
+selectArrayElementReleaseFunction(const TypeInfo &elementInfo,
+                                  std::string_view label) {
+  llvm::PointerType *cbPtrTy = getArrayReleaseCallbackPointerType();
+  if (!elementInfo.requiresARC() || elementInfo.isSmartPointer())
+    return llvm::ConstantPointerNull::get(cbPtrTy);
+  llvm::FunctionCallee callee = elementInfo.isArray
+                                    ? getHybridArrayReleaseArraySlotFunction()
+                                    : getHybridArrayReleaseRefSlotFunction();
+  llvm::Value *fnPtr = callee.getCallee();
+  if (fnPtr->getType() != cbPtrTy) {
+    fnPtr = Builder->CreateBitCast(
+        fnPtr, cbPtrTy,
+        buildArcOpLabel(label, "array.releasefn.cast"));
+  }
+  return fnPtr;
 }
 
 // Smart pointer variables store a pointer to a wrapper struct that lives in
@@ -2212,12 +2311,107 @@ static bool emitSmartPointerInitFromVariable(const TypeInfo &declaredInfo,
   return true;
 }
 
+static llvm::Value *computeArrayHeaderPointer(llvm::Value *arrayValue,
+                                              std::string_view label) {
+  if (!arrayValue)
+    return nullptr;
+  llvm::Value *dataPtr = nullptr;
+  if (arrayValue->getType()->isStructTy()) {
+    dataPtr = Builder->CreateExtractValue(
+        arrayValue, 0, buildArcOpLabel(label, "array.data"));
+  }
+  if (!dataPtr)
+    return nullptr;
+
+  llvm::Value *voidPtr = Builder->CreateBitCast(
+      dataPtr, pointerType(),
+      buildArcOpLabel(label, "array.payload.void"));
+  llvm::Value *isNull = Builder->CreateICmpEQ(
+      voidPtr, llvm::ConstantPointerNull::get(pointerType()),
+      buildArcOpLabel(label, "array.null"));
+
+  llvm::BasicBlock *origin = Builder->GetInsertBlock();
+  llvm::Function *parent = origin ? origin->getParent() : nullptr;
+  if (!parent)
+    return nullptr;
+  llvm::BasicBlock *computeBB = llvm::BasicBlock::Create(
+      *TheContext, buildArcOpLabel(label, "array.header.compute"), parent);
+  llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(
+      *TheContext, buildArcOpLabel(label, "array.header.merge"), parent);
+  Builder->CreateCondBr(isNull, mergeBB, computeBB);
+
+  Builder->SetInsertPoint(computeBB);
+  llvm::Value *bytePtr = Builder->CreateBitCast(
+      voidPtr, pointerType(llvm::Type::getInt8Ty(*TheContext)),
+      buildArcOpLabel(label, "array.payload.byte"));
+  llvm::Value *offset = llvm::ConstantInt::getSigned(
+      getSizeType(), -static_cast<int64_t>(getArrayPayloadOffsetBytes()));
+  llvm::Value *headerBytePtr = Builder->CreateInBoundsGEP(
+      llvm::Type::getInt8Ty(*TheContext), bytePtr, offset,
+      buildArcOpLabel(label, "array.header.byte"));
+  llvm::Value *headerVoidPtr = Builder->CreateBitCast(
+      headerBytePtr, pointerType(),
+      buildArcOpLabel(label, "array.header.void"));
+  Builder->CreateBr(mergeBB);
+
+  Builder->SetInsertPoint(mergeBB);
+  llvm::PHINode *phi = Builder->CreatePHI(
+      pointerType(), 2, buildArcOpLabel(label, "array.header.phi"));
+  phi->addIncoming(headerVoidPtr, computeBB);
+  phi->addIncoming(llvm::ConstantPointerNull::get(pointerType()), origin);
+  return phi;
+}
+
+static llvm::Value *emitArrayRetainValue(llvm::Value *arrayValue,
+                                         std::string_view label) {
+  llvm::Value *headerPtr =
+      computeArrayHeaderPointer(arrayValue,
+                                buildArcOpLabel(label, "array.header"));
+  if (!headerPtr)
+    return arrayValue;
+
+  const ArcDebugOptions &arcDebug = CG.arcDebug;
+  if (arcDebug.runtimeTracing) {
+    llvm::Value *labelConst = Builder->CreateGlobalString(
+        std::string(label), buildArcOpLabel(label, "array.trace.label"));
+    Builder->CreateCall(getHybridArcTraceLabelFunction(), {labelConst});
+  }
+  if (arcDebug.runtimeVerify) {
+    Builder->CreateCall(getHybridArcVerifyRuntimeFunction(), {headerPtr});
+  }
+  Builder->CreateCall(getHybridRetainFunction(), {headerPtr},
+                      buildArcOpLabel(label, "array.retain.call"));
+  return arrayValue;
+}
+
+static void emitArrayReleaseValue(llvm::Value *arrayValue,
+                                  std::string_view label) {
+  llvm::Value *headerPtr =
+      computeArrayHeaderPointer(arrayValue,
+                                buildArcOpLabel(label, "array.header"));
+  if (!headerPtr)
+    return;
+
+  const ArcDebugOptions &arcDebug = CG.arcDebug;
+  if (arcDebug.runtimeTracing) {
+    llvm::Value *labelConst = Builder->CreateGlobalString(
+        std::string(label), buildArcOpLabel(label, "array.trace.label"));
+    Builder->CreateCall(getHybridArcTraceLabelFunction(), {labelConst});
+  }
+  if (arcDebug.runtimeVerify) {
+    Builder->CreateCall(getHybridArcVerifyRuntimeFunction(), {headerPtr});
+  }
+  Builder->CreateCall(getHybridReleaseFunction(), {headerPtr});
+}
+
 static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
                                   std::string_view label) {
   if (!value)
     return nullptr;
   if (!info.requiresARC() || info.isAlias())
     return value;
+  if (info.isArray)
+    return emitArrayRetainValue(value, label);
   if (info.isSmartPointer())
     return value;
   if (!value->getType()->isPointerTy())
@@ -2249,6 +2443,11 @@ static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
     return;
   if (!info.requiresARC() || info.isAlias())
     return;
+
+  if (info.isArray) {
+    emitArrayReleaseValue(value, label);
+    return;
+  }
 
   if (info.isSmartPointer()) {
     const bool isConcrete = typeInfoIsConcrete(info);
@@ -2314,7 +2513,8 @@ static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
 static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
                                      llvm::Value *incoming,
                                      const TypeInfo &info,
-                                     std::string_view label) {
+                                     std::string_view label,
+                                     bool incomingIsTemporary) {
   if (!storagePtr || !incoming) {
     if (storagePtr)
       Builder->CreateStore(incoming, storagePtr);
@@ -2328,8 +2528,11 @@ static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
   llvm::Type *storedTy = incoming->getType();
   llvm::Value *current = Builder->CreateLoad(
       storedTy, storagePtr, buildArcOpLabel(label, "managed.load.old"));
-  llvm::Value *retained =
-      emitArcRetain(incoming, info, buildArcOpLabel(label, "managed.retain"));
+  llvm::Value *retained = incoming;
+  if (!incomingIsTemporary) {
+    retained = emitArcRetain(
+        incoming, info, buildArcOpLabel(label, "managed.retain"));
+  }
   emitArcRelease(current, info, buildArcOpLabel(label, "managed.release"));
   Builder->CreateStore(retained, storagePtr);
   return retained;
@@ -2363,7 +2566,7 @@ static void drainArcSlots(const std::vector<ARCLifetimeSlot> &slots,
     if (!storedTy)
       continue;
     const bool storedIsPointer = storedTy->isPointerTy();
-    if (slot.type.requiresARC() && storedIsPointer) {
+    if (slot.type.requiresARC()) {
       llvm::Value *current = Builder->CreateLoad(
           storedTy, slot.storage, buildArcOpLabel(label, "scope.load"));
       emitArcRelease(current, slot.type,
@@ -3402,6 +3605,7 @@ static bool emitConstructorInitializers(const std::string &typeKey,
     llvm::Value *fieldValue = init.arguments.front()->codegen();
     if (!fieldValue)
       return false;
+    const bool fieldIsTemporary = init.arguments.front()->isTemporary();
 
     const std::string &fieldTypeName = fieldTypeIt->second;
     if (fieldLLVMType && fieldValue->getType() != fieldLLVMType)
@@ -3410,7 +3614,8 @@ static bool emitConstructorInitializers(const std::string &typeKey,
     TypeInfo fieldInfo = makeTypeInfo(fieldTypeName);
     finalizeTypeInfoMetadata(fieldInfo);
     emitManagedStore(fieldPtr, fieldValue, fieldInfo,
-                     typeKey + "." + init.target + ".ctorinit");
+                     typeKey + "." + init.target + ".ctorinit",
+                     fieldIsTemporary);
     noteMemberAssignment(typeKey, init.target, false);
   }
 
@@ -7134,58 +7339,95 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     dimensionSizes.resize(outerRank, 0);
 
   size_t ArraySize = flatElements.size();
-
-  bool useGlobalStorage = false;
-  llvm::Function *CurrentFunction = nullptr;
-  if (auto *CurrentBB = Builder->GetInsertBlock()) {
-    CurrentFunction = CurrentBB->getParent();
-    if (CurrentFunction && CurrentFunction->getName() == "__hybrid_top_level")
-      useGlobalStorage = true;
-  }
-
-  llvm::Value *ArrayDataPtr = nullptr;
-  llvm::ArrayType *ArrayMemType = llvm::ArrayType::get(ElemType, ArraySize);
-
-  static unsigned GlobalArrayLiteralCounter = 0;
-
   llvm::Function *ContainingFunction =
       Builder->GetInsertBlock() ? Builder->GetInsertBlock()->getParent()
                                  : nullptr;
 
-  if (ArraySize == 0) {
-    ArrayDataPtr = llvm::ConstantPointerNull::get(llvm::PointerType::get(*TheContext, 0));
-  } else if (useGlobalStorage) {
-    std::string GlobalName = "__array_literal_" + std::to_string(GlobalArrayLiteralCounter++);
-    llvm::GlobalVariable *GlobalArray = new llvm::GlobalVariable(
-        *TheModule, ArrayMemType, false, llvm::GlobalValue::PrivateLinkage,
-        llvm::ConstantAggregateZero::get(ArrayMemType), GlobalName);
+  std::vector<llvm::Value *> elementValues(flatElements.size(), nullptr);
+  const bool elementTypeLocked = TargetElementType != nullptr;
+  if (ArraySize > 0) {
+    llvm::Value *firstVal = flatElements[0]->codegen();
+    if (!firstVal)
+      return nullptr;
+    elementValues[0] = firstVal;
+    if (!ElemType) {
+      ElemType = firstVal->getType();
+    } else if (!elementTypeLocked &&
+               (firstVal->getType() != ElemType ||
+                dynamic_cast<ArrayExprAST *>(flatElements[0]))) {
+      ElemType = firstVal->getType();
+    }
+    if (elementTypeName.empty() && !flatElements[0]->getTypeName().empty())
+      elementTypeName = flatElements[0]->getTypeName();
+    if (cleanElementTypeName.empty())
+      cleanElementTypeName = sanitizeBaseTypeName(elementTypeName);
+  }
 
-    llvm::Value *Zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
-    ArrayDataPtr = Builder->CreateInBoundsGEP(
-        ArrayMemType, GlobalArray, {Zero, Zero}, GlobalName + ".ptr");
-  } else {
-    llvm::ArrayType *LocalArrayTy = llvm::ArrayType::get(ElemType, ArraySize);
-    llvm::Value *LocalArray = createEntryAlloca(ContainingFunction, LocalArrayTy,
-                                               "arraytmp");
-    llvm::Value *Zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
-    ArrayDataPtr = Builder->CreateInBoundsGEP(
-        LocalArrayTy, LocalArray, {Zero, Zero}, "arraytmp.ptr");
+  llvm::Value *ArrayDataPtr =
+      llvm::ConstantPointerNull::get(pointerType(ElemType));
+  if (ArraySize > 0) {
+    uint64_t elemSize = getTypeSizeInBytes(ElemType);
+    if (elemSize == 0 && !elementValues.empty() &&
+        elementValues[0] && TheModule) {
+      const llvm::DataLayout &DL = TheModule->getDataLayout();
+      elemSize = DL.getTypeAllocSize(elementValues[0]->getType());
+    }
+    if (elemSize == 0) {
+      reportCompilerError("Unable to determine element size for array literal");
+      return nullptr;
+    }
+    llvm::Value *elemSizeVal =
+        llvm::ConstantInt::get(getSizeType(), elemSize);
+    llvm::Value *lengthSize = llvm::ConstantInt::get(
+        getSizeType(), static_cast<std::uint64_t>(ArraySize));
+    llvm::Value *descriptorPtr =
+        Builder->CreateCall(getHybridArrayDescriptorFunction(), {},
+                            "array.literal.descriptor");
+    TypeInfo elementInfo = makeTypeInfo(elementTypeName);
+    finalizeTypeInfoMetadata(elementInfo);
+    llvm::Value *releaseFn = selectArrayElementReleaseFunction(
+        elementInfo, "array.literal.releasefn");
+    llvm::Value *rawPtr = Builder->CreateCall(
+        getHybridAllocArrayFunction(),
+        {elemSizeVal, lengthSize, descriptorPtr}, "array.literal.raw");
+
+    if (!llvm::isa<llvm::ConstantPointerNull>(releaseFn)) {
+      llvm::Value *releaseFnCasted = releaseFn;
+      if (releaseFn->getType() != getArrayReleaseCallbackPointerType()) {
+        releaseFnCasted = Builder->CreateBitCast(
+            releaseFn, getArrayReleaseCallbackPointerType(),
+            "array.literal.releasefn.cast");
+      }
+      Builder->CreateCall(getHybridArraySetReleaseFunction(),
+                          {rawPtr, releaseFnCasted});
+    }
+
+    llvm::Value *rawBytePtr = Builder->CreateBitCast(
+        rawPtr, pointerType(llvm::Type::getInt8Ty(*TheContext)),
+        "array.literal.byteptr");
+    llvm::Value *payloadBytePtr = Builder->CreateInBoundsGEP(
+        llvm::Type::getInt8Ty(*TheContext), rawBytePtr,
+        llvm::ConstantInt::get(getSizeType(), getArrayPayloadOffsetBytes()),
+        "array.literal.payload.byte");
+    ArrayDataPtr = Builder->CreateBitCast(
+        payloadBytePtr, pointerType(ElemType), "array.literal.payload");
   }
 
   // Store each element
   for (size_t i = 0; i < flatElements.size(); ++i) {
     ExprAST *ElementExpr = flatElements[i];
-    llvm::Value *ElemVal = nullptr;
-    if (auto *Num = dynamic_cast<NumberExprAST*>(ElementExpr)) {
-      ElemVal = Num->codegen_with_target(ElemType);
-    } else if (auto *Char = dynamic_cast<CharExprAST*>(ElementExpr)) {
-      ElemVal = Char->codegen_with_target(ElemType, cleanElementTypeName);
-    } else {
-      ElemVal = ElementExpr->codegen();
+    llvm::Value *ElemVal = elementValues[i];
+    if (!ElemVal) {
+      if (auto *Num = dynamic_cast<NumberExprAST*>(ElementExpr)) {
+        ElemVal = Num->codegen_with_target(ElemType);
+      } else if (auto *Char = dynamic_cast<CharExprAST*>(ElementExpr)) {
+        ElemVal = Char->codegen_with_target(ElemType, cleanElementTypeName);
+      } else {
+        ElemVal = ElementExpr->codegen();
+      }
+      if (!ElemVal)
+        return nullptr;
     }
-
-    if (!ElemVal)
-      return nullptr;
 
     ElemVal = castToType(ElemVal, ElemType, cleanElementTypeName);
 
@@ -7217,22 +7459,11 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   }
 
   llvm::Value *ArrayStructPtr = nullptr;
-  if (useGlobalStorage) {
-    static unsigned GlobalArrayStructCounter = 0;
-    std::string StructName =
-        "__array_struct_" + std::to_string(GlobalArrayStructCounter++);
-    auto *GlobalStruct = new llvm::GlobalVariable(
-        *TheModule, ArrayStructType, false, llvm::GlobalValue::PrivateLinkage,
-        llvm::ConstantAggregateZero::get(ArrayStructType), StructName);
-    Builder->CreateStore(ArrayValue, GlobalStruct);
-    ArrayStructPtr = GlobalStruct;
-  } else {
-    if (!ContainingFunction)
-      return LogErrorV("array literal requires function context");
-    ArrayStructPtr =
-        createEntryAlloca(ContainingFunction, ArrayStructType, "arrayStruct");
-    Builder->CreateStore(ArrayValue, ArrayStructPtr);
-  }
+  if (!ContainingFunction)
+    return LogErrorV("array literal requires function context");
+  ArrayStructPtr =
+      createEntryAlloca(ContainingFunction, ArrayStructType, "arrayStruct");
+  Builder->CreateStore(ArrayValue, ArrayStructPtr);
 
   if (DeclaredArrayInfo) {
     setTypeName(typeNameFromInfo(*DeclaredArrayInfo));
@@ -7243,6 +7474,7 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     setTypeName(arrayTypeName);
   }
 
+  markTemporary();
   return Builder->CreateLoad(ArrayStructType, ArrayStructPtr,
                              "arrayStructVal");
 }
@@ -9038,6 +9270,7 @@ llvm::Value *BinaryExprAST::codegen() {
       {
         const ExprAST *rhsCheckExpr = unwrapRefExpr(getRHS());
         bool rhsIsNullable = expressionIsNullable(rhsCheckExpr);
+        const bool rhsIsTemporary = getRHS() && getRHS()->isTemporary();
         auto *rhsVarExpr = dynamic_cast<VariableExprAST *>(getRHS());
       if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
         // Simple variable assignment - check local first, then global
@@ -9088,7 +9321,8 @@ llvm::Value *BinaryExprAST::codegen() {
             }
           }
           if (info && info->requiresARC() && !info->isSmartPointer())
-            emitManagedStore(Variable, R, *info, LHSE->getName());
+            emitManagedStore(Variable, R, *info, LHSE->getName(),
+                             rhsIsTemporary);
           else
             Builder->CreateStore(R, Variable);
           updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
@@ -9142,7 +9376,7 @@ llvm::Value *BinaryExprAST::codegen() {
             }
           }
           if (info && info->requiresARC() && !info->isSmartPointer())
-            emitManagedStore(GV, R, *info, LHSE->getName());
+            emitManagedStore(GV, R, *info, LHSE->getName(), rhsIsTemporary);
           else
             Builder->CreateStore(R, GV);
           updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
@@ -9168,6 +9402,8 @@ llvm::Value *BinaryExprAST::codegen() {
         auto *arrayElementRHSVar =
             dynamic_cast<VariableExprAST *>(getRHS());
 
+        const bool rhsIsTemporary = getRHS() && getRHS()->isTemporary();
+
         if (rhsIsNullable && !access.elementNullable) {
           return LogErrorV("Cannot assign nullable value to non-nullable array element");
         }
@@ -9182,7 +9418,15 @@ llvm::Value *BinaryExprAST::codegen() {
 
         if (access.elementTypeInfo.requiresARC() &&
             !access.elementTypeInfo.isSmartPointer()) {
-          emitManagedStore(ElemPtr, R, access.elementTypeInfo, "array");
+          if (rhsIsTemporary) {
+            llvm::Value *currentVal = Builder->CreateLoad(
+                ElemType, ElemPtr, buildArcOpLabel("array", "temp.load.old"));
+            emitArcRelease(currentVal, access.elementTypeInfo,
+                           buildArcOpLabel("array", "temp.release.old"));
+            Builder->CreateStore(R, ElemPtr);
+          } else {
+            emitManagedStore(ElemPtr, R, access.elementTypeInfo, "array");
+          }
         } else {
           Builder->CreateStore(R, ElemPtr);
         }
@@ -9229,7 +9473,7 @@ llvm::Value *BinaryExprAST::codegen() {
         if (fieldInfo.declaredFieldType.requiresARC() &&
             !fieldInfo.declaredFieldType.isSmartPointer()) {
           emitManagedStore(fieldInfo.fieldPtr, R, fieldInfo.declaredFieldType,
-                           LHSMA->getMemberName());
+                           LHSMA->getMemberName(), rhsIsTemporary);
         } else {
           Builder->CreateStore(R, fieldInfo.fieldPtr);
         }
@@ -10190,6 +10434,8 @@ llvm::Value *NewExprAST::codegen() {
       reportCompilerError("Unknown array element type '" + elementTypeName + "'");
       return nullptr;
     }
+    TypeInfo elementInfo = makeTypeInfo(elementTypeName);
+    finalizeTypeInfoMetadata(elementInfo);
 
     llvm::Value *lengthVal = nullptr;
     if (ArraySizeExpr) {
@@ -10230,23 +10476,36 @@ llvm::Value *NewExprAST::codegen() {
       return nullptr;
     }
 
-    uint64_t headerSize = DL.getTypeAllocSize(getArcHeaderType());
+    llvm::Value *descriptorPtr =
+        Builder->CreateCall(getHybridArrayDescriptorFunction(), {},
+                            "new.array.descriptor");
+    llvm::Value *releaseFn =
+        selectArrayElementReleaseFunction(elementInfo, "new.array.releasefn");
     llvm::Value *elemSizeVal =
         llvm::ConstantInt::get(getSizeType(), elemSize);
     llvm::Value *lengthSize =
         Builder->CreateZExt(length32, getSizeType(), "new.array.len");
-    llvm::Value *descriptorNull =
-        llvm::ConstantPointerNull::get(pointerType(getTypeDescriptorType()));
     llvm::Value *rawPtr = Builder->CreateCall(
         getHybridAllocArrayFunction(),
-        {elemSizeVal, lengthSize, descriptorNull}, "new.array.raw");
+        {elemSizeVal, lengthSize, descriptorPtr}, "new.array.raw");
+
+    if (!llvm::isa<llvm::ConstantPointerNull>(releaseFn)) {
+      llvm::Value *releaseFnCasted = releaseFn;
+      if (releaseFn->getType() != getArrayReleaseCallbackPointerType()) {
+        releaseFnCasted = Builder->CreateBitCast(
+            releaseFn, getArrayReleaseCallbackPointerType(),
+            "new.array.releasefn.cast");
+      }
+      Builder->CreateCall(getHybridArraySetReleaseFunction(),
+                          {rawPtr, releaseFnCasted});
+    }
 
     llvm::Value *rawBytePtr = Builder->CreateBitCast(
         rawPtr, pointerType(llvm::Type::getInt8Ty(*TheContext)),
         "new.array.byteptr");
     llvm::Value *payloadBytePtr = Builder->CreateInBoundsGEP(
         llvm::Type::getInt8Ty(*TheContext), rawBytePtr,
-        llvm::ConstantInt::get(getSizeType(), headerSize),
+        llvm::ConstantInt::get(getSizeType(), getArrayPayloadOffsetBytes()),
         "new.array.payload.byte");
     llvm::Value *dataPtr = Builder->CreateBitCast(
         payloadBytePtr, pointerType(elemType), "new.array.payload");
@@ -10268,6 +10527,7 @@ llvm::Value *NewExprAST::codegen() {
       arrayValue = Builder->CreateInsertValue(arrayValue, dimVal, {2u, i});
     }
 
+    markTemporary();
     setTypeName(typeNameFromInfo(arrayInfo));
     return arrayValue;
   }
@@ -10332,6 +10592,7 @@ llvm::Value *NewExprAST::codegen() {
     return nullptr;
 
   Builder->CreateStore(initValue, typedPtr);
+  markTemporary();
   setTypeName(targetType);
   return typedPtr;
 }
@@ -11840,8 +12101,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
           llvm::PointerType *ptrTy = llvm::cast<llvm::PointerType>(VarType);
           Builder->CreateStore(llvm::ConstantPointerNull::get(ptrTy), Alloca);
         }
-        if (declaredInfo.requiresARC() && !declaredInfo.isSmartPointer() &&
-            VarType->isPointerTy()) {
+        if (declaredInfo.requiresARC() && !declaredInfo.isSmartPointer()) {
           Builder->CreateStore(llvm::Constant::getNullValue(VarType), Alloca);
         }
         bool nullabilityChecked = false;
@@ -11856,6 +12116,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
         };
 
         bool initializedBySmartPointerHelper = false;
+        bool initializerIsTemporary = false;
         if (getInitializer() && declaredInfo.isSmartPointer()) {
           if (auto *varInit =
                   dynamic_cast<VariableExprAST *>(getInitializer())) {
@@ -11874,6 +12135,8 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
           InitVal = generateInitializerValue(getInitializer());
           if (!InitVal)
             return nullptr;
+          initializerIsTemporary =
+              getInitializer() && getInitializer()->isTemporary();
         }
 
         // Cast and store the initial value if present
@@ -11923,13 +12186,13 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
                     "initializer for '" + getName() + "'"))
               return nullptr;
             InitVal = castToType(InitVal, VarType, getType());
-            const bool initializerIsTemporary =
-                getInitializer() && getInitializer()->isTemporary();
             if (declaredInfo.requiresARC()) {
-              if (initializerIsTemporary)
+              if (initializerIsTemporary) {
                 Builder->CreateStore(InitVal, Alloca);
-              else
-                emitManagedStore(Alloca, InitVal, declaredInfo, getName());
+              } else {
+                emitManagedStore(Alloca, InitVal, declaredInfo, getName(),
+                                 initializerIsTemporary);
+              }
             } else {
               Builder->CreateStore(InitVal, Alloca);
             }
@@ -13298,18 +13561,26 @@ llvm::Function *FunctionAST::codegen() {
     bool isRefParam = (i < Params.size() && Params[i].IsRef);
 
     llvm::AllocaInst *Alloca = Builder->CreateAlloca(Arg.getType(), nullptr, Arg.getName());
-    Builder->CreateStore(&Arg, Alloca);
-    NamedValues[std::string(Arg.getName())] = Alloca;
-
     if (i < Params.size()) {
       TypeInfo paramInfo = applyActiveTypeBindings(Params[i].DeclaredType);
       if (isRefParam) {
         paramInfo.refStorage = RefStorageClass::RefAlias;
         paramInfo.declaredRef = true;
       }
+      if (!isRefParam && typeNeedsLifetimeTracking(paramInfo)) {
+        llvm::Value *zeroInit = llvm::Constant::getNullValue(Arg.getType());
+        Builder->CreateStore(zeroInit, Alloca);
+        emitManagedStore(Alloca, &Arg, paramInfo, Arg.getName().str());
+      } else {
+        Builder->CreateStore(&Arg, Alloca);
+      }
+      NamedValues[std::string(Arg.getName())] = Alloca;
       rememberLocalType(std::string(Arg.getName()), paramInfo);
       if (!isRefParam)
         registerArcLocal(std::string(Arg.getName()), Alloca, paramInfo, false);
+    } else {
+      Builder->CreateStore(&Arg, Alloca);
+      NamedValues[std::string(Arg.getName())] = Alloca;
     }
     ++i;
   }

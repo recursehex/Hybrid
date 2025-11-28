@@ -26,6 +26,22 @@ typedef struct {
     const HybridTypeDescriptor *descriptor;
 } HybridARCHeader;
 
+typedef struct {
+    HybridARCHeader counts;
+    size_t length;
+    size_t elementSize;
+    void (*elementRelease)(void *);
+} HybridArrayHeader;
+
+void hybrid_array_dealloc(void *obj);
+
+static HybridTypeDescriptor FallbackDescriptor = {
+    "<anonymous>", NULL, NULL, 0, NULL, 0, NULL};
+static HybridTypeDescriptor ArrayDescriptor = {
+    "array", NULL, NULL, 0, NULL, 0, hybrid_array_dealloc};
+
+void hybrid_release(void *obj);
+
 static size_t hybrid_strlen16(const uint16_t *str) {
     if (!str) {
         return 0;
@@ -220,6 +236,45 @@ uint16_t *__hybrid_string_from_char32(int32_t codepoint) {
     return result;
 }
 
+size_t hybrid_array_payload_offset(void) {
+    return sizeof(HybridArrayHeader);
+}
+
+const HybridTypeDescriptor *hybrid_array_type_descriptor(void) {
+    return &ArrayDescriptor;
+}
+
+void hybrid_array_set_release(void *obj, void (*releaseFn)(void *)) {
+    if (!obj) {
+        return;
+    }
+    HybridArrayHeader *header = (HybridArrayHeader *)obj;
+    header->elementRelease = releaseFn;
+}
+
+void hybrid_array_release_ref_slot(void *slot) {
+    if (!slot) {
+        return;
+    }
+    void *value = *(void **)slot;
+    if (value) {
+        hybrid_release(value);
+    }
+}
+
+void hybrid_array_release_array_slot(void *slot) {
+    if (!slot) {
+        return;
+    }
+    void *payloadPtr = *(void **)slot;
+    if (!payloadPtr) {
+        return;
+    }
+    unsigned char *bytePtr = (unsigned char *)payloadPtr;
+    bytePtr -= hybrid_array_payload_offset();
+    hybrid_release((void *)bytePtr);
+}
+
 const void **hybrid_lookup_interface_table(const HybridTypeDescriptor *typeDesc,
                                            const HybridTypeDescriptor *interfaceDesc) {
     const HybridTypeDescriptor *current = typeDesc;
@@ -265,6 +320,51 @@ int __hybrid_debug_strong_count(void *object) {
 
 void hybrid_dealloc(void *obj);
 
+void *hybrid_alloc_object(size_t totalSize,
+                          const HybridTypeDescriptor *descriptor) {
+    if (totalSize == 0 || totalSize < sizeof(HybridARCHeader))
+        return NULL;
+    void *memory = calloc(1, totalSize);
+    if (!memory)
+        return NULL;
+    HybridARCHeader *header = (HybridARCHeader *)memory;
+    header->strongCount = 1;
+    header->weakCount = 1;
+    header->descriptor = descriptor ? descriptor : &FallbackDescriptor;
+    return memory;
+}
+
+void *hybrid_alloc_array(size_t elementSize, size_t elementCount,
+                         const HybridTypeDescriptor *descriptor) {
+    if (elementSize == 0)
+        return NULL;
+    if (elementCount > 0 &&
+        elementSize > SIZE_MAX / elementCount)
+        return NULL;
+    size_t payloadSize = elementSize * elementCount;
+    size_t totalSize = sizeof(HybridArrayHeader) + payloadSize;
+    HybridArrayHeader *header = (HybridArrayHeader *)calloc(1, totalSize);
+    if (!header)
+        return NULL;
+    header->counts.strongCount = 1;
+    header->counts.weakCount = 1;
+    header->counts.descriptor = descriptor ? descriptor : hybrid_array_type_descriptor();
+    header->length = elementCount;
+    header->elementSize = elementSize;
+    header->elementRelease = NULL;
+    return (void *)header;
+}
+
+void *hybrid_new_object(size_t totalSize,
+                        const HybridTypeDescriptor *descriptor) {
+    return hybrid_alloc_object(totalSize, descriptor);
+}
+
+void *hybrid_new_array(size_t elementSize, size_t elementCount,
+                       const HybridTypeDescriptor *descriptor) {
+    return hybrid_alloc_array(elementSize, elementCount, descriptor);
+}
+
 void *hybrid_retain(void *obj) {
     if (!obj)
         return NULL;
@@ -299,6 +399,20 @@ void hybrid_dealloc(void *obj) {
         header->weakCount -= 1;
     if (header->weakCount == 0)
         free(obj);
+}
+
+void hybrid_array_dealloc(void *obj) {
+    if (!obj)
+        return;
+    HybridArrayHeader *header = (HybridArrayHeader *)obj;
+    if (header->elementRelease) {
+        unsigned char *payload =
+            ((unsigned char *)obj) + hybrid_array_payload_offset();
+        for (size_t i = 0; i < header->length; ++i) {
+            header->elementRelease(payload + i * header->elementSize);
+        }
+    }
+    hybrid_dealloc(obj);
 }
 
 typedef struct {
