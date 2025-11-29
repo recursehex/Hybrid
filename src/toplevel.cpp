@@ -41,10 +41,10 @@ void HandleDefinition() {
       FnIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
     } else {
-      fprintf(stderr, "Error: Failed to generate IR for function\n");
+      reportCompilerError("Failed to generate IR for function");
     }
   } else {
-    fprintf(stderr, "Error: Failed to parse function definition\n");
+    reportCompilerError("Failed to parse function definition");
     // Skip token for error recovery.
     getNextToken();
   }
@@ -234,10 +234,10 @@ void HandleSwitchStatement() {
       SwitchIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
     } else {
-      fprintf(stderr, "Error: Failed to generate IR for switch statement\n");
+      reportCompilerError("Failed to generate IR for switch statement");
     }
   } else {
-    fprintf(stderr, "Error: Failed to parse switch statement\n");
+    reportCompilerError("Failed to parse switch statement");
     // Skip token for error recovery.
     getNextToken();
   }

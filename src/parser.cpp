@@ -682,7 +682,7 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
       }
 
       if (CurTok != ']') {
-        fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
+        reportCompilerError("Expected ']' after '[' in array type");
         return false;
       }
 
@@ -700,7 +700,8 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
 
     if (CurTok == tok_at && !pointerSeen) {
       if (!isInUnsafeContext()) {
-        fprintf(stderr, "Error: Pointer types can only be used within unsafe blocks or unsafe functions\n");
+        reportCompilerError(
+            "Pointer types can only be used within unsafe blocks or unsafe functions");
         return false;
       }
 
@@ -709,13 +710,13 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
 
       if (CurTok == tok_number) {
         if (!LexedNumericLiteral.isInteger() || !LexedNumericLiteral.fitsInUnsignedBits(32)) {
-          fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+          reportCompilerError("Pointer level must be a positive integer");
           return false;
         }
 
         uint64_t level = LexedNumericLiteral.getUnsignedValue();
         if (level == 0) {
-          fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+          reportCompilerError("Pointer level must be a positive integer");
           return false;
         }
 
@@ -738,7 +739,7 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
       }
 
       if (CurTok != ']') {
-        fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
+        reportCompilerError("Expected ']' after '[' in array type");
         return false;
       }
 
@@ -1640,7 +1641,16 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   }
   
   switch (CurTok) {
+  case tok_error:
+    // Token already produced a diagnostic at the lexer layer; just advance.
+    getNextToken();
+    return nullptr;
   default:
+    // Avoid cascading generic expression errors immediately after a lexer error.
+    if (currentParser().previousToken == tok_error) {
+      RecoverAfterExpressionError();
+      return nullptr;
+    }
     return LogError(
         "Unexpected token while parsing an expression",
         "Insert an expression or remove the unexpected token.");
@@ -3128,6 +3138,13 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
     getNextToken();
   
   while (CurTok != '}' && CurTok != tok_eof) {
+    if (currentParser().hadError) {
+      // Stop cascading errors inside this block; fast-forward to the end.
+      while (CurTok != '}' && CurTok != tok_eof)
+        getNextToken();
+      break;
+    }
+
     // Skip newlines between statements
     if (CurTok == tok_newline) {
       getNextToken();
@@ -3137,6 +3154,12 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
     int StartTok = CurTok;
     auto Stmt = ParseStatement();
     if (!Stmt) {
+      if (currentParser().hadError) {
+        // After a reported error, skip the rest of the block to avoid cascades.
+        while (CurTok != '}' && CurTok != tok_eof)
+          getNextToken();
+        break;
+      }
       // Check if hit closing brace
       if (CurTok == '}')
         break;  // Normal end of block
@@ -3189,7 +3212,7 @@ bool ParseTypeIdentifier(bool isRef) {
         if (auto Arg = ParseExpression()) {
           Args.push_back(std::move(Arg));
         } else {
-          fprintf(stderr, "Error: Expected expression in constructor arguments\n");
+          reportCompilerError("Expected expression in constructor arguments");
           return false;
         }
 
@@ -3198,7 +3221,7 @@ bool ParseTypeIdentifier(bool isRef) {
           break;
 
         if (CurTok != ',') {
-          fprintf(stderr, "Error: Expected ')' or ',' in constructor arguments\n");
+          reportCompilerError("Expected ')' or ',' in constructor arguments");
           return false;
         }
         getNextToken(); // eat ','
@@ -3207,7 +3230,7 @@ bool ParseTypeIdentifier(bool isRef) {
     }
 
     if (CurTok != ')') {
-      fprintf(stderr, "Error: Expected ')' after constructor arguments\n");
+      reportCompilerError("Expected ')' after constructor arguments");
       return false;
     }
     getNextToken(); // eat ')'
@@ -3218,14 +3241,14 @@ bool ParseTypeIdentifier(bool isRef) {
       CallIR->print(llvm::errs());
       fprintf(stderr, "\n");
     } else {
-      fprintf(stderr, "Error: Failed to generate struct instantiation\n");
+      reportCompilerError("Failed to generate struct instantiation");
       return false;
     }
     return true;
   }
 
   if (CurTok != tok_identifier) {
-    fprintf(stderr, "Error: Expected identifier after type\n");
+    reportCompilerError("Expected identifier after type");
     return false;
   }
 
@@ -3261,18 +3284,18 @@ bool ParseTypeIdentifier(bool isRef) {
         }
 
         if (!IsValidType()) {
-          fprintf(stderr, "Error: Expected parameter type\n");
+          reportCompilerError("Expected parameter type");
           return false;
         }
 
         std::string ParamType = ParseCompleteType();
         if (ParamType.empty()) {
-          fprintf(stderr, "Error: Failed to parse parameter type\n");
+          reportCompilerError("Failed to parse parameter type");
           return false;
         }
 
         if (CurTok != tok_identifier) {
-          fprintf(stderr, "Error: Expected parameter name\n");
+          reportCompilerError("Expected parameter name");
           return false;
         }
 
@@ -3294,7 +3317,7 @@ bool ParseTypeIdentifier(bool isRef) {
         }
 
         if (CurTok != ',') {
-          fprintf(stderr, "Error: Expected ',' or ')' in parameter list\n");
+          reportCompilerError("Expected ',' or ')' in parameter list");
           return false;
         }
 
@@ -3314,9 +3337,13 @@ bool ParseTypeIdentifier(bool isRef) {
     // Parse the body
     auto Body = ParseBlock();
     if (!Body) {
-      fprintf(stderr, "Error: Expected function body\n");
+      if (!currentParser().hadError)
+        reportCompilerError("Expected function body");
       return false;
     }
+
+    if (currentParser().hadError)
+      return false;
     
     auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     if (Fn->getProto()->getGenericParameters().empty()) {
@@ -3326,7 +3353,7 @@ bool ParseTypeIdentifier(bool isRef) {
         FnIR->print(llvm::errs());
         fprintf(stderr, "\n");
       } else {
-        fprintf(stderr, "Error: Failed to generate IR for function\n");
+        reportCompilerError("Failed to generate IR for function");
       }
     } else {
       RegisterGenericFunctionTemplate(std::move(Fn));
@@ -3349,7 +3376,7 @@ bool ParseTypeIdentifier(bool isRef) {
 
     auto Initializer = ParseExpression();
     if (!Initializer) {
-      fprintf(stderr, "Error: Expected expression after '='\n");
+      reportCompilerError("Expected expression after '='");
       return false;
     }
 
@@ -3378,12 +3405,12 @@ bool ParseTypeIdentifier(bool isRef) {
         fprintf(stderr, "\n");
       }
     } else {
-      fprintf(stderr, "Error: Failed to generate IR for variable declaration\n");
+      reportCompilerError("Failed to generate IR for variable declaration");
       return false;
     }
     return true;
   } else {
-    fprintf(stderr, "Error: Expected '(' or '=' after identifier in top-level declaration\n");
+    reportCompilerError("Expected '(' or '=' after identifier in top-level declaration");
     return false;
   }
 }

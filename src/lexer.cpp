@@ -6,7 +6,6 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdint>
-#include <iostream>
 
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ConvertUTF.h"
@@ -33,7 +32,7 @@ static bool buildIntegerLiteral(const std::string &digits,
                                 const std::string &spelling,
                                 NumericLiteral &outLiteral) {
   if (digits.empty()) {
-    std::cerr << "Error: Numeric literal '" << spelling << "' is missing digits\n";
+    reportCompilerError("Numeric literal '" + spelling + "' is missing digits");
     return false;
   }
 
@@ -41,8 +40,8 @@ static bool buildIntegerLiteral(const std::string &digits,
 
   llvm::APInt value(parseBits, digits, radix);
   if (value.getActiveBits() > 64) {
-    std::cerr << "Error: Integer literal '" << spelling
-              << "' exceeds maximum supported 64-bit range\n";
+    reportCompilerError("Integer literal '" + spelling +
+                        "' exceeds maximum supported 64-bit range");
     return false;
   }
 
@@ -61,24 +60,26 @@ static bool buildFloatingLiteral(const std::string &literal,
 
   if (!statusOr) {
     llvm::consumeError(statusOr.takeError());
-    std::cerr << "Error: Invalid floating-point literal '" << literal << "'\n";
+    reportCompilerError("Invalid floating-point literal '" + literal + "'");
     return false;
   }
 
   llvm::APFloat::opStatus status = *statusOr;
 
   if (status & llvm::APFloat::opInvalidOp) {
-    std::cerr << "Error: Invalid floating-point literal '" << literal << "'\n";
+    reportCompilerError("Invalid floating-point literal '" + literal + "'");
     return false;
   }
 
   if (status & llvm::APFloat::opOverflow) {
-    std::cerr << "Error: Floating-point literal '" << literal << "' overflowed the representable range\n";
+    reportCompilerError("Floating-point literal '" + literal +
+                        "' overflowed the representable range");
     return false;
   }
 
   if (status & llvm::APFloat::opUnderflow) {
-    std::cerr << "Error: Floating-point literal '" << literal << "' underflowed the representable range\n";
+    reportCompilerError("Floating-point literal '" + literal +
+                        "' underflowed the representable range");
     return false;
   }
 
@@ -179,10 +180,10 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
   }
 
   if (digits.empty()) {
-    std::cerr << "Error: Numeric literal '0" << static_cast<char>(prefixChar)
-              << "' is missing digits\n";
-    LastChar = CurrentChar;
     lex.setTokenStart(tokenStart);
+    reportCompilerError("Numeric literal '0" + std::string(1, prefixChar) +
+                        "' is missing digits");
+    LastChar = CurrentChar;
     return tok_error;
   }
 
@@ -191,10 +192,10 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
     spelling += static_cast<char>(prefixChar);
     spelling += digits;
     spelling += static_cast<char>(CurrentChar);
-    std::cerr << "Error: Invalid digit '" << static_cast<char>(CurrentChar)
-              << "' in numeric literal '" << spelling << "'\n";
-    LastChar = CurrentChar;
     lex.setTokenStart(tokenStart);
+    reportCompilerError("Invalid digit '" + std::string(1, static_cast<char>(CurrentChar)) +
+                        "' in numeric literal '" + spelling + "'");
+    LastChar = CurrentChar;
     return tok_error;
   }
 
@@ -220,7 +221,8 @@ static bool prepareInterpolatedLiteralSegment(LexerContext &lex, int &LastChar) 
 
   while (true) {
     if (LastChar == EOF) {
-      std::cerr << "Error: Unterminated interpolated string literal\n";
+      lex.setTokenStart(segmentStart);
+      reportCompilerError("Unterminated interpolated string literal");
       lex.inInterpolatedString = false;
       return false;
     }
@@ -551,7 +553,7 @@ int gettok() {
         LastChar = lex.consumeChar();
       }
       if (!isDecimalDigit(LastChar)) {
-        std::cerr << "Error: Invalid exponent in floating-point literal '" << literal << "'\n";
+        reportCompilerError("Invalid exponent in floating-point literal '" + literal + "'");
         return tok_error;
       }
       while (isDecimalDigit(LastChar)) {
@@ -594,7 +596,7 @@ int gettok() {
           LastChar = lex.consumeChar();
         }
         if (!isDecimalDigit(LastChar)) {
-          std::cerr << "Error: Invalid exponent in floating-point literal '" << literal << "'\n";
+          reportCompilerError("Invalid exponent in floating-point literal '" + literal + "'");
           lex.setTokenStart(start);
           return tok_error;
         }
@@ -708,7 +710,11 @@ string_continue:
           }
           // Validate Unicode code point: reject UTF-16 surrogates (U+D800 to U+DFFF)
           if (unicode >= 0xD800 && unicode <= 0xDFFF) {
-            fprintf(stderr, "Error: Invalid Unicode code point U+%04X (UTF-16 surrogate)\n", unicode);
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer),
+                          "Invalid Unicode code point U+%04X (UTF-16 surrogate)",
+                          unicode);
+            reportCompilerError(buffer);
             lex.charLiteral = '?';
           } else {
             lex.charLiteral = unicode;
@@ -734,7 +740,10 @@ string_continue:
           // Validate Unicode code point
           // Valid range: U+0000 to U+10FFFF, excluding surrogates U+D800 to U+DFFF
           if (unicode > 0x10FFFF || (unicode >= 0xD800 && unicode <= 0xDFFF)) {
-            fprintf(stderr, "Error: Invalid Unicode code point U+%08X\n", unicode);
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer),
+                          "Invalid Unicode code point U+%08X", unicode);
+            reportCompilerError(buffer);
             lex.charLiteral = '?';
           } else {
             lex.charLiteral = unicode;
@@ -750,7 +759,7 @@ string_continue:
           utf8SequenceLength(static_cast<unsigned char>(utf8Bytes[0]));
 
       if (expectedLength == 0) {
-        std::cerr << "Error: Invalid UTF-8 start byte in character literal\n";
+        reportCompilerError("Invalid UTF-8 start byte in character literal");
         lex.charLiteral = '?';
         goto char_literal_end;
       }
@@ -758,12 +767,12 @@ string_continue:
       for (unsigned i = 1; i < expectedLength; ++i) {
         LastChar = lex.consumeChar();
         if (LastChar == EOF) {
-          std::cerr << "Error: Incomplete UTF-8 sequence in character literal\n";
+          reportCompilerError("Incomplete UTF-8 sequence in character literal");
           lex.charLiteral = '?';
           goto char_literal_end;
         }
         if ((LastChar & 0xC0) != 0x80) {
-          std::cerr << "Error: Invalid UTF-8 continuation byte in character literal\n";
+          reportCompilerError("Invalid UTF-8 continuation byte in character literal");
           lex.charLiteral = '?';
           goto char_literal_end;
         }
@@ -774,9 +783,9 @@ string_continue:
       std::string decodeError;
       if (!decodeSingleUTF8CodePoint(utf8Bytes, decoded, decodeError)) {
         if (!decodeError.empty())
-          std::cerr << "Error: " << decodeError << "\n";
+          reportCompilerError(decodeError);
         else
-          std::cerr << "Error: Invalid UTF-8 character literal\n";
+          reportCompilerError("Invalid UTF-8 character literal");
         lex.charLiteral = '?';
       } else {
         lex.charLiteral = decoded;
@@ -789,7 +798,7 @@ char_literal_end:
       LastChar = lex.consumeChar(); // eat closing '
       return tok_char_literal;
     }
-    std::cerr << "Error: Unterminated character literal\n";
+    reportCompilerError("Unterminated character literal");
     while (LastChar != EOF && LastChar != '\n' && LastChar != '\r' && LastChar != '\'')
       LastChar = lex.consumeChar();
     if (LastChar == '\'')

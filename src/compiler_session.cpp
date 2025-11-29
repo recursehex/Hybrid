@@ -124,11 +124,14 @@ SourceLocation LexerContext::lastCharLocation() const {
 
 static SourceLocation bestErrorLocation() {
   ParserContext &parser = currentParser();
+  SourceLocation lexerLoc = currentLexer().tokenStart();
+  if (lexerLoc.isValid())
+    return lexerLoc;
   if (parser.currentTokenLocation.isValid())
     return parser.currentTokenLocation;
   if (parser.previousTokenLocation.isValid())
     return parser.previousTokenLocation;
-  return currentLexer().tokenStart();
+  return {};
 }
 
 std::string describeTokenForDiagnostics(int token) {

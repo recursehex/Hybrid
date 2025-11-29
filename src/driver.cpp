@@ -19,6 +19,7 @@
 #include <system_error>
 #include <vector>
 #include <limits>
+#include <unistd.h>
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Module.h"
@@ -681,9 +682,11 @@ int main(int argc, char **argv) {
     if (hadFailure)
       exitCode = 1;
   } else {
-    SetInteractiveMode(true);
+    bool interactiveInput = isatty(fileno(stdin));
+    SetInteractiveMode(interactiveInput);
 
-    fprintf(stderr, "ready> ");
+    if (interactiveInput)
+      fprintf(stderr, "ready> ");
     getNextToken();
     MainLoop();
 
