@@ -70,14 +70,130 @@ static uint16_t *dup_utf16_from_utf8(const char *utf8) {
     if (!utf8) {
         return NULL;
     }
-    size_t len = strlen(utf8);
-    uint16_t *dest = alloc_utf16_buffer(len);
+
+    const unsigned char *bytes = (const unsigned char *)utf8;
+    size_t utf8_len = strlen(utf8);
+    size_t index = 0;
+    size_t total_units = 0;
+
+    while (index < utf8_len) {
+        uint32_t codepoint = 0;
+        size_t cursor = index;
+
+        unsigned char first = bytes[cursor];
+        size_t width = 0;
+        uint32_t min_value = 0;
+
+        if (first < 0x80) {
+            codepoint = first;
+            cursor += 1;
+        } else if ((first & 0xE0) == 0xC0) {
+            width = 2;
+            min_value = 0x80;
+            codepoint = first & 0x1F;
+        } else if ((first & 0xF0) == 0xE0) {
+            width = 3;
+            min_value = 0x800;
+            codepoint = first & 0x0F;
+        } else if ((first & 0xF8) == 0xF0) {
+            width = 4;
+            min_value = 0x10000;
+            codepoint = first & 0x07;
+        } else {
+            return NULL;
+        }
+
+        if (width > 0) {
+            if (cursor + width > utf8_len) {
+                return NULL;
+            }
+            for (size_t i = 1; i < width; ++i) {
+                unsigned char continuation = bytes[cursor + i];
+                if ((continuation & 0xC0) != 0x80) {
+                    return NULL;
+                }
+                codepoint = (codepoint << 6) | (continuation & 0x3F);
+            }
+            if (codepoint < min_value || codepoint > 0x10FFFF) {
+                return NULL;
+            }
+            if (codepoint >= 0xD800 && codepoint <= 0xDFFF) {
+                return NULL;
+            }
+            cursor += width;
+        }
+
+        total_units += (codepoint >= 0x10000) ? 2 : 1;
+        index = cursor;
+    }
+
+    uint16_t *dest = alloc_utf16_buffer(total_units);
     if (!dest) {
         return NULL;
     }
-    for (size_t i = 0; i < len; ++i) {
-        dest[i] = (unsigned char)utf8[i];
+
+    index = 0;
+    size_t out = 0;
+    while (index < utf8_len) {
+        uint32_t codepoint = 0;
+        size_t cursor = index;
+
+        unsigned char first = bytes[cursor];
+        size_t width = 0;
+        uint32_t min_value = 0;
+
+        if (first < 0x80) {
+            codepoint = first;
+            cursor += 1;
+        } else if ((first & 0xE0) == 0xC0) {
+            width = 2;
+            min_value = 0x80;
+            codepoint = first & 0x1F;
+        } else if ((first & 0xF0) == 0xE0) {
+            width = 3;
+            min_value = 0x800;
+            codepoint = first & 0x0F;
+        } else if ((first & 0xF8) == 0xF0) {
+            width = 4;
+            min_value = 0x10000;
+            codepoint = first & 0x07;
+        } else {
+            free(dest);
+            return NULL;
+        }
+
+        if (width > 0) {
+            if (cursor + width > utf8_len) {
+                free(dest);
+                return NULL;
+            }
+            for (size_t i = 1; i < width; ++i) {
+                unsigned char continuation = bytes[cursor + i];
+                if ((continuation & 0xC0) != 0x80) {
+                    free(dest);
+                    return NULL;
+                }
+                codepoint = (codepoint << 6) | (continuation & 0x3F);
+            }
+            if (codepoint < min_value || codepoint > 0x10FFFF ||
+                (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+                free(dest);
+                return NULL;
+            }
+            cursor += width;
+        }
+
+        if (codepoint >= 0x10000) {
+            uint32_t value = codepoint - 0x10000;
+            dest[out++] = (uint16_t)(0xD800 | ((value >> 10) & 0x3FF));
+            dest[out++] = (uint16_t)(0xDC00 | (value & 0x3FF));
+        } else {
+            dest[out++] = (uint16_t)codepoint;
+        }
+
+        index = cursor;
     }
+
     return dest;
 }
 
@@ -85,26 +201,87 @@ static char *dup_utf8_from_utf16(const uint16_t *utf16) {
     if (!utf16) {
         return NULL;
     }
+
     size_t len = hybrid_strlen16(utf16);
-    size_t max_bytes = len * 3 + 1;
-    char *buffer = (char *)malloc(max_bytes);
+    size_t index = 0;
+    size_t total_bytes = 0;
+
+    while (index < len) {
+        uint16_t lead = utf16[index];
+        uint32_t codepoint = 0;
+
+        if (lead >= 0xD800 && lead <= 0xDBFF) {
+            if (index + 1 >= len) {
+                return NULL;
+            }
+            uint16_t trail = utf16[index + 1];
+            if (trail < 0xDC00 || trail > 0xDFFF) {
+                return NULL;
+            }
+            uint32_t high = (uint32_t)(lead - 0xD800);
+            uint32_t low = (uint32_t)(trail - 0xDC00);
+            codepoint = (high << 10 | low) + 0x10000;
+            index += 2;
+        } else if (lead >= 0xDC00 && lead <= 0xDFFF) {
+            return NULL;
+        } else {
+            codepoint = lead;
+            index += 1;
+        }
+
+        if (codepoint < 0x80) {
+            total_bytes += 1;
+        } else if (codepoint < 0x800) {
+            total_bytes += 2;
+        } else if (codepoint < 0x10000) {
+            total_bytes += 3;
+        } else {
+            total_bytes += 4;
+        }
+    }
+
+    char *buffer = (char *)malloc(total_bytes + 1);
     if (!buffer) {
         return NULL;
     }
+
     char *out = buffer;
-    for (size_t i = 0; i < len; ++i) {
-        uint16_t code = utf16[i];
-        if (code < 0x80) {
-            *out++ = (char)code;
-        } else if (code < 0x800) {
-            *out++ = (char)(0xC0 | (code >> 6));
-            *out++ = (char)(0x80 | (code & 0x3F));
+    index = 0;
+    while (index < len) {
+        uint32_t codepoint = 0;
+        uint16_t lead = utf16[index];
+
+        if (lead >= 0xD800 && lead <= 0xDBFF) {
+            uint16_t trail = utf16[index + 1];
+            codepoint = (((uint32_t)(lead - 0xD800)) << 10 |
+                         ((uint32_t)(trail - 0xDC00))) +
+                        0x10000;
+            index += 2;
+        } else if (lead >= 0xDC00 && lead <= 0xDFFF) {
+            free(buffer);
+            return NULL;
         } else {
-            *out++ = (char)(0xE0 | (code >> 12));
-            *out++ = (char)(0x80 | ((code >> 6) & 0x3F));
-            *out++ = (char)(0x80 | (code & 0x3F));
+            codepoint = lead;
+            index += 1;
+        }
+
+        if (codepoint < 0x80) {
+            *out++ = (char)codepoint;
+        } else if (codepoint < 0x800) {
+            *out++ = (char)(0xC0 | (codepoint >> 6));
+            *out++ = (char)(0x80 | (codepoint & 0x3F));
+        } else if (codepoint < 0x10000) {
+            *out++ = (char)(0xE0 | (codepoint >> 12));
+            *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+            *out++ = (char)(0x80 | (codepoint & 0x3F));
+        } else {
+            *out++ = (char)(0xF0 | (codepoint >> 18));
+            *out++ = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+            *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+            *out++ = (char)(0x80 | (codepoint & 0x3F));
         }
     }
+
     *out = '\0';
     return buffer;
 }

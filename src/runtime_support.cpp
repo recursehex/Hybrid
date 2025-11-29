@@ -91,38 +91,171 @@ static uint16_t *alloc_utf16_buffer(size_t len) {
   return buffer;
 }
 
+static bool decode_utf8_codepoint(const unsigned char *input, size_t length,
+                                  size_t &index, uint32_t &codepoint) {
+  const unsigned char first = input[index];
+  if (first < 0x80) {
+    codepoint = first;
+    ++index;
+    return true;
+  }
+
+  size_t width = 0;
+  uint32_t minValue = 0;
+  if ((first & 0xE0) == 0xC0) {
+    width = 2;
+    minValue = 0x80;
+    codepoint = first & 0x1F;
+  } else if ((first & 0xF0) == 0xE0) {
+    width = 3;
+    minValue = 0x800;
+    codepoint = first & 0x0F;
+  } else if ((first & 0xF8) == 0xF0) {
+    width = 4;
+    minValue = 0x10000;
+    codepoint = first & 0x07;
+  } else {
+    return false;
+  }
+
+  if (index + width > length)
+    return false;
+
+  for (size_t i = 1; i < width; ++i) {
+    unsigned char continuation = input[index + i];
+    if ((continuation & 0xC0) != 0x80)
+      return false;
+    codepoint = static_cast<uint32_t>(codepoint << 6) |
+                static_cast<uint32_t>(continuation & 0x3F);
+  }
+
+  if (codepoint < minValue || codepoint > 0x10FFFF)
+    return false;
+  if (codepoint >= 0xD800 && codepoint <= 0xDFFF)
+    return false;
+
+  index += width;
+  return true;
+}
+
 static uint16_t *dup_utf16_from_utf8(const char *utf8) {
   if (!utf8)
     return nullptr;
-  size_t len = std::strlen(utf8);
-  auto *dest = alloc_utf16_buffer(len);
+
+  const unsigned char *bytes =
+      reinterpret_cast<const unsigned char *>(utf8);
+  size_t utf8_len = std::strlen(utf8);
+  size_t index = 0;
+  size_t total_units = 0;
+
+  while (index < utf8_len) {
+    uint32_t codepoint = 0;
+    size_t cursor = index;
+    if (!decode_utf8_codepoint(bytes, utf8_len, cursor, codepoint))
+      return nullptr;
+    total_units += (codepoint >= 0x10000) ? 2 : 1;
+    index = cursor;
+  }
+
+  auto *dest = alloc_utf16_buffer(total_units);
   if (!dest)
     return nullptr;
-  for (size_t i = 0; i < len; ++i)
-    dest[i] = static_cast<unsigned char>(utf8[i]);
+
+  index = 0;
+  size_t out = 0;
+  while (index < utf8_len) {
+    uint32_t codepoint = 0;
+    if (!decode_utf8_codepoint(bytes, utf8_len, index, codepoint)) {
+      std::free(dest);
+      return nullptr;
+    }
+
+    if (codepoint >= 0x10000) {
+      uint32_t value = codepoint - 0x10000;
+      dest[out++] = static_cast<uint16_t>(0xD800 | ((value >> 10) & 0x3FF));
+      dest[out++] = static_cast<uint16_t>(0xDC00 | (value & 0x3FF));
+    } else {
+      dest[out++] = static_cast<uint16_t>(codepoint);
+    }
+  }
   return dest;
+}
+
+static bool decode_utf16_codepoint(const uint16_t *input, size_t length,
+                                   size_t &index, uint32_t &codepoint) {
+  uint16_t lead = input[index];
+  if (lead >= 0xD800 && lead <= 0xDBFF) {
+    if (index + 1 >= length)
+      return false;
+    uint16_t trail = input[index + 1];
+    if (trail < 0xDC00 || trail > 0xDFFF)
+      return false;
+    uint32_t high = static_cast<uint32_t>(lead - 0xD800);
+    uint32_t low = static_cast<uint32_t>(trail - 0xDC00);
+    codepoint = (high << 10 | low) + 0x10000;
+    index += 2;
+    return true;
+  }
+
+  if (lead >= 0xDC00 && lead <= 0xDFFF)
+    return false;
+
+  codepoint = lead;
+  ++index;
+  return true;
 }
 
 static char *dup_utf8_from_utf16(const uint16_t *utf16) {
   if (!utf16)
     return nullptr;
+
   size_t len = hybrid_strlen16(utf16);
-  size_t max_bytes = len * 3 + 1;
-  auto *buffer = static_cast<char *>(std::malloc(max_bytes));
+  size_t index = 0;
+  size_t total_bytes = 0;
+
+  while (index < len) {
+    uint32_t codepoint = 0;
+    if (!decode_utf16_codepoint(utf16, len, index, codepoint))
+      return nullptr;
+
+    if (codepoint < 0x80)
+      total_bytes += 1;
+    else if (codepoint < 0x800)
+      total_bytes += 2;
+    else if (codepoint < 0x10000)
+      total_bytes += 3;
+    else
+      total_bytes += 4;
+  }
+
+  auto *buffer = static_cast<char *>(std::malloc(total_bytes + 1));
   if (!buffer)
     return nullptr;
+
   char *out = buffer;
-  for (size_t i = 0; i < len; ++i) {
-    uint16_t code = utf16[i];
-    if (code < 0x80) {
-      *out++ = static_cast<char>(code);
-    } else if (code < 0x800) {
-      *out++ = static_cast<char>(0xC0 | (code >> 6));
-      *out++ = static_cast<char>(0x80 | (code & 0x3F));
+  index = 0;
+
+  while (index < len) {
+    uint32_t codepoint = 0;
+    if (!decode_utf16_codepoint(utf16, len, index, codepoint)) {
+      std::free(buffer);
+      return nullptr;
+    }
+
+    if (codepoint < 0x80) {
+      *out++ = static_cast<char>(codepoint);
+    } else if (codepoint < 0x800) {
+      *out++ = static_cast<char>(0xC0 | (codepoint >> 6));
+      *out++ = static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else if (codepoint < 0x10000) {
+      *out++ = static_cast<char>(0xE0 | (codepoint >> 12));
+      *out++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+      *out++ = static_cast<char>(0x80 | (codepoint & 0x3F));
     } else {
-      *out++ = static_cast<char>(0xE0 | (code >> 12));
-      *out++ = static_cast<char>(0x80 | ((code >> 6) & 0x3F));
-      *out++ = static_cast<char>(0x80 | (code & 0x3F));
+      *out++ = static_cast<char>(0xF0 | (codepoint >> 18));
+      *out++ = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+      *out++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+      *out++ = static_cast<char>(0x80 | (codepoint & 0x3F));
     }
   }
   *out = '\0';
