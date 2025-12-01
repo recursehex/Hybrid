@@ -142,7 +142,7 @@ string precise = $"Pi: `pi:2`"                    // format specifier for floats
 
 - Expressions inside backticks can be any valid expression.
 - Format specifiers are optional and currently supported for floating-point values using `:digits` to control precision (e.g. `pi:3`).
-- To emit a literal backtick inside an interpolated string, escape it with `\``.
+- To emit a literal backtick inside an interpolated string, escape it with `` \` ``.
 
 ### Character Literals
 

@@ -39,10 +39,15 @@ class Door
 - Classes must declare at least one constructor. If you want default construction, explicitly declare an empty constructor; omitting constructors entirely is a compile-time error because members have no default values.
 - All non-`static` members must be assigned in *every* constructor before the constructor returns. The compiler tracks constructor assignments so it can emit diagnostics when a member is skipped.
 - You may omit the type name when calling a constructor in a variable initializer: writing `Door front = (2)` is equivalent to `Door front = Door(2)` and uses the matching class constructor.
+- This shorthand also works for other target-typed contexts:
+  - Arrays: `Widget[] items = [(5), (6)]` calls the `Widget(int)` constructor for each element.
+  - Strings: ``string label = $"Value: `(rect)`"`` or `print(rect)` will call `string this()` when present.
+  - Smart pointers: `shared<Widget> primary = (5)` builds the payload with `Widget(5)` and wraps it in a `shared<Widget>`; the same applies to `unique<T>`. For `weak<T>`, the shorthand expects a `shared<T>` value, e.g. `weak<Widget> watcher = (sharedOwner)`.
 
 ```cs
 Door front = (2)    // shorthand for Door front = Door(2)
 Door copy = (front) // invokes the copy constructor when available
+shared<Door> refDoor = (2) // payload constructed via Door(int)
 ```
 
 ## Heap Allocation with `new` and `free`
