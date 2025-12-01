@@ -6,7 +6,7 @@ class Base
     Base() {}
     ~Base()
     {
-        baseDrops = baseDrops + 1
+        baseDrops++
     }
 }
 
@@ -15,7 +15,7 @@ class Derived : Base
     Derived() : Base() {}
     ~Derived()
     {
-        derivedDrops = derivedDrops + 1
+        derivedDrops++
     }
 }
 

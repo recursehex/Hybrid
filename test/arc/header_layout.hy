@@ -33,7 +33,7 @@ class Gadget
 
 int main()
 {
-    HeaderProbe probe = HeaderProbe()
+    HeaderProbe probe = ()
     unsafe
     {
         byte@ probePtr = #probe
@@ -41,7 +41,7 @@ int main()
         assert strongCount(probePtr) == 1
     }
 
-    Gadget gizmo = Gadget(7)
+    Gadget gizmo = (7)
     unsafe
     {
         byte@ gizmoPtr = gizmo

@@ -17,7 +17,7 @@ class Gadget
 
 int main()
 {
-    Gadget local = Gadget(4)
+    Gadget local = (4)
     unsafe
     {
         sink(#local)

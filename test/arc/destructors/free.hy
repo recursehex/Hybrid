@@ -11,13 +11,13 @@ class Payload
 
     ~Payload()
     {
-        drops = drops + this.weight
+        drops += this.weight
     }
 }
 
 void runOnce(int weight)
 {
-    Payload temp = new Payload(weight)
+    Payload temp = new(weight)
     free temp
 }
 

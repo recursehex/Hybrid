@@ -8,7 +8,7 @@ class Payload
 
 int main()
 {
-    Payload value = Payload()
+    Payload value = new Payload()
     free value
     free value
     return 0

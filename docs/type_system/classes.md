@@ -186,14 +186,6 @@ class Ticker
   }
   ```
 
-## Diagnostics Summary
-
-- **Uninitialized member mutation** - triggered when incrementing/assigning a member that has not been initialized yet. Generated for both static and instance fields.
-- **Const mutation** - writes outside constructors (or inline initializers) for `const` fields continue to emit `Cannot write to const member ...`.
-- The existing access-control diagnostics (`read-only outside definition`, `Cannot call private member`, etc.) remain unchanged.
-
-These rules keep classes aligned with the modern expectations of type and memory safety. Static fields require initialization before use, and instance fields must be handled in every constructor, but Hybrid strengthens them with explicit compiler tracking so that mistakes surface immediately rather than resulting in default-initialized values at runtime.
-
 ## Destructors and `free`
 
 - Declare a single destructor per type with `~TypeName() { ... }`; parameters, generics, return types, `static`, and `abstract` are rejected.

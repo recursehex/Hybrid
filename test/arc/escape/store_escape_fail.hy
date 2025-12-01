@@ -17,7 +17,7 @@ class Parcel
 
 int main()
 {
-    Parcel local = Parcel(3)
+    Parcel local = (3)
     unsafe
     {
         captured = #local

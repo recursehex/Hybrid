@@ -6,13 +6,13 @@ class Manual
 
     ~Manual()
     {
-        drops = drops + 1
+        drops++
     }
 }
 
 int main()
 {
-    Manual temp = Manual()
+    Manual temp = ()
     temp.~Manual()
     assert drops == 1
     return 0

@@ -14,7 +14,7 @@ class Payload
 
 void main()
 {
-    Payload p = Payload(5)
+    Payload p = new Payload(5)
     free p
     int i = p.value
 }

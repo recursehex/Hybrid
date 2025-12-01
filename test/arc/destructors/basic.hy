@@ -11,7 +11,7 @@ class Tracker
 
     ~Tracker()
     {
-        drops = drops + this.value
+        drops += this.value
     }
 }
 

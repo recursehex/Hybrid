@@ -24,7 +24,7 @@ class Counter
 
     void increment()
     {
-        this.value = this.value + 1
+        this.value++
     }
 }
 
