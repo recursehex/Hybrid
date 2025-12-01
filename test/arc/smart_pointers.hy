@@ -18,53 +18,53 @@ class TestObject
 
 void testUniquePointers()
 {
-    unique<int> uniqueInt = unique<int>(42)
-    unique<TestObject> uniqueObj = unique<TestObject>(TestObject(10))
+    unique<int> uniqueInt = (42)
+    unique<TestObject> uniqueObj = (10)
 }
 
 void testUniqueReassignment()
 {
-    unique<TestObject> donor = unique<TestObject>(TestObject(11))
-    unique<TestObject> slot = unique<TestObject>(TestObject(12))
+    unique<TestObject> donor = (11)
+    unique<TestObject> slot = (12)
 
     slot = donor
-    donor = unique<TestObject>(TestObject(13))
+    donor = (13)
 
     int i = 0
     while i < 15
     {
         slot = donor
-        donor = unique<TestObject>(TestObject(20 + i))
+        donor = (20 + i)
         i++
     }
 }
 
 void testSharedPointers()
 {
-    shared<int> sharedInt = shared<int>(99)
-    shared<TestObject> sharedObj = shared<TestObject>(TestObject(20))
+    shared<int> sharedInt = (99)
+    shared<TestObject> sharedObj = (20)
     shared<TestObject> sharedCopy = sharedObj
-    shared<TestObject> sharedNext = shared<TestObject>(TestObject(25))
+    shared<TestObject> sharedNext = (25)
     sharedCopy = sharedNext
 }
 
 void testWeakPointers()
 {
-    shared<int> sharedInt = shared<int>(55)
-    weak<int> weakInt = weak<int>(sharedInt)
+    shared<int> sharedInt = (55)
+    weak<int> weakInt = (sharedInt)
 }
 
 void testSmartPointerAssignments()
 {
-    shared<TestObject> sharedA = shared<TestObject>(TestObject(30))
-    shared<TestObject> sharedB = shared<TestObject>(TestObject(31))
+    shared<TestObject> sharedA = (30)
+    shared<TestObject> sharedB = (31)
     sharedA = sharedB
-    shared<TestObject> sharedC = shared<TestObject>(TestObject(32))
+    shared<TestObject> sharedC = (32)
     sharedA = sharedC
 
-    shared<TestObject> owner = shared<TestObject>(TestObject(40))
-    weak<TestObject> watcher = weak<TestObject>(owner)
-    weak<TestObject> watcher2 = weak<TestObject>(owner)
+    shared<TestObject> owner = (40)
+    weak<TestObject> watcher = (owner)
+    weak<TestObject> watcher2 = (owner)
     watcher = watcher2
 }
 

@@ -12,14 +12,14 @@ class Payload
 
 void stressShared()
 {
-    shared<Payload> slot = shared<Payload>(Payload(0))
-    shared<Payload> spare = shared<Payload>(Payload(1))
+    shared<Payload> slot = (0)
+    shared<Payload> spare = (1)
     slot = spare
 
     int i = 0
     while i < 50
     {
-        shared<Payload> next = shared<Payload>(Payload(i))
+        shared<Payload> next = (i)
         slot = next
         i++
     }
@@ -27,14 +27,14 @@ void stressShared()
 
 void stressWeak()
 {
-    shared<int> anchor = shared<int>(0)
-    weak<int> watcher = weak<int>(anchor)
+    shared<int> anchor = (0)
+    weak<int> watcher = (anchor)
 
     int i = 0
     while i < 25
     {
-        shared<int> replacement = shared<int>(i)
-        weak<int> freshWatch = weak<int>(replacement)
+        shared<int> replacement = (i)
+        weak<int> freshWatch = (replacement)
         watcher = freshWatch
         anchor = replacement
         i++
@@ -43,23 +43,23 @@ void stressWeak()
 
 void stressUnique()
 {
-    unique<Payload> donor = unique<Payload>(Payload(10))
-    unique<Payload> slot = unique<Payload>(Payload(20))
+    unique<Payload> donor = (10)
+    unique<Payload> slot = (20)
 
     int i = 0
     while i < 30
     {
         slot = donor
-        donor = unique<Payload>(Payload(100 + i))
+        donor = (100 + i)
 
-        unique<Payload> scratch = unique<Payload>(Payload(200 + i))
+        unique<Payload> scratch = (200 + i)
         slot = scratch
-        donor = unique<Payload>(Payload(300 + i))
+        donor = (300 + i)
         i++
     }
 
     slot = donor
-    donor = unique<Payload>(Payload(999))
+    donor = (999)
 }
 
 int main()
