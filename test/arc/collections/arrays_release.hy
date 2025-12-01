@@ -17,16 +17,16 @@ class Widget
 
 void build_with_new()
 {
-    Widget[] items = new Widget[2]
-    items[0] = Widget(3)
-    items[1] = Widget(4)
+    Widget[] items = new[2]
+    items[0] = (3)
+    items[1] = (4)
     // Scope exit should release the backing store and elements.
     return
 }
 
 void build_with_literal()
 {
-    Widget[] items = [Widget(5), Widget(6)]
+    Widget[] items = [(5), (6)]
     return
 }
 

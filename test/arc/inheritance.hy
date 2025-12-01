@@ -51,9 +51,9 @@ class DerivedTracker : BaseTracker
 
 int main()
 {
-    Payload first = Payload()
-    Payload second = Payload()
-    DerivedTracker tracker = DerivedTracker(first, second)
+    Payload first = ()
+    Payload second = ()
+    DerivedTracker tracker = (first, second)
 
     BaseTracker upcast = tracker
 

@@ -109,6 +109,23 @@ static bool convertUTF8LiteralToUTF16(const std::string &input,
 #define LoopContinueBlocks (CG.loopContinueBlocks)
 #define NonNullFacts (CG.nonNullFactsStack)
 
+static thread_local std::string ActiveBinaryOp;
+
+class ActiveBinaryOpScope {
+public:
+  explicit ActiveBinaryOpScope(const std::string &op) : previous(ActiveBinaryOp) {
+    ActiveBinaryOp = op;
+  }
+
+  ActiveBinaryOpScope(const ActiveBinaryOpScope &) = delete;
+  ActiveBinaryOpScope &operator=(const ActiveBinaryOpScope &) = delete;
+
+  ~ActiveBinaryOpScope() { ActiveBinaryOp = previous; }
+
+private:
+  std::string previous;
+};
+
 static const analysis::VariableLifetimePlan *
 lookupLifetimePlanEntry(const std::string &name) {
   const analysis::LifetimePlan *plan = CG.currentLifetimePlan;
@@ -6979,6 +6996,94 @@ static llvm::Value *emitResolvedCallInternal(
     const std::vector<std::unique_ptr<ExprAST>> *originalArgs,
     bool preferGeneric, FunctionOverload *forced, ExprAST *typeOwner);
 
+static llvm::Value *emitTargetTypedConstruction(const TypeInfo &targetInfo,
+                                                ParenExprAST &paren) {
+  if (targetInfo.isArray || targetInfo.pointerDepth > 0)
+    return nullptr;
+
+  std::string targetName = typeNameFromInfo(targetInfo);
+  if (targetName.empty())
+    targetName = targetInfo.typeName;
+  if (targetName.empty())
+    return nullptr;
+
+  std::string baseName = baseCompositeName(targetName);
+  if (baseName.empty())
+    return nullptr;
+  if (!lookupCompositeInfo(baseName))
+    return nullptr;
+
+  paren.setTypeName(targetName);
+
+  std::vector<llvm::Value *> argVals;
+  std::vector<bool> argIsRef;
+  argVals.reserve(paren.size());
+  argIsRef.reserve(paren.size());
+
+  for (size_t i = 0; i < paren.size(); ++i) {
+    ExprAST *elem = paren.getElement(i);
+    bool isRef = dynamic_cast<RefExprAST *>(elem) != nullptr;
+    argIsRef.push_back(isRef);
+
+    llvm::Value *val = elem->codegen();
+    if (!val)
+      return nullptr;
+
+    argVals.push_back(val);
+  }
+
+  llvm::Value *constructed =
+      emitResolvedCallInternal(targetName, std::move(argVals), argIsRef,
+                               nullptr, false, nullptr, &paren);
+  if (!constructed)
+    return nullptr;
+
+  const CompositeTypeInfo *meta = lookupCompositeInfo(baseName, /*countHit=*/false);
+  if (!meta)
+    return constructed;
+
+  llvm::StructType *structTy = nullptr;
+  if (auto it = StructTypes.find(baseName); it != StructTypes.end())
+    structTy = it->second;
+
+  if (!structTy || !meta->hasARCHeader)
+    return constructed;
+
+  llvm::Type *constructedTy = constructed->getType();
+  if (constructedTy->isPointerTy())
+    return constructed;
+
+  const llvm::DataLayout &DL = TheModule->getDataLayout();
+  uint64_t typeSize = DL.getTypeAllocSize(structTy);
+  llvm::Value *sizeVal = llvm::ConstantInt::get(getSizeType(), typeSize);
+
+  if (meta->descriptorGlobalName.empty())
+    return LogErrorV(("Internal error: missing descriptor for '" + baseName +
+                      "' while constructing value")
+                         .c_str());
+
+  llvm::GlobalVariable *descriptorGV =
+      TheModule->getGlobalVariable(meta->descriptorGlobalName, true);
+  if (!descriptorGV)
+    return LogErrorV(("Internal error: descriptor '" +
+                      meta->descriptorGlobalName +
+                      "' missing while constructing '" + baseName + "'")
+                         .c_str());
+
+  llvm::Value *descriptorPtr = llvm::ConstantExpr::getBitCast(
+      descriptorGV, pointerType(getTypeDescriptorType()));
+
+  llvm::Value *rawPtr = Builder->CreateCall(
+      getHybridAllocObjectFunction(), {sizeVal, descriptorPtr},
+      baseName + ".alloc");
+  llvm::Value *typedPtr =
+      Builder->CreateBitCast(rawPtr, pointerType(structTy),
+                             baseName + ".alloc.typed");
+  Builder->CreateStore(constructed, typedPtr);
+  paren.markTemporary();
+  return typedPtr;
+}
+
 static llvm::Value *emitThisOverrideString(const CompositeTypeInfo &info,
                                            const std::string &baseName,
                                            llvm::Value *instanceVal) {
@@ -7406,8 +7511,36 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
   if (!ElemType && hasElementInfo)
     ElemType = getTypeFromString(elementTypeName);
 
+  auto emitElementValue = [&](ExprAST *expr) -> llvm::Value * {
+    if (!expr)
+      return nullptr;
+
+    if (hasElementInfo) {
+      if (auto *paren = dynamic_cast<ParenExprAST *>(expr)) {
+        if (auto constructed = emitTargetTypedConstruction(elementInfo, *paren))
+          return constructed;
+      }
+      if (auto *newExpr = dynamic_cast<NewExprAST *>(expr))
+        propagateTypeToNewExpr(newExpr, elementInfo);
+    }
+
+    if (auto *Num = dynamic_cast<NumberExprAST *>(expr)) {
+      if (ElemType)
+        return Num->codegen_with_target(ElemType);
+      return Num->codegen();
+    }
+
+    if (auto *Char = dynamic_cast<CharExprAST *>(expr)) {
+      if (ElemType)
+        return Char->codegen_with_target(ElemType, cleanElementTypeName);
+      return Char->codegen();
+    }
+
+    return expr->codegen();
+  };
+
   if (ArraySize > 0) {
-    llvm::Value *firstVal = flatElements[0]->codegen();
+    llvm::Value *firstVal = emitElementValue(flatElements[0]);
     if (!firstVal)
       return nullptr;
     elementValues[0] = firstVal;
@@ -7515,13 +7648,7 @@ llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElement
     ExprAST *ElementExpr = flatElements[i];
     llvm::Value *ElemVal = elementValues[i];
     if (!ElemVal) {
-      if (auto *Num = dynamic_cast<NumberExprAST*>(ElementExpr)) {
-        ElemVal = Num->codegen_with_target(ElemType);
-      } else if (auto *Char = dynamic_cast<CharExprAST*>(ElementExpr)) {
-        ElemVal = Char->codegen_with_target(ElemType, cleanElementTypeName);
-      } else {
-        ElemVal = ElementExpr->codegen();
-      }
+      ElemVal = emitElementValue(ElementExpr);
       if (!ElemVal)
         return nullptr;
     }
@@ -8440,6 +8567,21 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::s
 std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* R,
                                                    std::string_view lhsTypeName,
                                                    std::string_view rhsTypeName) {
+  if (!L || !R) {
+    std::string lhsName = lhsTypeName.empty() ? "<unknown>" : std::string(lhsTypeName);
+    std::string rhsName = rhsTypeName.empty() ? "<unknown>" : std::string(rhsTypeName);
+    std::string funcName;
+    if (auto *bb = Builder->GetInsertBlock()) {
+      if (auto *fn = bb->getParent())
+        funcName = fn->getName().str();
+    }
+    std::string opName = ActiveBinaryOp.empty() ? "<op>" : ActiveBinaryOp;
+    LogErrorV(("Internal error: null operand while promoting binary expression types in '" +
+               funcName + "' for op '" + opName + "' (lhs=" + lhsName + ", rhs=" + rhsName + ")")
+                  .c_str());
+    return {L, R};
+  }
+
   llvm::Type* LType = L->getType();
   llvm::Type* RType = R->getType();
   
@@ -8471,7 +8613,16 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
     else if (RType->isDoubleTy()) RTypeStr = "double";
     else if (RType->isFP128Ty()) RTypeStr = "fp128";
     
-    LogErrorV(("Type mismatch: cannot implicitly convert between '" + LTypeStr + "' and '" + RTypeStr + "'").c_str());
+    std::string funcName;
+    if (auto *bb = Builder->GetInsertBlock()) {
+      if (auto *fn = bb->getParent())
+        funcName = fn->getName().str();
+    }
+    std::string opName = ActiveBinaryOp.empty() ? "<op>" : ActiveBinaryOp;
+    LogErrorV(("Type mismatch in '" + funcName + "' for op '" + opName +
+               "': cannot implicitly convert between '" + LTypeStr + "' and '" +
+               RTypeStr + "'")
+                  .c_str());
     return {L, R}; // Return original values, error already logged
   }
 
@@ -8723,6 +8874,7 @@ llvm::Value *BinaryExprAST::codegenNullCoalescingAssign(llvm::Value *lhsValue) {
 
 // Generate code for binary expressions like +, -, *, /, <, >
 llvm::Value *BinaryExprAST::codegen() {
+  ActiveBinaryOpScope activeOpScope(Op);
   // Generate left operand first
   llvm::Value *L = getLHS()->codegen();
   if (!L)
@@ -8736,13 +8888,15 @@ llvm::Value *BinaryExprAST::codegen() {
   // For comparisons, arithmetic, and equality operators, try to regenerate literals so they
   // match the other operand's type (numbers and chars).
   llvm::Value *R = nullptr;
-  bool isComparisonOrArithmetic = (Op == "==" || Op == "!=" || Op == "<" || Op == ">" || Op == "<=" || Op == ">=" ||
-                                   Op == "+" || Op == "-" || Op == "*" || Op == "/" || Op == "%");
+  bool isComparisonOrArithmetic =
+      (Op == "==" || Op == "!=" || Op == "<" || Op == ">" || Op == "<=" ||
+       Op == ">=" || Op == "+" || Op == "-" || Op == "*" || Op == "/" ||
+       Op == "%");
   if (isComparisonOrArithmetic) {
-    if (NumberExprAST *NumRHS = dynamic_cast<NumberExprAST*>(getRHS())) {
+    if (NumberExprAST *NumRHS = dynamic_cast<NumberExprAST *>(getRHS())) {
       // Right side is a number literal - generate it with left's type as target
       R = NumRHS->codegen_with_target(L->getType());
-    } else if (NumberExprAST *NumLHS = dynamic_cast<NumberExprAST*>(getLHS())) {
+    } else if (NumberExprAST *NumLHS = dynamic_cast<NumberExprAST *>(getLHS())) {
       // Left side is a number literal - regenerate it and the right side
       // This handles cases like: 255 == byte_var or 10 + byte_var
       llvm::Value *RTemp = getRHS()->codegen();
@@ -8753,12 +8907,13 @@ llvm::Value *BinaryExprAST::codegen() {
     }
 
     if (!R) {
-      if (CharExprAST *CharRHS = dynamic_cast<CharExprAST*>(getRHS())) {
+      if (CharExprAST *CharRHS = dynamic_cast<CharExprAST *>(getRHS())) {
         R = CharRHS->codegen_with_target(L->getType(), getLHS()->getTypeName());
-      } else if (CharExprAST *CharLHS = dynamic_cast<CharExprAST*>(getLHS())) {
+      } else if (CharExprAST *CharLHS = dynamic_cast<CharExprAST *>(getLHS())) {
         llvm::Value *RTemp = getRHS()->codegen();
         if (RTemp) {
-          L = CharLHS->codegen_with_target(RTemp->getType(), getRHS()->getTypeName());
+          L = CharLHS->codegen_with_target(RTemp->getType(),
+                                           getRHS()->getTypeName());
           R = RTemp;
         }
       }
@@ -8766,9 +8921,8 @@ llvm::Value *BinaryExprAST::codegen() {
   }
 
   // If R wasn't generated yet (not a comparison or not a number literal), generate normally
-  if (!R) {
+  if (!R)
     R = getRHS()->codegen();
-  }
 
   if (!R)
     return nullptr;
@@ -8972,6 +9126,8 @@ llvm::Value *BinaryExprAST::codegen() {
 
       // Promote types for the operation
       std::string rhsPromoteType = getRHS()->getTypeName();
+      if (!R)
+        return LogErrorV("Internal error: RHS missing before compound assignment");
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
       auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
@@ -9246,75 +9402,80 @@ llvm::Value *BinaryExprAST::codegen() {
   auto rightUnsignedHint = unsignedHintFromTypeName(rightTypeName);
   bool preferUnsigned = leftUnsignedHint.value_or(false) || rightUnsignedHint.value_or(false);
 
-  // Promote types to compatible types
-  auto promoted = promoteTypes(L, R, leftTypeName, rightTypeName);
-  L = promoted.first;
-  R = promoted.second;
+  llvm::Type *resultType = nullptr;
+  bool isFloat = false;
 
-  // Check if working with floating point or integer types
-  llvm::Type *resultType = L->getType();
-  bool isFloat = resultType->isFloatingPointTy();
-  
-  // Set result type name based on the promoted type
-  if (isFloat) {
-    setTypeName(resultType->isFloatTy() ? "float" : "double");
-  } else {
-    const unsigned bitWidth = resultType->getIntegerBitWidth();
-    auto pickMatchingName = [&](const std::string &candidate) -> std::string {
-      if (candidate.empty())
+  if (Op != "=") {
+    // Promote types to compatible types
+    auto promoted = promoteTypes(L, R, leftTypeName, rightTypeName);
+    L = promoted.first;
+    R = promoted.second;
+
+    // Check if working with floating point or integer types
+    resultType = L->getType();
+    isFloat = resultType->isFloatingPointTy();
+
+    // Set result type name based on the promoted type
+    if (isFloat) {
+      setTypeName(resultType->isFloatTy() ? "float" : "double");
+    } else {
+      const unsigned bitWidth = resultType->getIntegerBitWidth();
+      auto pickMatchingName = [&](const std::string &candidate) -> std::string {
+        if (candidate.empty())
+          return {};
+        std::string clean = sanitizeBaseTypeName(candidate);
+        switch (bitWidth) {
+        case 8:
+          if (clean == "byte" || clean == "sbyte" || clean == "schar")
+            return clean;
+          break;
+        case 16:
+          if (clean == "short" || clean == "ushort" || clean == "char")
+            return clean;
+          break;
+        case 32:
+          if (clean == "int" || clean == "uint" || clean == "lchar")
+            return clean;
+          break;
+        case 64:
+          if (clean == "long" || clean == "ulong")
+            return clean;
+          break;
+        default:
+          break;
+        }
         return {};
-      std::string clean = sanitizeBaseTypeName(candidate);
-      switch (bitWidth) {
-      case 8:
-        if (clean == "byte" || clean == "sbyte" || clean == "schar")
-          return clean;
-        break;
-      case 16:
-        if (clean == "short" || clean == "ushort" || clean == "char")
-          return clean;
-        break;
-      case 32:
-        if (clean == "int" || clean == "uint" || clean == "lchar")
-          return clean;
-        break;
-      case 64:
-        if (clean == "long" || clean == "ulong")
-          return clean;
-        break;
-      default:
-        break;
+      };
+
+      std::string chosen = pickMatchingName(rawLeftTypeName);
+      if (chosen.empty())
+        chosen = pickMatchingName(rawRightTypeName);
+      if (chosen.empty()) {
+        switch (bitWidth) {
+        case 8:
+          chosen = "sbyte";
+          break;
+        case 16:
+          chosen = "char";
+          break;
+        case 32:
+          chosen = "int";
+          break;
+        case 64:
+          chosen = "long";
+          break;
+        default:
+          chosen = "int";
+          break;
+        }
       }
-      return {};
-    };
 
-    std::string chosen = pickMatchingName(rawLeftTypeName);
-    if (chosen.empty())
-      chosen = pickMatchingName(rawRightTypeName);
-    if (chosen.empty()) {
-      switch (bitWidth) {
-      case 8:
-        chosen = "sbyte";
-        break;
-      case 16:
-        chosen = "char";
-        break;
-      case 32:
-        chosen = "int";
-        break;
-      case 64:
-        chosen = "long";
-        break;
-      default:
-        chosen = "int";
-        break;
+      setTypeName(chosen);
+
+      if (!preferUnsigned) {
+        std::string chosenBase = sanitizeBaseTypeName(chosen);
+        preferUnsigned = unsignedHintFromTypeName(chosenBase).value_or(false);
       }
-    }
-
-    setTypeName(chosen);
-
-    if (!preferUnsigned) {
-      std::string chosenBase = sanitizeBaseTypeName(chosen);
-      preferUnsigned = unsignedHintFromTypeName(chosenBase).value_or(false);
     }
   }
 
@@ -9379,8 +9540,30 @@ llvm::Value *BinaryExprAST::codegen() {
       {
         const ExprAST *rhsCheckExpr = unwrapRefExpr(getRHS());
         bool rhsIsNullable = expressionIsNullable(rhsCheckExpr);
-        const bool rhsIsTemporary = getRHS() && getRHS()->isTemporary();
+        bool rhsIsTemporary = getRHS() && getRHS()->isTemporary();
         auto *rhsVarExpr = dynamic_cast<VariableExprAST *>(getRHS());
+        auto emitAssignmentRHS = [&](const TypeInfo *targetInfo) -> llvm::Value * {
+          llvm::Value *rhsVal = R;
+          if (targetInfo)
+            propagateTypeToNewExpr(getRHS(), *targetInfo);
+
+          if (auto *paren = dynamic_cast<ParenExprAST *>(getRHS())) {
+            if (targetInfo) {
+              if (auto constructed =
+                      emitTargetTypedConstruction(*targetInfo, *paren)) {
+                rhsVal = constructed;
+                if (targetInfo->requiresARC())
+                  rhsIsTemporary = true;
+              }
+            }
+          }
+
+          if (!rhsVal)
+            rhsVal = getRHS()->codegen();
+
+          R = rhsVal;
+          return rhsVal;
+        };
       if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
         // Simple variable assignment - check local first, then global
         llvm::Value *Variable = NamedValues[LHSE->getName()];
@@ -9393,10 +9576,13 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
-            if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
+            llvm::Value *rhsValue = emitAssignmentRHS(info);
+            if (!rhsValue)
               return nullptr;
-            R = castToType(R, ActualLLVMType);
-            Builder->CreateStore(R, Ptr);
+            if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
+              return nullptr;
+            rhsValue = castToType(rhsValue, ActualLLVMType);
+            Builder->CreateStore(rhsValue, Ptr);
             updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
             setTypeName("void");
             return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -9409,15 +9595,21 @@ llvm::Value *BinaryExprAST::codegen() {
               return LogErrorV(("Cannot assign nullable value to non-nullable variable '" + LHSE->getName() + "'").c_str());
             }
           }
+
+          llvm::Value *rhsValue =
+              emitAssignmentRHS(lookupLocalTypeInfo(LHSE->getName()));
+          if (!rhsValue)
+            return nullptr;
+
           // Get type name for proper range checking
           const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName());
           std::string targetTypeName = info && !info->typeName.empty() ? info->typeName : LHSE->getTypeName();
-          if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, VarType, targetTypeName, "assignment to '" + LHSE->getName() + "'"))
+          if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, VarType, targetTypeName, "assignment to '" + LHSE->getName() + "'"))
             return nullptr;
   if (info && !info->typeName.empty()) {
-    R = castToType(R, VarType, info->typeName);
+    rhsValue = castToType(rhsValue, VarType, info->typeName);
   } else {
-    R = castToType(R, VarType);
+    rhsValue = castToType(rhsValue, VarType);
   }
           if (info && info->isSmartPointer() && rhsVarExpr &&
               rhsVarExpr->getName() != LHSE->getName()) {
@@ -9430,10 +9622,10 @@ llvm::Value *BinaryExprAST::codegen() {
             }
           }
           if (info && info->requiresARC() && !info->isSmartPointer())
-            emitManagedStore(Variable, R, *info, LHSE->getName(),
+            emitManagedStore(Variable, rhsValue, *info, LHSE->getName(),
                              rhsIsTemporary);
           else
-            Builder->CreateStore(R, Variable);
+            Builder->CreateStore(rhsValue, Variable);
           updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
@@ -9448,10 +9640,13 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
-            if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
+            llvm::Value *rhsValue = emitAssignmentRHS(info);
+            if (!rhsValue)
               return nullptr;
-            R = castToType(R, ActualLLVMType);
-            Builder->CreateStore(R, Ptr);
+            if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
+              return nullptr;
+            rhsValue = castToType(rhsValue, ActualLLVMType);
+            Builder->CreateStore(rhsValue, Ptr);
             updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
             setTypeName("void");
             return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -9464,15 +9659,21 @@ llvm::Value *BinaryExprAST::codegen() {
               return LogErrorV(("Cannot assign nullable value to non-nullable variable '" + LHSE->getName() + "'").c_str());
             }
           }
+
+          llvm::Value *rhsValue =
+              emitAssignmentRHS(lookupGlobalTypeInfo(LHSE->getName()));
+          if (!rhsValue)
+            return nullptr;
+
           // Get type name for proper range checking
           const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName());
           std::string targetTypeName = info && !info->typeName.empty() ? info->typeName : LHSE->getTypeName();
-          if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, VarType, targetTypeName, "assignment to '" + LHSE->getName() + "'"))
+          if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, VarType, targetTypeName, "assignment to '" + LHSE->getName() + "'"))
             return nullptr;
           if (info && !info->typeName.empty()) {
-            R = castToType(R, VarType, info->typeName);
+            rhsValue = castToType(rhsValue, VarType, info->typeName);
           } else {
-            R = castToType(R, VarType);
+            rhsValue = castToType(rhsValue, VarType);
           }
           if (info && info->isSmartPointer() && rhsVarExpr &&
               rhsVarExpr->getName() != LHSE->getName()) {
@@ -9485,9 +9686,9 @@ llvm::Value *BinaryExprAST::codegen() {
             }
           }
           if (info && info->requiresARC() && !info->isSmartPointer())
-            emitManagedStore(GV, R, *info, LHSE->getName(), rhsIsTemporary);
+            emitManagedStore(GV, rhsValue, *info, LHSE->getName(), rhsIsTemporary);
           else
-            Builder->CreateStore(R, GV);
+            Builder->CreateStore(rhsValue, GV);
           updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
           // Return a void value to indicate this is a statement, not an expression
           setTypeName("void");
@@ -9511,11 +9712,17 @@ llvm::Value *BinaryExprAST::codegen() {
         auto *arrayElementRHSVar =
             dynamic_cast<VariableExprAST *>(getRHS());
 
-        const bool rhsIsTemporary = getRHS() && getRHS()->isTemporary();
+        bool rhsIsTemporary = getRHS() && getRHS()->isTemporary();
 
         if (rhsIsNullable && !access.elementNullable) {
           return LogErrorV("Cannot assign nullable value to non-nullable array element");
         }
+
+        llvm::Value *rhsValue = emitAssignmentRHS(&access.elementTypeInfo);
+        if (!rhsValue)
+          return nullptr;
+        rhsIsTemporary =
+            rhsIsTemporary || (getRHS() && getRHS()->isTemporary());
 
         if (arrayElementRHSVar && access.elementTypeInfo.isSmartPointer()) {
           if (emitSmartPointerInitFromVariable(access.elementTypeInfo, ElemPtr,
@@ -9532,12 +9739,12 @@ llvm::Value *BinaryExprAST::codegen() {
                 ElemType, ElemPtr, buildArcOpLabel("array", "temp.load.old"));
             emitArcRelease(currentVal, access.elementTypeInfo,
                            buildArcOpLabel("array", "temp.release.old"));
-            Builder->CreateStore(R, ElemPtr);
+            Builder->CreateStore(rhsValue, ElemPtr);
           } else {
-            emitManagedStore(ElemPtr, R, access.elementTypeInfo, "array");
+            emitManagedStore(ElemPtr, rhsValue, access.elementTypeInfo, "array");
           }
         } else {
-          Builder->CreateStore(R, ElemPtr);
+          Builder->CreateStore(rhsValue, ElemPtr);
         }
         // Return a void value to indicate this is a statement, not an expression
         setTypeName("void");
@@ -9559,19 +9766,24 @@ llvm::Value *BinaryExprAST::codegen() {
 
         std::string diagFieldTypeName = fieldInfo.sanitizedFieldTypeName;
 
+        llvm::Value *rhsValue =
+            emitAssignmentRHS(&fieldInfo.declaredFieldType);
+        if (!rhsValue)
+          return nullptr;
+
         std::string contextDescription = "assignment to field '" + LHSMA->getMemberName() + "'";
-        if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), R, fieldInfo.fieldType, diagFieldTypeName, contextDescription))
+        if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, fieldInfo.fieldType, diagFieldTypeName, contextDescription))
           return nullptr;
 
         if (!diagFieldTypeName.empty())
-          R = castToType(R, fieldInfo.fieldType, diagFieldTypeName);
+          rhsValue = castToType(rhsValue, fieldInfo.fieldType, diagFieldTypeName);
         else
-          R = castToType(R, fieldInfo.fieldType);
+          rhsValue = castToType(rhsValue, fieldInfo.fieldType);
 
         if (rhsVarExpr && fieldInfo.declaredFieldType.isSmartPointer()) {
           if (emitSmartPointerInitFromVariable(
-                  fieldInfo.declaredFieldType, fieldInfo.fieldPtr,
-                  *rhsVarExpr, LHSMA->getMemberName())) {
+                  fieldInfo.declaredFieldType, fieldInfo.fieldPtr, *rhsVarExpr,
+                  LHSMA->getMemberName())) {
             noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(),
                                  fieldInfo.isStatic);
             setTypeName("void");
@@ -9581,10 +9793,10 @@ llvm::Value *BinaryExprAST::codegen() {
 
         if (fieldInfo.declaredFieldType.requiresARC() &&
             !fieldInfo.declaredFieldType.isSmartPointer()) {
-          emitManagedStore(fieldInfo.fieldPtr, R, fieldInfo.declaredFieldType,
+          emitManagedStore(fieldInfo.fieldPtr, rhsValue, fieldInfo.declaredFieldType,
                            LHSMA->getMemberName(), rhsIsTemporary);
         } else {
-          Builder->CreateStore(R, fieldInfo.fieldPtr);
+          Builder->CreateStore(rhsValue, fieldInfo.fieldPtr);
         }
         noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(),
                              fieldInfo.isStatic);
