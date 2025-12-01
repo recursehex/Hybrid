@@ -40,3 +40,4 @@ assert width == 4
 string label = rect.this()
 print(rect)
 print(bigger)
+assert rect.this() == $"Rectangle `width`x3"

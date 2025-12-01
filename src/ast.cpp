@@ -6973,6 +6973,51 @@ static llvm::FunctionCallee getCharToStringFunction() {
   return TheModule->getOrInsertFunction("__hybrid_string_from_char32", fnType);
 }
 
+static llvm::Value *emitResolvedCallInternal(
+    const std::string &calleeBase, std::vector<llvm::Value *> ArgValues,
+    const std::vector<bool> &ArgIsRef,
+    const std::vector<std::unique_ptr<ExprAST>> *originalArgs,
+    bool preferGeneric, FunctionOverload *forced, ExprAST *typeOwner);
+
+static llvm::Value *emitThisOverrideString(const CompositeTypeInfo &info,
+                                           const std::string &baseName,
+                                           llvm::Value *instanceVal) {
+  if (!info.thisOverride)
+    return LogErrorV(("Type '" + baseName +
+                      "' does not implement string this() formatter")
+                         .c_str());
+
+  llvm::Value *instancePtr = instanceVal;
+
+  auto structIt = StructTypes.find(baseName);
+  if (!instanceVal->getType()->isPointerTy()) {
+    if (structIt == StructTypes.end())
+      return LogErrorV(
+          ("Internal error: missing struct type for '" + baseName +
+           "' when converting to string")
+              .c_str());
+    llvm::AllocaInst *tmp =
+        Builder->CreateAlloca(structIt->second, nullptr,
+                              baseName + ".this.tmp");
+    Builder->CreateStore(instanceVal, tmp);
+    instancePtr = tmp;
+  }
+
+  if (structIt != StructTypes.end()) {
+    llvm::Type *expectedPtrTy = pointerType(structIt->second);
+    if (instancePtr->getType() != expectedPtrTy) {
+      instancePtr =
+          Builder->CreateBitCast(instancePtr, expectedPtrTy,
+                                 baseName + ".this.cast");
+    }
+  }
+
+  std::vector<llvm::Value *> args{instancePtr};
+  std::vector<bool> argIsRef{true};
+  return emitResolvedCallInternal(*info.thisOverride, std::move(args),
+                                  argIsRef, nullptr, false, nullptr, nullptr);
+}
+
 static llvm::Value *ensureStringPointer(llvm::Value *value) {
   llvm::Type *stringPtrTy = getTypeFromString("string");
   if (value->getType() == stringPtrTy)
@@ -6994,6 +7039,19 @@ static llvm::Value *convertValueToString(llvm::Value *value,
 
   if (typeName == "string") {
     return ensureStringPointer(value);
+  }
+
+  std::string compositeName = baseCompositeName(typeName);
+  if (!compositeName.empty()) {
+    if (const CompositeTypeInfo *info = lookupCompositeInfo(compositeName)) {
+      if (!info->thisOverride) {
+        return LogErrorV(("Type '" + compositeName +
+                          "' cannot be converted to string without a this() "
+                          "formatter")
+                             .c_str());
+      }
+      return emitThisOverrideString(*info, compositeName, value);
+    }
   }
 
   if (typeName == "bool" || value->getType()->isIntegerTy(1)) {
@@ -10743,39 +10801,49 @@ llvm::Value *CallExprAST::codegen() {
     bool handled = false;
 
     if (baseCallee == "print") {
-      std::string candidateName = baseCompositeName(ArgExpr->getTypeName());
-      if (!candidateName.empty()) {
-        auto metaIt = CG.compositeMetadata.find(candidateName);
+      auto resolveCompositeForArg = [&]() -> std::optional<std::string> {
+        std::string name = baseCompositeName(ArgExpr->getTypeName());
+        if (!name.empty())
+          return name;
+
+        if (auto *var = dynamic_cast<VariableExprAST *>(ArgExpr.get())) {
+          if (const TypeInfo *info = lookupTypeInfo(var->getName())) {
+            name = baseCompositeName(typeNameFromInfo(*info));
+            if (!name.empty())
+              return name;
+          }
+        }
+
+        return std::nullopt;
+      };
+
+      std::optional<std::string> candidateName = resolveCompositeForArg();
+      if (candidateName) {
+        auto metaIt = CG.compositeMetadata.find(*candidateName);
         if (metaIt != CG.compositeMetadata.end() &&
             metaIt->second.thisOverride) {
-          llvm::Value *instancePtr = ArgExpr->codegen_ptr();
-          if (!instancePtr) {
-            llvm::Value *instanceValue = ArgExpr->codegen();
-            if (!instanceValue)
+          llvm::Value *instanceVal = ArgExpr->codegen_ptr();
+          if (!instanceVal) {
+            instanceVal = ArgExpr->codegen();
+            if (!instanceVal)
               return nullptr;
-            if (instanceValue->getType()->isPointerTy()) {
-              instancePtr = instanceValue;
-            } else {
-              llvm::AllocaInst *Tmp = Builder->CreateAlloca(
-                  instanceValue->getType(), nullptr, "print.recv");
-              Builder->CreateStore(instanceValue, Tmp);
-              instancePtr = Tmp;
-            }
           }
 
-          std::vector<llvm::Value *> thisArgs;
-          thisArgs.push_back(instancePtr);
-          std::vector<bool> thisIsRef{true};
-
-          llvm::Value *stringValue =
-              emitResolvedCall(*metaIt->second.thisOverride,
-                               std::move(thisArgs), thisIsRef);
+          llvm::Value *stringValue = emitThisOverrideString(
+              metaIt->second, *candidateName, instanceVal);
           if (!stringValue)
             return nullptr;
 
           ArgIsRef.push_back(false);
           ArgValues.push_back(stringValue);
           handled = true;
+        } else if (metaIt != CG.compositeMetadata.end()) {
+          reportCompilerError(
+              "Cannot print value of type '" + *candidateName +
+                  "' because it does not implement string this()",
+              "Add 'string this()' to provide a formatter or convert the value "
+              "to string manually.");
+          return nullptr;
         }
       }
     }
@@ -10783,11 +10851,37 @@ llvm::Value *CallExprAST::codegen() {
     if (handled)
       continue;
 
-    bool isRef = dynamic_cast<RefExprAST *>(ArgExpr.get()) != nullptr;
-    ArgIsRef.push_back(isRef);
     llvm::Value *Value = ArgExpr->codegen();
     if (!Value)
       return nullptr;
+
+    if (baseCallee == "print") {
+      std::string nameAfterCodegen =
+          baseCompositeName(ArgExpr->getTypeName());
+      if (!nameAfterCodegen.empty()) {
+        auto metaIt = CG.compositeMetadata.find(nameAfterCodegen);
+        if (metaIt != CG.compositeMetadata.end() &&
+            metaIt->second.thisOverride) {
+          llvm::Value *stringValue = emitThisOverrideString(
+              metaIt->second, nameAfterCodegen, Value);
+          if (!stringValue)
+            return nullptr;
+          ArgIsRef.push_back(false);
+          ArgValues.push_back(stringValue);
+          continue;
+        } else if (metaIt != CG.compositeMetadata.end()) {
+          reportCompilerError(
+              "Cannot print value of type '" + nameAfterCodegen +
+                  "' because it does not implement string this()",
+              "Add 'string this()' to provide a formatter or convert the value "
+              "to string manually.");
+          return nullptr;
+        }
+      }
+    }
+
+    bool isRef = dynamic_cast<RefExprAST *>(ArgExpr.get()) != nullptr;
+    ArgIsRef.push_back(isRef);
     ArgValues.push_back(Value);
   }
 
