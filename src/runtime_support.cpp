@@ -1,7 +1,9 @@
-// This file implements runtime support helpers for generated Hybrid code, including string utilities and interface dispatch.
+// This file implements runtime support helpers for generated Hybrid code,
+// including ARC-aware string utilities and interface dispatch.
 
 #include "hybrid_runtime.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -9,87 +11,6 @@
 #include <cstring>
 
 extern "C" {
-
-static uint16_t *dup_utf16_from_utf8(const char *utf8);
-static char *dup_utf8_from_utf16(const uint16_t *utf16);
-
-static size_t hybrid_strlen16(const uint16_t *str) {
-  if (!str)
-    return 0;
-
-  const uint16_t *p = str;
-  while (*p != 0)
-    ++p;
-  return static_cast<size_t>(p - str);
-}
-
-int hybrid_strlen(const uint16_t *str) {
-  if (!str)
-    return 0;
-  return static_cast<int>(hybrid_strlen16(str));
-}
-
-int __hybrid_string_equals(const uint16_t *lhs, const uint16_t *rhs) {
-  if (lhs == rhs)
-    return 1;
-  if (!lhs || !rhs)
-    return 0;
-
-  const uint16_t *left = lhs;
-  const uint16_t *right = rhs;
-  while (*left != 0 && *right != 0) {
-    if (*left != *right)
-      return 0;
-    ++left;
-    ++right;
-  }
-  return *left == *right;
-}
-
-const void **hybrid_lookup_interface_table(const HybridTypeDescriptor *typeDesc,
-                                           const HybridTypeDescriptor *interfaceDesc) {
-  const HybridTypeDescriptor *current = typeDesc;
-  while (current) {
-    for (std::uint32_t idx = 0; idx < current->interfaceCount; ++idx) {
-      const HybridInterfaceEntry &entry = current->interfaces[idx];
-      if (entry.interfaceType == interfaceDesc)
-        return entry.methodTable;
-    }
-    current = current->baseType;
-  }
-  return nullptr;
-}
-
-int __hybrid_debug_descriptor_matches(void *object,
-                                      const uint16_t *expectedName) {
-  if (!object)
-    return 0;
-  auto *header = static_cast<hybrid_refcount_t *>(object);
-  if (!header || !header->descriptor || !header->descriptor->typeName)
-    return 0;
-  char *expectedUtf8 = dup_utf8_from_utf16(expectedName);
-  if (!expectedUtf8)
-    return 0;
-  bool matches =
-      std::strcmp(header->descriptor->typeName, expectedUtf8) == 0;
-  std::free(expectedUtf8);
-  return matches ? 1 : 0;
-}
-
-int __hybrid_debug_strong_count(void *object) {
-  if (!object)
-    return 0;
-  auto *header = static_cast<hybrid_refcount_t *>(object);
-  return static_cast<int>(hybrid_refcount_strong_count(header));
-}
-
-static uint16_t *alloc_utf16_buffer(size_t len) {
-  auto *buffer = static_cast<uint16_t *>(std::malloc((len + 1) * sizeof(uint16_t)));
-  if (!buffer)
-    return nullptr;
-  buffer[len] = 0;
-  return buffer;
-}
 
 static bool decode_utf8_codepoint(const unsigned char *input, size_t length,
                                   size_t &index, uint32_t &codepoint) {
@@ -138,173 +59,204 @@ static bool decode_utf8_codepoint(const unsigned char *input, size_t length,
   return true;
 }
 
-static uint16_t *dup_utf16_from_utf8(const char *utf8) {
+static size_t utf16_length_from_utf8(const char *utf8, size_t bytes) {
   if (!utf8)
-    return nullptr;
-
-  const unsigned char *bytes =
+    return 0;
+  size_t idx = 0;
+  size_t codeUnits = 0;
+  const unsigned char *data =
       reinterpret_cast<const unsigned char *>(utf8);
-  size_t utf8_len = std::strlen(utf8);
-  size_t index = 0;
-  size_t total_units = 0;
-
-  while (index < utf8_len) {
+  while (idx < bytes) {
     uint32_t codepoint = 0;
-    size_t cursor = index;
-    if (!decode_utf8_codepoint(bytes, utf8_len, cursor, codepoint))
-      return nullptr;
-    total_units += (codepoint >= 0x10000) ? 2 : 1;
-    index = cursor;
+    size_t cursor = idx;
+    if (!decode_utf8_codepoint(data, bytes, cursor, codepoint))
+      return 0;
+    codeUnits += (codepoint >= 0x10000) ? 2 : 1;
+    idx = cursor;
   }
-
-  auto *dest = alloc_utf16_buffer(total_units);
-  if (!dest)
-    return nullptr;
-
-  index = 0;
-  size_t out = 0;
-  while (index < utf8_len) {
-    uint32_t codepoint = 0;
-    if (!decode_utf8_codepoint(bytes, utf8_len, index, codepoint)) {
-      std::free(dest);
-      return nullptr;
-    }
-
-    if (codepoint >= 0x10000) {
-      uint32_t value = codepoint - 0x10000;
-      dest[out++] = static_cast<uint16_t>(0xD800 | ((value >> 10) & 0x3FF));
-      dest[out++] = static_cast<uint16_t>(0xDC00 | (value & 0x3FF));
-    } else {
-      dest[out++] = static_cast<uint16_t>(codepoint);
-    }
-  }
-  return dest;
+  return codeUnits;
 }
 
-static bool decode_utf16_codepoint(const uint16_t *input, size_t length,
-                                   size_t &index, uint32_t &codepoint) {
-  uint16_t lead = input[index];
-  if (lead >= 0xD800 && lead <= 0xDBFF) {
-    if (index + 1 >= length)
-      return false;
-    uint16_t trail = input[index + 1];
-    if (trail < 0xDC00 || trail > 0xDFFF)
-      return false;
-    uint32_t high = static_cast<uint32_t>(lead - 0xD800);
-    uint32_t low = static_cast<uint32_t>(trail - 0xDC00);
-    codepoint = (high << 10 | low) + 0x10000;
-    index += 2;
-    return true;
+static HybridTypeDescriptor StringDescriptor = {
+    "string", nullptr, nullptr, 0, nullptr, 0, nullptr};
+
+static const HybridTypeDescriptor *get_string_descriptor() {
+  static const HybridTypeDescriptor *canonical = nullptr;
+  if (!canonical) {
+    canonical = hybrid_register_type_descriptor(&StringDescriptor);
   }
-
-  if (lead >= 0xDC00 && lead <= 0xDFFF)
-    return false;
-
-  codepoint = lead;
-  ++index;
-  return true;
+  return canonical;
 }
 
-static char *dup_utf8_from_utf16(const uint16_t *utf16) {
-  if (!utf16)
-    return nullptr;
-
-  size_t len = hybrid_strlen16(utf16);
-  size_t index = 0;
-  size_t total_bytes = 0;
-
-  while (index < len) {
-    uint32_t codepoint = 0;
-    if (!decode_utf16_codepoint(utf16, len, index, codepoint))
-      return nullptr;
-
-    if (codepoint < 0x80)
-      total_bytes += 1;
-    else if (codepoint < 0x800)
-      total_bytes += 2;
-    else if (codepoint < 0x10000)
-      total_bytes += 3;
-    else
-      total_bytes += 4;
-  }
-
-  auto *buffer = static_cast<char *>(std::malloc(total_bytes + 1));
-  if (!buffer)
-    return nullptr;
-
-  char *out = buffer;
-  index = 0;
-
-  while (index < len) {
-    uint32_t codepoint = 0;
-    if (!decode_utf16_codepoint(utf16, len, index, codepoint)) {
-      std::free(buffer);
-      return nullptr;
-    }
-
-    if (codepoint < 0x80) {
-      *out++ = static_cast<char>(codepoint);
-    } else if (codepoint < 0x800) {
-      *out++ = static_cast<char>(0xC0 | (codepoint >> 6));
-      *out++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-    } else if (codepoint < 0x10000) {
-      *out++ = static_cast<char>(0xE0 | (codepoint >> 12));
-      *out++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-      *out++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-    } else {
-      *out++ = static_cast<char>(0xF0 | (codepoint >> 18));
-      *out++ = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-      *out++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-      *out++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-    }
-  }
-  *out = '\0';
-  return buffer;
-}
-
-void print(int x) {
-  std::printf("%d\n", x);
-}
-
-void print_string(uint16_t *str) {
-  if (!str) {
-    std::printf("(null)\n");
+static void string_dealloc(void *obj) {
+  if (!obj)
     return;
+  auto *str = static_cast<hybrid_string_t *>(obj);
+  if (str->backing) {
+    hybrid_release(str->backing);
+    str->backing = nullptr;
   }
-  char *utf8 = dup_utf8_from_utf16(str);
-  if (!utf8) {
-    std::printf("(null)\n");
-    return;
-  }
-  std::printf("%s\n", utf8);
-  std::free(utf8);
+  hybrid_dealloc(obj);
 }
 
-uint16_t *__hybrid_concat_strings(uint16_t **segments, int count) {
+const HybridTypeDescriptor *hybrid_string_type_descriptor(void) {
+  if (!StringDescriptor.dealloc)
+    StringDescriptor.dealloc = string_dealloc;
+  return get_string_descriptor();
+}
+
+static hybrid_string_t *allocate_string_storage(size_t byteLength,
+                                                size_t utf16Length,
+                                                size_t capacity) {
+  const size_t inlineBytes = capacity > 0 ? capacity + 1 : 1;
+  const size_t totalSize = sizeof(hybrid_string_t) + inlineBytes;
+  auto *storage = static_cast<hybrid_string_t *>(
+      hybrid_new_object(totalSize, hybrid_string_type_descriptor()));
+  if (!storage)
+    return nullptr;
+  storage->length = utf16Length;
+  storage->byteLength = byteLength;
+  storage->capacity = capacity;
+  storage->backing = nullptr;
+  storage->data = reinterpret_cast<char *>(storage + 1);
+  return storage;
+}
+
+static hybrid_string_t *allocate_view_storage() {
+  auto *storage = static_cast<hybrid_string_t *>(
+      hybrid_new_object(sizeof(hybrid_string_t),
+                        hybrid_string_type_descriptor()));
+  return storage;
+}
+
+static hybrid_string_t *make_string_from_utf8(const char *utf8, size_t bytes) {
+  if (!utf8)
+    return allocate_string_storage(0, 0, 0);
+  const size_t utf16Len = utf16_length_from_utf8(utf8, bytes);
+  auto *storage =
+      allocate_string_storage(bytes, utf16Len, std::max<size_t>(bytes, 0));
+  if (!storage)
+    return nullptr;
+  if (bytes > 0)
+    std::memcpy(storage->data, utf8, bytes);
+  if (storage->data)
+    storage->data[bytes] = 0;
+  return storage;
+}
+
+size_t hybrid_string_size(const hybrid_string_t *str) {
+  if (!str)
+    return 0;
+  return str->length;
+}
+
+int hybrid_strlen(const hybrid_string_t *str) {
+  return static_cast<int>(hybrid_string_size(str));
+}
+
+hybrid_string_t *__hybrid_string_from_utf8(const char *utf8, size_t length) {
+  return make_string_from_utf8(utf8, length);
+}
+
+hybrid_string_t *__hybrid_string_from_utf8_literal(const char *utf8,
+                                                   size_t length) {
+  return make_string_from_utf8(utf8, length);
+}
+
+int __hybrid_string_equals(const hybrid_string_t *lhs,
+                           const hybrid_string_t *rhs) {
+  if (lhs == rhs)
+    return 1;
+  if (!lhs || !rhs)
+    return 0;
+  if (lhs->byteLength != rhs->byteLength)
+    return 0;
+  if (lhs->length != rhs->length)
+    return 0;
+  if (lhs->byteLength == 0)
+    return 1;
+  return std::memcmp(lhs->data, rhs->data, lhs->byteLength) == 0 ? 1 : 0;
+}
+
+const void **hybrid_lookup_interface_table(const HybridTypeDescriptor *typeDesc,
+                                           const HybridTypeDescriptor *interfaceDesc) {
+  const HybridTypeDescriptor *current = typeDesc;
+  while (current) {
+    for (std::uint32_t idx = 0; idx < current->interfaceCount; ++idx) {
+      const HybridInterfaceEntry &entry = current->interfaces[idx];
+      if (entry.interfaceType == interfaceDesc)
+        return entry.methodTable;
+    }
+    current = current->baseType;
+  }
+  return nullptr;
+}
+
+int __hybrid_debug_descriptor_matches(void *object,
+                                      const hybrid_string_t *expectedName) {
+  if (!object || !expectedName)
+    return 0;
+  auto *header = static_cast<hybrid_refcount_t *>(object);
+  if (!header || !header->descriptor || !header->descriptor->typeName)
+    return 0;
+  const char *typeName = header->descriptor->typeName;
+  const char *expectedUtf8 = expectedName->data;
+  size_t expectedLen = expectedName->byteLength;
+  if (!expectedUtf8)
+    expectedLen = 0;
+  if (std::strlen(typeName) != expectedLen)
+    return 0;
+  return std::memcmp(typeName, expectedUtf8, expectedLen) == 0 ? 1 : 0;
+}
+
+int __hybrid_debug_strong_count(void *object) {
+  if (!object)
+    return 0;
+  auto *header = static_cast<hybrid_refcount_t *>(object);
+  return static_cast<int>(hybrid_refcount_strong_count(header));
+}
+
+static void append_bytes(char *dest, size_t offset, const char *src,
+                         size_t len) {
+  if (len == 0)
+    return;
+  std::memcpy(dest + offset, src, len);
+}
+
+hybrid_string_t *__hybrid_concat_strings(hybrid_string_t **segments,
+                                         int count) {
   if (!segments || count <= 0)
-    return dup_utf16_from_utf8("");
+    return __hybrid_string_from_utf8_literal("", 0);
 
-  size_t total = 0;
-  for (int i = 0; i < count; ++i)
-    total += hybrid_strlen16(segments[i]);
+  size_t totalBytes = 0;
+  size_t totalUnits = 0;
+  for (int i = 0; i < count; ++i) {
+    hybrid_string_t *seg = segments[i];
+    if (!seg)
+      continue;
+    totalBytes += seg->byteLength;
+    totalUnits += seg->length;
+  }
 
-  uint16_t *result = alloc_utf16_buffer(total);
+  auto *result =
+      allocate_string_storage(totalBytes, totalUnits, totalBytes);
   if (!result)
     return nullptr;
 
   size_t offset = 0;
   for (int i = 0; i < count; ++i) {
-    const uint16_t *segment = segments[i];
-    if (!segment)
+    hybrid_string_t *seg = segments[i];
+    if (!seg || seg->byteLength == 0)
       continue;
-    size_t len = hybrid_strlen16(segment);
-    std::memcpy(result + offset, segment, len * sizeof(uint16_t));
-    offset += len;
+    append_bytes(result->data, offset, seg->data, seg->byteLength);
+    offset += seg->byteLength;
   }
+  if (result->data)
+    result->data[result->byteLength] = 0;
   return result;
 }
 
-uint16_t *__hybrid_string_from_int64(int64_t value, int isUnsigned) {
+hybrid_string_t *__hybrid_string_from_int64(int64_t value, int isUnsigned) {
   char buffer[64];
   if (isUnsigned) {
     std::snprintf(buffer, sizeof(buffer), "%llu",
@@ -313,10 +265,12 @@ uint16_t *__hybrid_string_from_int64(int64_t value, int isUnsigned) {
     std::snprintf(buffer, sizeof(buffer), "%lld",
                   static_cast<long long>(value));
   }
-  return dup_utf16_from_utf8(buffer);
+  size_t len = std::strlen(buffer);
+  return __hybrid_string_from_utf8_literal(buffer, len);
 }
 
-uint16_t *__hybrid_string_from_double(double value, int precision, int hasPrecision) {
+hybrid_string_t *__hybrid_string_from_double(double value, int precision,
+                                             int hasPrecision) {
   int actual = hasPrecision ? precision : 6;
   if (actual < 0)
     actual = 0;
@@ -335,29 +289,159 @@ uint16_t *__hybrid_string_from_double(double value, int precision, int hasPrecis
   if (end > buffer && *end == '.')
     *end = '\0';
 
-  return dup_utf16_from_utf8(buffer);
+  size_t len = std::strlen(buffer);
+  return __hybrid_string_from_utf8_literal(buffer, len);
 }
 
-uint16_t *__hybrid_string_from_char32(int32_t codepoint) {
+hybrid_string_t *__hybrid_string_from_char32(int32_t codepoint) {
   if (codepoint < 0)
     codepoint = 0;
-  if (codepoint <= 0xFFFF) {
-    uint16_t *result = alloc_utf16_buffer(1);
-    if (!result)
-      return nullptr;
-    result[0] = static_cast<uint16_t>(codepoint);
-    return result;
+
+  char buffer[8];
+  size_t bytes = 0;
+  size_t units = 1;
+  uint32_t cp = static_cast<uint32_t>(codepoint);
+  if (cp < 0x80) {
+    buffer[bytes++] = static_cast<char>(cp);
+  } else if (cp < 0x800) {
+    buffer[bytes++] = static_cast<char>(0xC0 | (cp >> 6));
+    buffer[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+  } else if (cp < 0x10000) {
+    buffer[bytes++] = static_cast<char>(0xE0 | (cp >> 12));
+    buffer[bytes++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    buffer[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+  } else {
+    units = 2;
+    buffer[bytes++] = static_cast<char>(0xF0 | (cp >> 18));
+    buffer[bytes++] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    buffer[bytes++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    buffer[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
   }
 
-  uint32_t value = static_cast<uint32_t>(codepoint) - 0x10000;
-  uint16_t high = static_cast<uint16_t>(0xD800 | ((value >> 10) & 0x3FF));
-  uint16_t low = static_cast<uint16_t>(0xDC00 | (value & 0x3FF));
-  uint16_t *result = alloc_utf16_buffer(2);
+  auto *storage = allocate_string_storage(bytes, units, bytes);
+  if (!storage)
+    return nullptr;
+  std::memcpy(storage->data, buffer, bytes);
+  storage->data[bytes] = 0;
+  return storage;
+}
+
+static bool compute_slice_bounds(const hybrid_string_t *source, size_t start,
+                                 size_t length, size_t &byteOffset,
+                                 size_t &sliceBytes, size_t &sliceUnits) {
+  if (!source) {
+    byteOffset = 0;
+    sliceBytes = 0;
+    sliceUnits = 0;
+    return true;
+  }
+  if (start > source->length)
+    start = source->length;
+  const size_t maxUnits = source->length;
+  if (length > maxUnits - start)
+    length = maxUnits - start;
+
+  const unsigned char *data =
+      reinterpret_cast<const unsigned char *>(source->data);
+  size_t idx = 0;
+  size_t unitsSeen = 0;
+  byteOffset = 0;
+  sliceBytes = 0;
+  sliceUnits = length;
+
+  while (idx < source->byteLength && unitsSeen < start) {
+    uint32_t cp = 0;
+    size_t cursor = idx;
+    if (!decode_utf8_codepoint(data, source->byteLength, cursor, cp))
+      return false;
+    unitsSeen += (cp >= 0x10000) ? 2 : 1;
+    idx = cursor;
+  }
+  byteOffset = idx;
+
+  while (idx < source->byteLength && sliceUnits > 0) {
+    uint32_t cp = 0;
+    size_t cursor = idx;
+    if (!decode_utf8_codepoint(data, source->byteLength, cursor, cp))
+      return false;
+    sliceBytes += (cursor - idx);
+    sliceUnits -= 1;
+    if (cp >= 0x10000 && sliceUnits > 0)
+      sliceUnits -= 1;
+    idx = cursor;
+  }
+  sliceUnits = length;
+  return true;
+}
+
+hybrid_string_t *__hybrid_string_slice(hybrid_string_t *source, size_t start,
+                                       size_t length) {
+  size_t byteOffset = 0;
+  size_t sliceBytes = 0;
+  size_t sliceUnits = 0;
+  if (!compute_slice_bounds(source, start, length, byteOffset, sliceBytes,
+                            sliceUnits))
+    return nullptr;
+
+  auto *view = allocate_view_storage();
+  if (!view)
+    return nullptr;
+
+  view->length = sliceUnits;
+  view->byteLength = sliceBytes;
+  view->capacity = sliceBytes;
+  view->backing = source;
+  view->data = source ? source->data + byteOffset : nullptr;
+  if (source)
+    hybrid_retain(source);
+  return view;
+}
+
+hybrid_string_t *__hybrid_string_append_mut(hybrid_string_t *base,
+                                            hybrid_string_t *suffix) {
+  const size_t baseBytes = base ? base->byteLength : 0;
+  const size_t baseUnits = base ? base->length : 0;
+  const size_t suffixBytes = suffix ? suffix->byteLength : 0;
+  const size_t suffixUnits = suffix ? suffix->length : 0;
+  const size_t neededBytes = baseBytes + suffixBytes;
+  const size_t neededUnits = baseUnits + suffixUnits;
+
+  const bool baseIsUnique =
+      base && base->backing == nullptr &&
+      hybrid_refcount_strong_count(&base->counts) == 1;
+
+  if (baseIsUnique && base->capacity >= neededBytes) {
+    if (suffixBytes > 0)
+      std::memcpy(base->data + baseBytes, suffix->data, suffixBytes);
+    base->byteLength = neededBytes;
+    base->length = neededUnits;
+    base->data[neededBytes] = 0;
+    return base;
+  }
+
+  auto *result =
+      allocate_string_storage(neededBytes, neededUnits, neededBytes);
   if (!result)
     return nullptr;
-  result[0] = high;
-  result[1] = low;
+  if (baseBytes > 0 && base)
+    std::memcpy(result->data, base->data, baseBytes);
+  if (suffixBytes > 0 && suffix)
+    std::memcpy(result->data + baseBytes, suffix->data, suffixBytes);
+  result->data[neededBytes] = 0;
   return result;
+}
+
+void print(int x) {
+  std::printf("%d\n", x);
+}
+
+void print_string(hybrid_string_t *str) {
+  if (!str || !str->data) {
+    std::printf("(null)\n");
+    return;
+  }
+  std::fwrite(str->data, 1, str->byteLength, stdout);
+  std::printf("\n");
 }
 
 } // extern "C"

@@ -56,6 +56,15 @@ typedef struct hybrid_array_header_t {
   hybrid_array_release_fn elementRelease;
 } hybrid_array_header_t;
 
+typedef struct hybrid_string_t {
+  hybrid_refcount_t counts;
+  size_t length;       // UTF-16 code units
+  size_t byteLength;   // UTF-8 byte length (without null terminator)
+  size_t capacity;     // bytes available for writes (without null terminator)
+  struct hybrid_string_t *backing; // retained backing storage for slices/views
+  char *data;          // UTF-8 bytes; may alias backing->data for slices
+} hybrid_string_t;
+
 typedef struct HybridARCDebugConfig {
   int leakDetect;
   int refTrace;
@@ -75,6 +84,10 @@ HYBRID_STATIC_ASSERT(
     "Array header must start with ARC counts");
 HYBRID_STATIC_ASSERT(sizeof(hybrid_array_header_t) >= sizeof(hybrid_refcount_t),
                      "Array header must wrap refcount header");
+HYBRID_STATIC_ASSERT(offsetof(hybrid_string_t, counts) == 0,
+                     "String storage must start with ARC counts");
+HYBRID_STATIC_ASSERT(sizeof(hybrid_string_t) >= sizeof(hybrid_refcount_t),
+                     "String storage must wrap refcount header");
 
 #ifdef __cplusplus
 extern "C" {
@@ -226,6 +239,26 @@ void *__hybrid_shared_control_lock(HybridSharedControlBlock *control);
 uint32_t __hybrid_shared_control_use_count(HybridSharedControlBlock *control);
 void __hybrid_shared_control_debug_dump(HybridSharedControlBlock *control,
                                         FILE *sink);
+
+// String runtime
+const HybridTypeDescriptor *hybrid_string_type_descriptor(void);
+hybrid_string_t *__hybrid_string_from_utf8(const char *utf8, size_t length);
+hybrid_string_t *__hybrid_string_from_utf8_literal(const char *utf8,
+                                                   size_t length);
+hybrid_string_t *__hybrid_concat_strings(hybrid_string_t **segments, int count);
+int __hybrid_string_equals(const hybrid_string_t *lhs,
+                           const hybrid_string_t *rhs);
+hybrid_string_t *__hybrid_string_from_int64(int64_t value, int isUnsigned);
+hybrid_string_t *__hybrid_string_from_double(double value, int precision,
+                                             int hasPrecision);
+hybrid_string_t *__hybrid_string_from_char32(int32_t codepoint);
+hybrid_string_t *__hybrid_string_slice(hybrid_string_t *source, size_t start,
+                                       size_t length);
+hybrid_string_t *__hybrid_string_append_mut(hybrid_string_t *base,
+                                            hybrid_string_t *suffix);
+size_t hybrid_string_size(const hybrid_string_t *str);
+int hybrid_strlen(const hybrid_string_t *str);
+void print_string(hybrid_string_t *str);
 
 extern int hybrid_debug_leaks;
 extern int hybrid_debug_reftrace;

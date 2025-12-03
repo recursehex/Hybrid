@@ -404,6 +404,11 @@ static void assignARCEligibility(TypeInfo &info) {
     return;
   }
 
+  if (info.baseTypeName == "string") {
+    info.arcManaged = true;
+    return;
+  }
+
   if (info.pointerDepth > 0)
     return;
 
@@ -1220,6 +1225,14 @@ buildDescribeTypeSummary(const std::string &typeSpelling) {
     return smartSummary;
   }
 
+  if (sanitized == "string") {
+    return "type:" + sanitized + "|kind:builtin|properties:size";
+  }
+
+  if (requested.isArray) {
+    return "type:" + sanitized + "|kind:array|properties:size";
+  }
+
   if (StructAST *templ = FindGenericTemplate(sanitized))
     return formatTemplateDescribeSummary(sanitized, *templ);
 
@@ -1318,6 +1331,21 @@ static llvm::StructType *getArrayHeaderType() {
                      sizeTy,
                      releasePtrTy});
   return headerTy;
+}
+
+static llvm::StructType *getStringStorageType() {
+  if (auto *existing = llvm::StructType::getTypeByName(
+          *TheContext, "__HybridStringStorage"))
+    return existing;
+  auto *storageTy =
+      llvm::StructType::create(*TheContext, "__HybridStringStorage");
+  auto *headerTy = getArcHeaderType();
+  auto *sizeTy = getSizeType();
+  auto *opaquePtr = pointerType();
+  auto *bytePtr = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  storageTy->setBody(
+      {headerTy, sizeTy, sizeTy, sizeTy, opaquePtr, bytePtr});
+  return storageTy;
 }
 
 static std::uint64_t getArrayPayloadOffsetBytes() {
@@ -6762,7 +6790,7 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   else if (CleanType == "void")
     return llvm::Type::getVoidTy(*TheContext);
   else if (CleanType == "string")
-    return llvm::PointerType::get(*TheContext, 0); // Strings as opaque pointer
+    return pointerType(getStringStorageType());
   // New sized integer types
   else if (CleanType == "byte")
     return llvm::Type::getInt8Ty(*TheContext);   // 8-bit unsigned
@@ -6966,50 +6994,65 @@ llvm::Value *ParenExprAST::codegen_ptr() {
   return Elements.front()->codegen_ptr();
 }
 
-static llvm::Value *emitUTF16StringLiteral(const std::string &value) {
-  static std::map<std::string, llvm::GlobalVariable*> StringLiteralCache;
+static llvm::FunctionCallee getStringFromUtf8LiteralFunction() {
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  auto *bytePtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *sizeTy = getSizeType();
+  auto *fnTy = llvm::FunctionType::get(stringPtrTy, {bytePtrTy, sizeTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_string_from_utf8_literal",
+                                        fnTy);
+}
+
+static llvm::Value *emitStringLiteral(const std::string &value) {
+  static std::map<std::string, llvm::GlobalVariable *> StringLiteralCache;
+
+  // Validate UTF-8 to preserve existing diagnostics.
+  std::vector<uint16_t> utf16Units;
+  std::string conversionError;
+  if (!convertUTF8LiteralToUTF16(value, utf16Units, conversionError))
+    return LogErrorV(conversionError.c_str());
 
   llvm::GlobalVariable *global = nullptr;
-
   if (auto it = StringLiteralCache.find(value); it != StringLiteralCache.end()) {
     global = it->second;
   } else {
-    std::vector<llvm::Constant *> charValues;
-    std::vector<uint16_t> utf16Units;
-    std::string conversionError;
-    if (!convertUTF8LiteralToUTF16(value, utf16Units, conversionError)) {
-      return LogErrorV(conversionError.c_str());
+    std::vector<llvm::Constant *> bytes;
+    bytes.reserve(value.size() + 1);
+    for (unsigned char c : value) {
+      bytes.push_back(
+          llvm::ConstantInt::get(llvm::Type::getInt8Ty(*TheContext), c));
     }
+    bytes.push_back(
+        llvm::ConstantInt::get(llvm::Type::getInt8Ty(*TheContext), 0));
 
-    charValues.reserve(utf16Units.size() + 1);
+    auto *arrayType =
+        llvm::ArrayType::get(llvm::Type::getInt8Ty(*TheContext), bytes.size());
+    auto *constArray = llvm::ConstantArray::get(arrayType, bytes);
 
-    for (uint16_t unit : utf16Units) {
-      charValues.push_back(llvm::ConstantInt::get(
-          llvm::Type::getInt16Ty(*TheContext), unit));
-    }
-
-    // Append null terminator
-    charValues.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(*TheContext), 0));
-
-    auto *arrayType = llvm::ArrayType::get(llvm::Type::getInt16Ty(*TheContext), charValues.size());
-    auto *stringArray = llvm::ConstantArray::get(arrayType, charValues);
-
-    global = new llvm::GlobalVariable(*TheModule, arrayType, true,
-                                      llvm::GlobalValue::PrivateLinkage,
-                                      stringArray, "str");
+    global = new llvm::GlobalVariable(
+        *TheModule, arrayType, true, llvm::GlobalValue::PrivateLinkage,
+        constArray, "str");
+    global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    global->setAlignment(llvm::MaybeAlign(1));
     StringLiteralCache.emplace(value, global);
   }
 
   auto *arrayType = llvm::cast<llvm::ArrayType>(global->getValueType());
-
-  llvm::Value *zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
-  return Builder->CreateInBoundsGEP(arrayType, global, {zero, zero}, "strptr");
+  llvm::Value *zero =
+      llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+  llvm::Value *dataPtr = Builder->CreateInBoundsGEP(
+      arrayType, global, {zero, zero}, "strptr");
+  llvm::Value *lenVal =
+      llvm::ConstantInt::get(getSizeType(), value.size());
+  return Builder->CreateCall(getStringFromUtf8LiteralFunction(),
+                             {dataPtr, lenVal}, "str.literal");
 }
 
 // Generate code for string literals
 llvm::Value *StringExprAST::codegen() {
   setTypeName("string");
-  return emitUTF16StringLiteral(getValue());
+  markTemporary();
+  return emitStringLiteral(getValue());
 }
 
 static llvm::FunctionCallee getConcatStringsFunction() {
@@ -7023,9 +7066,9 @@ static llvm::FunctionCallee getConcatStringsFunction() {
 }
 
 static llvm::FunctionCallee getStringEqualsFunction() {
-  llvm::Type *boolTy = llvm::Type::getInt1Ty(*TheContext);
+  llvm::Type *intTy = llvm::Type::getInt32Ty(*TheContext);
   llvm::Type *stringPtrTy = getTypeFromString("string");
-  llvm::FunctionType *fnType = llvm::FunctionType::get(boolTy,
+  llvm::FunctionType *fnType = llvm::FunctionType::get(intTy,
                                                        {stringPtrTy, stringPtrTy},
                                                        false);
   return TheModule->getOrInsertFunction("__hybrid_string_equals", fnType);
@@ -7557,8 +7600,8 @@ static llvm::Value *convertValueToString(llvm::Value *value,
           llvm::ConstantInt::get(cond->getType(), 0),
           "boolcmp");
     }
-    llvm::Value *trueStr = emitUTF16StringLiteral("true");
-    llvm::Value *falseStr = emitUTF16StringLiteral("false");
+    llvm::Value *trueStr = emitStringLiteral("true");
+    llvm::Value *falseStr = emitStringLiteral("false");
     return Builder->CreateSelect(cond, trueStr, falseStr, "boolstr");
   }
 
@@ -7628,7 +7671,7 @@ llvm::Value *InterpolatedStringExprAST::codegen() {
 
   for (const auto &segment : Segments) {
     if (segment.isLiteral()) {
-      segmentValues.push_back(emitUTF16StringLiteral(segment.getLiteral()));
+      segmentValues.push_back(emitStringLiteral(segment.getLiteral()));
       continue;
     }
 
@@ -7649,7 +7692,8 @@ llvm::Value *InterpolatedStringExprAST::codegen() {
 
   if (segmentValues.empty()) {
     setTypeName("string");
-    return emitUTF16StringLiteral("");
+    markTemporary();
+    return emitStringLiteral("");
   }
 
   if (segmentValues.size() == 1) {
@@ -7683,6 +7727,7 @@ llvm::Value *InterpolatedStringExprAST::codegen() {
   llvm::Value *result = Builder->CreateCall(concatFunc, {arrayPtr, countVal}, "interp.result");
 
   setTypeName("string");
+  markTemporary();
   return result;
 }
 
@@ -9321,38 +9366,99 @@ llvm::Value *BinaryExprAST::codegen() {
   // Get type names from operands after potential regeneration
   std::string rawLeftTypeName = getLHS()->getTypeName();
   std::string rawRightTypeName = getRHS()->getTypeName();
+  std::string lhsSanitized = stripNullableAnnotations(rawLeftTypeName);
+  std::string rhsSanitized = stripNullableAnnotations(rawRightTypeName);
 
-  if (Op == "+" && rawLeftTypeName == "string" && rawRightTypeName == "string") {
+  auto emitCharLikeToString = [&](llvm::Value *val,
+                                  const std::string &typeName) -> llvm::Value * {
+    std::string clean = stripNullableAnnotations(typeName);
+    if (clean == "lchar")
+      return LogErrorV("Cannot append 32-bit character 'lchar' to string");
+    if (clean != "char" && clean != "schar")
+      return nullptr;
+    llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+    llvm::Value *asInt32 = val;
+    if (!val->getType()->isIntegerTy(32)) {
+      if (val->getType()->isIntegerTy() &&
+          val->getType()->getIntegerBitWidth() < 32)
+        asInt32 = Builder->CreateZExt(val, int32Ty, "str.char.zext");
+      else if (val->getType()->isIntegerTy() &&
+               val->getType()->getIntegerBitWidth() > 32)
+        asInt32 = Builder->CreateTrunc(val, int32Ty, "str.char.trunc");
+      else
+        return LogErrorV("Cannot convert value to character for string append");
+    }
+    return Builder->CreateCall(getCharToStringFunction(), {asInt32},
+                               "str.char");
+  };
+
+  auto emitStringConcat = [&](llvm::Value *leftStr, llvm::Value *rightStr) {
     llvm::Type *stringPtrTy = getTypeFromString("string");
     llvm::ArrayType *arrayTy = llvm::ArrayType::get(stringPtrTy, 2);
-    llvm::AllocaInst *arrayAlloca = Builder->CreateAlloca(arrayTy, nullptr, "str.add.tmp");
+    llvm::AllocaInst *arrayAlloca =
+        Builder->CreateAlloca(arrayTy, nullptr, "str.add.tmp");
 
-    llvm::Value *zeroIdx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
-    llvm::Value *lhsPtr = Builder->CreateInBoundsGEP(arrayTy, arrayAlloca,
-        {zeroIdx, zeroIdx}, "str.add.lhs");
-    Builder->CreateStore(L, lhsPtr);
+    llvm::Value *zeroIdx =
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 0);
+    llvm::Value *lhsPtr =
+        Builder->CreateInBoundsGEP(arrayTy, arrayAlloca, {zeroIdx, zeroIdx},
+                                   "str.add.lhs");
+    Builder->CreateStore(leftStr, lhsPtr);
 
-    llvm::Value *oneIdx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 1);
-    llvm::Value *rhsPtr = Builder->CreateInBoundsGEP(arrayTy, arrayAlloca,
-        {zeroIdx, oneIdx}, "str.add.rhs");
-    Builder->CreateStore(R, rhsPtr);
+    llvm::Value *oneIdx =
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 1);
+    llvm::Value *rhsPtr =
+        Builder->CreateInBoundsGEP(arrayTy, arrayAlloca, {zeroIdx, oneIdx},
+                                   "str.add.rhs");
+    Builder->CreateStore(rightStr, rhsPtr);
 
-    llvm::Value *basePtr = Builder->CreateInBoundsGEP(arrayTy, arrayAlloca,
-        {zeroIdx, zeroIdx}, "str.add.base");
-    llvm::Value *countVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*TheContext), 2);
+    llvm::Value *basePtr =
+        Builder->CreateInBoundsGEP(arrayTy, arrayAlloca, {zeroIdx, zeroIdx},
+                                   "str.add.base");
+    llvm::Value *countVal = llvm::ConstantInt::get(
+        llvm::Type::getInt32Ty(*TheContext), 2);
     llvm::FunctionCallee concatFn = getConcatStringsFunction();
-    llvm::Value *result = Builder->CreateCall(concatFn, {basePtr, countVal}, "str.addtmp");
+    llvm::Value *result =
+        Builder->CreateCall(concatFn, {basePtr, countVal}, "str.addtmp");
     setTypeName("string");
+    markTemporary();
     return result;
+  };
+
+  if (Op == "+" && lhsSanitized == "string" && rhsSanitized == "string") {
+    return emitStringConcat(ensureStringPointer(L), ensureStringPointer(R));
+  }
+
+  const bool lhsIsString = lhsSanitized == "string";
+  const bool rhsIsString = rhsSanitized == "string";
+  if (Op == "+" && (lhsIsString || rhsIsString)) {
+    llvm::Value *lhsStr = nullptr;
+    llvm::Value *rhsStr = nullptr;
+
+    if (lhsIsString) {
+      lhsStr = ensureStringPointer(L);
+      rhsStr = rhsIsString ? ensureStringPointer(R)
+                           : emitCharLikeToString(R, rawRightTypeName);
+    } else {
+      rhsStr = ensureStringPointer(R);
+      lhsStr = emitCharLikeToString(L, rawLeftTypeName);
+    }
+
+    if (!lhsStr || !rhsStr)
+      return nullptr;
+    return emitStringConcat(lhsStr, rhsStr);
   }
 
   ParsedTypeDescriptor leftDesc = parseTypeString(rawLeftTypeName);
   ParsedTypeDescriptor rightDesc = parseTypeString(rawRightTypeName);
 
   if ((Op == "==" || Op == "!=") &&
-      rawLeftTypeName == "string" && rawRightTypeName == "string") {
+      lhsSanitized == "string" && rhsSanitized == "string") {
     llvm::FunctionCallee equalsFn = getStringEqualsFunction();
-    llvm::Value *cmp = Builder->CreateCall(equalsFn, {L, R}, "str.eqcall");
+    llvm::Value *cmpInt =
+        Builder->CreateCall(equalsFn, {L, R}, "str.eqcall");
+    llvm::Value *cmp = Builder->CreateICmpNE(
+        cmpInt, llvm::ConstantInt::get(cmpInt->getType(), 0), "str.eqbool");
     if (Op == "!=")
       cmp = Builder->CreateNot(cmp, "str.neqcall");
     setTypeName("bool");
@@ -11560,7 +11666,8 @@ llvm::Value *CallExprAST::codegen() {
     if (!summary)
       return nullptr;
     setTypeName("string");
-    return emitUTF16StringLiteral(*summary);
+    markTemporary();
+    return emitStringLiteral(*summary);
   }
   bool treatAsFunctionGenerics =
       !explicitTypeArgs.empty() &&
@@ -15482,11 +15589,53 @@ llvm::Value *MemberAccessExprAST::codegen() {
 
     ObjectTypeName = Object->getTypeName();
     ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+    std::string baseLookup = sanitizeBaseTypeName(ObjectTypeName);
     if (ObjectTypeDesc.isNullable) {
       return LogErrorV(
           ("Cannot access nullable type '" + ObjectTypeName +
            "' without null-safe operator")
               .c_str());
+    }
+
+    if (MemberName == "size") {
+      if (ObjectTypeDesc.isArray) {
+        unsigned outerRank =
+            ObjectTypeDesc.arrayRanks.empty() ? 1 : ObjectTypeDesc.arrayRanks.back();
+        std::string elemTypeStr = removeLastArrayGroup(ObjectTypeDesc.sanitized);
+        llvm::Type *elemTy = getTypeFromString(elemTypeStr);
+        if (!elemTy)
+          return LogErrorV("Unable to resolve array element type for size access");
+        llvm::StructType *arrayStructTy = getArrayStructType(elemTy, outerRank);
+        llvm::Value *arrayValue = ObjectPtr;
+        if (arrayValue->getType()->isPointerTy()) {
+          arrayValue = Builder->CreateLoad(arrayStructTy, ObjectPtr,
+                                           "array.size.load");
+        }
+        llvm::Value *sizeVal =
+            Builder->CreateExtractValue(arrayValue, 1, "array.size");
+        setTypeName("int");
+        return sizeVal;
+      }
+
+      if (baseLookup == "string") {
+        llvm::Type *storageTy = getStringStorageType();
+        llvm::Value *typedPtr = ObjectPtr;
+        if (!typedPtr->getType()->isPointerTy()) {
+          return LogErrorV("String size access requires reference-compatible storage");
+        }
+        typedPtr = Builder->CreateBitCast(
+            typedPtr, pointerType(storageTy), "string.size.storage");
+        llvm::Value *lenPtr = Builder->CreateStructGEP(
+            storageTy, typedPtr, 1, "string.size.ptr");
+        llvm::Value *lenVal = Builder->CreateLoad(
+            getSizeType(), lenPtr, "string.size");
+        llvm::Type *intTy = llvm::Type::getInt32Ty(*TheContext);
+        if (lenVal->getType() != intTy)
+          lenVal =
+              Builder->CreateTruncOrBitCast(lenVal, intTy, "string.size.int");
+        setTypeName("int");
+        return lenVal;
+      }
     }
     StructLookupName = ObjectTypeDesc.sanitized;
 
@@ -15670,11 +15819,17 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
 
     ObjectTypeName = Object->getTypeName();
     ParsedTypeDescriptor ObjectTypeDesc = parseTypeString(ObjectTypeName);
+    std::string baseLookup = sanitizeBaseTypeName(ObjectTypeName);
     if (ObjectTypeDesc.isNullable) {
       return LogErrorV(
           ("Cannot access nullable type '" + ObjectTypeName +
            "' without null-safe operator")
               .c_str());
+    }
+
+    if (MemberName == "size") {
+      if (ObjectTypeDesc.isArray || baseLookup == "string")
+        return LogErrorV("Property 'size' is read-only");
     }
     StructLookupName = ObjectTypeDesc.sanitized;
 
