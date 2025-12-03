@@ -355,7 +355,7 @@ class Button inherits Widget, Clickable, Accessible
 - Only classes may specify a base class. Interfaces may extend other interfaces but cannot derive from classes.
 - If the first type resolves to an interface, the compiler treats the class as having no base class and adds that type to the interface list.
 - Inheritance cycles (direct or indirect) produce a diagnostic.
-- Derived constructors automatically receive `this` pointing at the derived storage. Use the usual initializer logic as there is no implicit base constructor chaining yet, so call helpers via `base` if needed.
+- Derived constructors automatically receive `this` pointing at the derived storage. If the base class exposes a parameterless constructor it runs automatically; otherwise call it explicitly inside the constructor body with `base(...)`.
 
 ### Interfaces as contracts
 

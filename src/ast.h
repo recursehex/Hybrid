@@ -911,6 +911,7 @@ class CallExprAST : public ExprAST {
   std::vector<std::unique_ptr<ExprAST>> Args;
   bool IsDestructorCall = false;
   std::string DestructorTypeName;
+  bool IsBaseConstructorCall = false;
 
 public:
   CallExprAST(const std::string &Callee,
@@ -932,6 +933,8 @@ public:
     IsDestructorCall = true;
     DestructorTypeName = std::move(typeName);
   }
+  void markBaseConstructorCall() { IsBaseConstructorCall = true; }
+  bool isBaseConstructorCall() const { return IsBaseConstructorCall; }
 
 private:
   llvm::Value *emitResolvedCall(const std::string &callee,

@@ -39,12 +39,13 @@ class BaseTracker
     }
 }
 
-class DerivedTracker : BaseTracker
+class DerivedTracker inherits BaseTracker
 {
     Payload secondary
 
-    DerivedTracker(Payload first, Payload second) : BaseTracker(first)
+    DerivedTracker(Payload first, Payload second)
     {
+        base(first)
         this.secondary = second
     }
 }

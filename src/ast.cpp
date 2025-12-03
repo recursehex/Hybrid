@@ -3538,11 +3538,125 @@ static void noteMemberAssignment(const std::string &ownerName,
   }
 }
 
+static bool hasParameterlessConstructor(const std::string &typeName) {
+  auto tryLookup = [&](const std::string &lookupName) -> bool {
+    auto it = CG.functionOverloads.find(lookupName);
+    if (it == CG.functionOverloads.end())
+      return false;
+    return std::ranges::any_of(it->second, [](const FunctionOverload &overload) {
+      return overload.parameterTypes.empty();
+    });
+  };
+
+  if (tryLookup(typeName))
+    return true;
+
+  std::string base = baseCompositeName(typeName);
+  if (!base.empty() && base != typeName)
+    return tryLookup(base);
+
+  return false;
+}
+
+static llvm::Value *emitBaseConstructorInitialization(
+    const std::string &typeKey, llvm::StructType *structTy,
+    llvm::AllocaInst *structPtr, const CompositeTypeInfo &metadata,
+    const std::vector<std::unique_ptr<ExprAST>> &args,
+    std::optional<std::string> explicitTarget = std::nullopt) {
+  if (!structTy || !structPtr)
+    return nullptr;
+
+  if (!metadata.baseClass) {
+    reportCompilerError("Constructor for '" + typeKey +
+                        "' does not declare a base class to initialize");
+    return nullptr;
+  }
+
+  if (explicitTarget && *explicitTarget != *metadata.baseClass) {
+    reportCompilerError("Constructor initializer targets '" + *explicitTarget +
+                        "' but '" + typeKey + "' inherits '" +
+                        *metadata.baseClass + "'");
+    return nullptr;
+  }
+
+  ActiveCompositeContext *ctx = currentCompositeContextMutable();
+  const bool trackInvocation =
+      ctx && ctx->name == typeKey && ctx->kind == MethodKind::Constructor &&
+      !ctx->isStatic;
+  if (trackInvocation) {
+    ctx->baseConstructorRequired = true;
+    ctx->baseClassName = metadata.baseClass;
+    if (ctx->baseConstructorInvoked) {
+      reportCompilerError("Constructor for " +
+                          describeAggregateKind(metadata.kind) + " '" +
+                          typeKey + "' cannot invoke the base constructor more than once",
+                          "Remove the duplicate base(...) call.");
+      return nullptr;
+    }
+  }
+
+  if (structPtr->getAllocatedType() != structTy) {
+    reportCompilerError("Internal error: constructor 'this' pointer type mismatch for '" +
+                        typeKey + "'");
+    return nullptr;
+  }
+
+  auto baseStructIt = StructTypes.find(*metadata.baseClass);
+  if (baseStructIt == StructTypes.end()) {
+    reportCompilerError("Base class '" + *metadata.baseClass +
+                        "' is not available for constructor chaining in '" +
+                        typeKey + "'");
+    return nullptr;
+  }
+
+  std::vector<bool> argIsRef;
+  argIsRef.reserve(args.size());
+  std::vector<llvm::Value *> argValues;
+  argValues.reserve(args.size());
+  for (const auto &argExpr : args) {
+    bool isRef = dynamic_cast<RefExprAST *>(argExpr.get()) != nullptr;
+    argIsRef.push_back(isRef);
+    llvm::Value *value = argExpr->codegen();
+    if (!value)
+      return nullptr;
+    argValues.push_back(value);
+  }
+
+  llvm::Value *baseValue = emitResolvedCallInternal(
+      *metadata.baseClass, std::move(argValues), argIsRef, &args,
+      /*preferGeneric=*/false, nullptr, nullptr);
+  if (!baseValue)
+    return nullptr;
+
+  llvm::StructType *baseStructTy = baseStructIt->second;
+  if (baseValue->getType()->isPointerTy()) {
+    baseValue =
+        Builder->CreateLoad(baseStructTy, baseValue, "ctor.base.value");
+  } else if (baseValue->getType() != baseStructTy) {
+    baseValue =
+        Builder->CreateBitCast(baseValue, baseStructTy, "ctor.base.cast");
+  }
+
+  llvm::Value *basePtr = Builder->CreateBitCast(
+      structPtr, pointerType(baseStructTy), "ctor.base.ptr");
+  Builder->CreateStore(baseValue, basePtr);
+  if (const CompositeTypeInfo *baseInfo =
+          lookupCompositeInfo(*metadata.baseClass)) {
+    for (const auto &fieldEntry : baseInfo->fieldTypes)
+      noteMemberAssignment(typeKey, fieldEntry.first, false);
+  }
+
+  if (trackInvocation)
+    ctx->baseConstructorInvoked = true;
+
+  return baseValue;
+}
+
 static bool emitConstructorInitializers(const std::string &typeKey,
                                         llvm::StructType *structTy,
                                         llvm::AllocaInst *structPtr,
-                                        CompositeTypeInfo &metadata,
-                                        std::vector<ConstructorInitializer> &initializers) {
+                                        const CompositeTypeInfo &metadata,
+                                        const std::vector<ConstructorInitializer> &initializers) {
   if (initializers.empty())
     return true;
   if (!structTy || !structPtr)
@@ -3551,54 +3665,10 @@ static bool emitConstructorInitializers(const std::string &typeKey,
   std::set<std::string> seenFields;
   for (auto &init : initializers) {
     if (init.kind == ConstructorInitializer::Kind::Base) {
-      if (!metadata.baseClass) {
-        reportCompilerError("Constructor tries to initialize base '" +
-                                init.target +
-                                "' but '" + typeKey + "' does not inherit it");
+      if (!emitBaseConstructorInitialization(typeKey, structTy, structPtr,
+                                             metadata, init.arguments,
+                                             init.target)) {
         return false;
-      }
-      auto baseStructIt = StructTypes.find(*metadata.baseClass);
-      if (baseStructIt == StructTypes.end()) {
-        reportCompilerError("Base class '" + *metadata.baseClass +
-                            "' is not available for initializer in '" +
-                                typeKey + "'");
-        return false;
-      }
-      llvm::StructType *baseStructTy = baseStructIt->second;
-      std::vector<bool> argIsRef;
-      argIsRef.reserve(init.arguments.size());
-      std::vector<llvm::Value *> argValues;
-      argValues.reserve(init.arguments.size());
-      for (auto &argExpr : init.arguments) {
-        bool isRef = dynamic_cast<RefExprAST *>(argExpr.get()) != nullptr;
-        argIsRef.push_back(isRef);
-        llvm::Value *value = argExpr->codegen();
-        if (!value)
-          return false;
-        argValues.push_back(value);
-      }
-
-      llvm::Value *baseValue = emitResolvedCallInternal(
-          *metadata.baseClass, std::move(argValues), argIsRef,
-          &init.arguments, /*preferGeneric=*/false, nullptr, nullptr);
-      if (!baseValue)
-        return false;
-
-      if (baseValue->getType()->isPointerTy()) {
-        baseValue = Builder->CreateLoad(baseStructTy, baseValue,
-                                        "ctor.base.value");
-      } else if (baseValue->getType() != baseStructTy) {
-        baseValue = Builder->CreateBitCast(baseValue, baseStructTy,
-                                           "ctor.base.cast");
-      }
-
-      llvm::Value *basePtr = Builder->CreateBitCast(
-          structPtr, pointerType(baseStructTy), "ctor.base.ptr");
-      Builder->CreateStore(baseValue, basePtr);
-      if (const CompositeTypeInfo *baseInfo =
-              lookupCompositeInfo(*metadata.baseClass)) {
-        for (const auto &fieldEntry : baseInfo->fieldTypes)
-          noteMemberAssignment(typeKey, fieldEntry.first, false);
       }
       continue;
     }
@@ -4317,6 +4387,16 @@ public:
     if (!info)
       return;
 
+    const std::string ownerKind = describeAggregateKind(info->kind);
+
+    if (context.baseConstructorRequired && !context.baseConstructorInvoked) {
+      std::string baseName = context.baseClassName.value_or("base type");
+      reportCompilerError(
+          "Constructor for " + ownerKind + " '" + context.name +
+              "' must invoke base constructor of '" + baseName + "'",
+          "Add a 'base(...)' call inside the constructor body.");
+    }
+
     std::vector<std::string> missingMembers;
     missingMembers.reserve(info->fieldTypes.size());
     for (const auto &fieldEntry : info->fieldTypes) {
@@ -4331,7 +4411,6 @@ public:
     if (missingMembers.empty())
       return;
 
-    std::string ownerKind = describeAggregateKind(info->kind);
     std::string missingList;
     missingList.reserve(missingMembers.size() * 12);
     for (size_t i = 0; i < missingMembers.size(); ++i) {
@@ -11695,6 +11774,45 @@ llvm::Value *CallExprAST::codegen() {
   if (hasCalleeExpr()) {
     if (auto *member = dynamic_cast<MemberAccessExprAST *>(getCalleeExpr()))
       return codegenMemberCall(*member);
+    if (dynamic_cast<BaseExprAST *>(getCalleeExpr())) {
+      const ActiveCompositeContext *ctx = currentCompositeContext();
+      if (!ctx || ctx->kind != MethodKind::Constructor || ctx->isStatic) {
+        reportCompilerError("'base(...)' is only valid inside instance constructors");
+        return nullptr;
+      }
+
+      const CompositeTypeInfo *metadata = lookupCompositeInfo(ctx->name);
+      if (!metadata || !metadata->baseClass) {
+        reportCompilerError("Type '" + ctx->name + "' does not have a base class to construct");
+        return nullptr;
+      }
+
+      auto structIt = StructTypes.find(ctx->name);
+      if (structIt == StructTypes.end()) {
+        reportCompilerError("Internal error: missing struct type for '" +
+                            ctx->name + "' during base(...) emission");
+        return nullptr;
+      }
+
+      auto thisIt = NamedValues.find("this");
+      if (thisIt == NamedValues.end()) {
+        reportCompilerError("Internal error: missing 'this' in constructor for '" +
+                            ctx->name + "'");
+        return nullptr;
+      }
+
+      auto *structPtr = llvm::dyn_cast<llvm::AllocaInst>(thisIt->second);
+      if (!structPtr) {
+        reportCompilerError("Internal error: unexpected 'this' storage while invoking base constructor for '" +
+                            ctx->name + "'");
+        return nullptr;
+      }
+
+      markBaseConstructorCall();
+      setTypeName(*metadata->baseClass);
+      return emitBaseConstructorInitialization(ctx->name, structIt->second,
+                                               structPtr, *metadata, getArgs());
+    }
     return LogErrorV("Unsupported call target expression");
   }
 
@@ -13320,6 +13438,9 @@ llvm::Value *ExpressionStmtAST::codegen() {
     return nullptr;
 
   if (auto *call = dynamic_cast<CallExprAST *>(getExpression())) {
+    if (call->isBaseConstructorCall()) {
+      return llvm::Constant::getNullValue(llvm::Type::getInt32Ty(*TheContext));
+    }
     if (!V->getType()->isVoidTy()) {
       const std::string target = describeCallTarget(*call);
       const std::string message =
@@ -15195,6 +15316,10 @@ llvm::Type *StructAST::codegen() {
       rememberLocalType("this", makeTypeInfo(typeKey));
 
       ScopedCompositeContext methodScope(typeKey, MethodKind::Constructor, false);
+      if (auto *ctx = currentCompositeContextMutable()) {
+        ctx->baseClassName = metadata.baseClass;
+        ctx->baseConstructorRequired = metadata.baseClass.has_value();
+      }
 
       argIndex = 0;
       for (auto &Arg : ConstructorFunc->args()) {
@@ -15215,9 +15340,23 @@ llvm::Type *StructAST::codegen() {
         ++argIndex;
       }
 
+      auto &ctorInitializers = MethodDef.getConstructorInitializers();
+      if (metadata.baseClass) {
+        bool hasExplicitBaseInit = std::ranges::any_of(
+            ctorInitializers, [](const ConstructorInitializer &init) {
+              return init.kind == ConstructorInitializer::Kind::Base;
+            });
+        if (!hasExplicitBaseInit &&
+            hasParameterlessConstructor(*metadata.baseClass)) {
+          ConstructorInitializer init;
+          init.kind = ConstructorInitializer::Kind::Base;
+          init.target = *metadata.baseClass;
+          ctorInitializers.push_back(std::move(init));
+        }
+      }
+
       if (!emitConstructorInitializers(typeKey, StructType, StructPtr,
-                                        metadata,
-                                        MethodDef.getConstructorInitializers())) {
+                                        metadata, ctorInitializers)) {
         ConstructorFunc->eraseFromParent();
         NamedValues.clear();
         LocalTypes.clear();

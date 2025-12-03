@@ -11,9 +11,9 @@ class Base
     }
 }
 
-class Derived : Base
+class Derived inherits Base
 {
-    Derived() : Base() {}
+    Derived() {}
 
     ~Derived()
     {

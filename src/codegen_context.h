@@ -172,6 +172,9 @@ struct ActiveCompositeContext {
   std::string name;
   MethodKind kind = MethodKind::Regular;
   bool isStatic = false;
+  std::optional<std::string> baseClassName;
+  bool baseConstructorRequired = false;
+  bool baseConstructorInvoked = false;
   std::set<std::string> initializedInstanceFields;
 };
 

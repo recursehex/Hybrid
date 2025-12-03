@@ -3471,9 +3471,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   std::vector<TypeInfo> baseTypeInfos;
 
   if ((kind == AggregateKind::Class || kind == AggregateKind::Interface) &&
-      (CurTok == tok_inherits || CurTok == tok_colon)) {
-    bool usedColonSyntax = CurTok == tok_colon;
-    getNextToken(); // eat 'inherits' or ':'
+      CurTok == tok_inherits) {
+    getNextToken(); // eat 'inherits'
     SkipNewlines();
 
     bool expectBaseClass = (kind == AggregateKind::Class);
@@ -3513,6 +3512,12 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       LogError("Expected at least one type after 'inherits'");
       return nullptr;
     }
+  } else if ((kind == AggregateKind::Class || kind == AggregateKind::Interface) &&
+             CurTok == tok_colon) {
+    reportCompilerError(
+        "Use 'inherits' to declare base types",
+        "Replace ':' with 'inherits' before listing base interfaces or classes.");
+    return nullptr;
   }
 
   if (baseClass)
@@ -3608,82 +3613,21 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     getNextToken();
 
     std::vector<ConstructorInitializer> ctorInitializers;
-    bool baseInitializerSeen = false;
+
     if (CurTok == tok_colon) {
-      getNextToken();
-      SkipNewlines();
-
-      while (true) {
-        if (CurTok != tok_identifier) {
-          LogError("Expected constructor initializer target after ':'");
-          return false;
-        }
-
-        std::string targetName = IdentifierStr;
+      LogError("Expected '{' after constructor declaration");
+      int braceDepth = 0;
+      do {
         getNextToken();
-        if (!ParseOptionalGenericArgumentList(targetName, false))
-          return false;
-        SkipNewlines();
-
-        if (CurTok != '(') {
-          LogError("Expected '(' after constructor initializer target");
-          return false;
+        if (CurTok == '{')
+          ++braceDepth;
+        else if (CurTok == '}') {
+          if (braceDepth == 0)
+            break;
+          --braceDepth;
         }
-        getNextToken();
-        SkipNewlines();
-
-        std::vector<std::unique_ptr<ExprAST>> args;
-        if (CurTok != ')') {
-          while (true) {
-            auto ArgExpr = ParseExpression();
-            if (!ArgExpr)
-              return false;
-            args.push_back(std::move(ArgExpr));
-            SkipNewlines();
-            if (CurTok == ')')
-              break;
-            if (CurTok != ',') {
-              LogError("Expected ',' or ')' in constructor initializer");
-              return false;
-            }
-            getNextToken();
-            SkipNewlines();
-          }
-        }
-
-        if (CurTok != ')') {
-          LogError("Expected ')' to end constructor initializer arguments");
-          return false;
-        }
-        getNextToken();
-        SkipNewlines();
-
-        ConstructorInitializer init;
-        if (baseClass && targetName == *baseClass) {
-          if (baseInitializerSeen) {
-            reportCompilerError("Constructor already invokes base '" +
-                                    *baseClass + "'");
-            return false;
-          }
-          baseInitializerSeen = true;
-          init.kind = ConstructorInitializer::Kind::Base;
-        } else {
-          init.kind = ConstructorInitializer::Kind::Field;
-          if (args.size() != 1) {
-            reportCompilerError("Field initializer '" + targetName +
-                                "' requires exactly one argument");
-            return false;
-          }
-        }
-        init.target = targetName;
-        init.arguments = std::move(args);
-        ctorInitializers.push_back(std::move(init));
-
-        if (CurTok != ',')
-          break;
-        getNextToken();
-        SkipNewlines();
-      }
+      } while (CurTok != tok_eof);
+      return false;
     }
 
     while (CurTok == tok_newline)

@@ -509,169 +509,173 @@ int main(int argc, char **argv) {
 
     if (!hadFailure) {
       FinalizeTopLevelExecution();
-      if (std::getenv("HYBRID_ARC_OPT_DEBUG"))
-        fprintf(stderr, "[arc-opt] finalized module\n");
-      llvm::Module *module = getModule();
-      runArcPasses(module);
+      if (currentParser().hadError) {
+        hadFailure = true;
+      } else {
+        if (std::getenv("HYBRID_ARC_OPT_DEBUG"))
+          fprintf(stderr, "[arc-opt] finalized module\n");
+        llvm::Module *module = getModule();
+        runArcPasses(module);
 
-      std::string targetOutput;
-      if (!outputPath.empty())
-        targetOutput = outputPath;
-      else if (emitLLVM)
-        targetOutput = deriveOutputPath(sourceFiles.back());
-      else
-        targetOutput = "a.out";
+        std::string targetOutput;
+        if (!outputPath.empty())
+          targetOutput = outputPath;
+        else if (emitLLVM)
+          targetOutput = deriveOutputPath(sourceFiles.back());
+        else
+          targetOutput = "a.out";
 
-      std::string cachedModuleIR;
-      bool cachedModuleValid = false;
-      auto captureModuleIR = [&]() {
-        if (cachedModuleValid)
-          return;
-        if (!codegenCtx.genericsDiagnostics.diagnosticsEnabled)
-          return;
-        llvm::raw_string_ostream buffer(cachedModuleIR);
-        module->print(buffer, nullptr);
-        buffer.flush();
-        cachedModuleValid = true;
-        codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint =
-            cachedModuleIR.size();
-      };
-
-      auto writeModuleIR = [&](llvm::raw_ostream &os) {
-        // LLVM's module printer emits type declarations after functions, but LLVM's
-        // textual IR parser requires types to be declared before use. We work around
-        // this by capturing the IR, extracting type declarations, and re-ordering them.
-        std::string moduleIR;
-        llvm::raw_string_ostream buffer(moduleIR);
-
-        if (codegenCtx.genericsDiagnostics.diagnosticsEnabled) {
-          captureModuleIR();
-          moduleIR = cachedModuleIR;
-        } else {
+        std::string cachedModuleIR;
+        bool cachedModuleValid = false;
+        auto captureModuleIR = [&]() {
+          if (cachedModuleValid)
+            return;
+          if (!codegenCtx.genericsDiagnostics.diagnosticsEnabled)
+            return;
+          llvm::raw_string_ostream buffer(cachedModuleIR);
           module->print(buffer, nullptr);
           buffer.flush();
-        }
+          cachedModuleValid = true;
+          codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint =
+              cachedModuleIR.size();
+        };
 
-        // Extract and reorder: module metadata, then types, then everything else
-        std::istringstream iss(moduleIR);
-        std::string line;
-        std::vector<std::string> moduleMetadata;
-        std::vector<std::string> typeDecls;
-        std::vector<std::string> otherLines;
-        bool inMetadata = true;
+        auto writeModuleIR = [&](llvm::raw_ostream &os) {
+          // LLVM's module printer emits type declarations after functions, but LLVM's
+          // textual IR parser requires types to be declared before use. We work around
+          // this by capturing the IR, extracting type declarations, and re-ordering them.
+          std::string moduleIR;
+          llvm::raw_string_ostream buffer(moduleIR);
 
-        while (std::getline(iss, line)) {
-          // Module metadata lines start with ';' or are special directives
-          if (inMetadata && (line.empty() || line[0] == ';' ||
-              line.find("source_filename") == 0 ||
-              line.find("target datalayout") == 0 ||
-              line.find("target triple") == 0)) {
-            moduleMetadata.push_back(line);
-            continue;
+          if (codegenCtx.genericsDiagnostics.diagnosticsEnabled) {
+            captureModuleIR();
+            moduleIR = cachedModuleIR;
+          } else {
+            module->print(buffer, nullptr);
+            buffer.flush();
           }
-          inMetadata = false;
 
-          // Type declarations match pattern: %TypeName = type { ... }
-          size_t firstNonSpace = line.find_first_not_of(" \t");
-          if (firstNonSpace != std::string::npos && line[firstNonSpace] == '%') {
-            size_t typePos = line.find(" = type ");
-            if (typePos != std::string::npos) {
-              typeDecls.push_back(line);
+          // Extract and reorder: module metadata, then types, then everything else
+          std::istringstream iss(moduleIR);
+          std::string line;
+          std::vector<std::string> moduleMetadata;
+          std::vector<std::string> typeDecls;
+          std::vector<std::string> otherLines;
+          bool inMetadata = true;
+
+          while (std::getline(iss, line)) {
+            // Module metadata lines start with ';' or are special directives
+            if (inMetadata && (line.empty() || line[0] == ';' ||
+                line.find("source_filename") == 0 ||
+                line.find("target datalayout") == 0 ||
+                line.find("target triple") == 0)) {
+              moduleMetadata.push_back(line);
               continue;
             }
+            inMetadata = false;
+
+            // Type declarations match pattern: %TypeName = type { ... }
+            size_t firstNonSpace = line.find_first_not_of(" \t");
+            if (firstNonSpace != std::string::npos && line[firstNonSpace] == '%') {
+              size_t typePos = line.find(" = type ");
+              if (typePos != std::string::npos) {
+                typeDecls.push_back(line);
+                continue;
+              }
+            }
+            otherLines.push_back(line);
           }
-          otherLines.push_back(line);
-        }
 
-        // Emit in correct order: metadata, types, then everything else
-        for (const auto &meta : moduleMetadata) {
-          os << meta << "\n";
-        }
-        for (const auto &decl : typeDecls) {
-          os << decl << "\n";
-        }
-        for (const auto &other : otherLines) {
-          os << other << "\n";
-        }
-      };
+          // Emit in correct order: metadata, types, then everything else
+          for (const auto &meta : moduleMetadata) {
+            os << meta << "\n";
+          }
+          for (const auto &decl : typeDecls) {
+            os << decl << "\n";
+          }
+          for (const auto &other : otherLines) {
+            os << other << "\n";
+          }
+        };
 
-      auto emitTextFile = [&](const std::string &path) -> bool {
-        std::error_code ec;
-        llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_Text);
-        if (ec) {
-          fprintf(stderr, "Error: Failed to write LLVM IR to '%s': %s\n",
-                  path.c_str(), ec.message().c_str());
-          return false;
-        }
-        writeModuleIR(out);
-        return true;
-      };
+        auto emitTextFile = [&](const std::string &path) -> bool {
+          std::error_code ec;
+          llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_Text);
+          if (ec) {
+            fprintf(stderr, "Error: Failed to write LLVM IR to '%s': %s\n",
+                    path.c_str(), ec.message().c_str());
+            return false;
+          }
+          writeModuleIR(out);
+          return true;
+        };
 
-      auto shouldEmitIR = [&](const std::string &path) {
-        return emitLLVM || path == "-" || endsWith(path, ".ll") || endsWith(path, ".bc");
-      };
+        auto shouldEmitIR = [&](const std::string &path) {
+          return emitLLVM || path == "-" || endsWith(path, ".ll") || endsWith(path, ".bc");
+        };
 
-      if (shouldEmitIR(targetOutput)) {
-        if (targetOutput == "-") {
-          writeModuleIR(llvm::outs());
-        } else {
-          if (!emitTextFile(targetOutput))
-            hadFailure = true;
-        }
-        if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
-          codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
-              codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
-      } else {
-        llvm::SmallString<128> tempPath;
-        int tempFD;
-        if (auto ec = llvm::sys::fs::createTemporaryFile("hybrid_ir", ".ll", tempFD, tempPath)) {
-          fprintf(stderr, "Error: Failed to create temporary file: %s\n", ec.message().c_str());
-          hadFailure = true;
-        } else {
-          std::string tempPathStr = tempPath.str().str();
-          {
-            llvm::raw_fd_ostream tempStream(tempFD, true);
-            writeModuleIR(tempStream);
+        if (shouldEmitIR(targetOutput)) {
+          if (targetOutput == "-") {
+            writeModuleIR(llvm::outs());
+          } else {
+            if (!emitTextFile(targetOutput))
+              hadFailure = true;
           }
           if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
             codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
                 codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
+        } else {
+          llvm::SmallString<128> tempPath;
+          int tempFD;
+          if (auto ec = llvm::sys::fs::createTemporaryFile("hybrid_ir", ".ll", tempFD, tempPath)) {
+            fprintf(stderr, "Error: Failed to create temporary file: %s\n", ec.message().c_str());
+            hadFailure = true;
+          } else {
+            std::string tempPathStr = tempPath.str().str();
+            {
+              llvm::raw_fd_ostream tempStream(tempFD, true);
+              writeModuleIR(tempStream);
+            }
+            if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
+              codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
+                  codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
 
 #ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
-          const char *linker = "clang++";
-          std::string command = std::string(linker) + " \"" + tempPathStr + "\" \"" +
-                                std::string(HYBRID_RUNTIME_SUPPORT_SOURCE) + "\"";
+            const char *linker = "clang++";
+            std::string command = std::string(linker) + " \"" + tempPathStr + "\" \"" +
+                                  std::string(HYBRID_RUNTIME_SUPPORT_SOURCE) + "\"";
 #ifdef HYBRID_ARC_RUNTIME_SOURCE
-          command += " \"" + std::string(HYBRID_ARC_RUNTIME_SOURCE) + "\"";
+            command += " \"" + std::string(HYBRID_ARC_RUNTIME_SOURCE) + "\"";
 #endif
 #ifdef HYBRID_REFCOUNT_SOURCE
-          command += " \"" + std::string(HYBRID_REFCOUNT_SOURCE) + "\"";
+            command += " \"" + std::string(HYBRID_REFCOUNT_SOURCE) + "\"";
 #endif
 #ifdef HYBRID_WEAK_TABLE_SOURCE
-          command += " \"" + std::string(HYBRID_WEAK_TABLE_SOURCE) + "\"";
+            command += " \"" + std::string(HYBRID_WEAK_TABLE_SOURCE) + "\"";
 #endif
 #ifdef HYBRID_SOURCE_DIR
-          command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "\"";
+            command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "\"";
 #endif
 #ifdef HYBRID_RUNTIME_INCLUDE_DIR
-          command += " -I\"" + std::string(HYBRID_RUNTIME_INCLUDE_DIR) + "\"";
+            command += " -I\"" + std::string(HYBRID_RUNTIME_INCLUDE_DIR) + "\"";
 #else
 #ifdef HYBRID_SOURCE_DIR
-          command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "/../runtime/include\"";
+            command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "/../runtime/include\"";
 #endif
 #endif
-          command += " -std=c++17 -o \"" + targetOutput + "\"";
+            command += " -std=c++17 -o \"" + targetOutput + "\"";
 #else
-          std::string command = "clang \"" + tempPathStr + "\" -o \"" + targetOutput + "\"";
+            std::string command = "clang \"" + tempPathStr + "\" -o \"" + targetOutput + "\"";
 #endif
-          int status = std::system(command.c_str());
-          if (status != 0) {
-            fprintf(stderr, "Error: clang failed when generating '%s' (exit code %d)\n",
-                    targetOutput.c_str(), status);
-            hadFailure = true;
-          }
+            int status = std::system(command.c_str());
+            if (status != 0) {
+              fprintf(stderr, "Error: clang failed when generating '%s' (exit code %d)\n",
+                      targetOutput.c_str(), status);
+              hadFailure = true;
+            }
 
-          llvm::sys::fs::remove(tempPath);
+            llvm::sys::fs::remove(tempPath);
+          }
         }
       }
 
