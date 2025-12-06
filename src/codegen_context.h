@@ -185,6 +185,7 @@ struct CodegenContext {
   std::unique_ptr<llvm::LLVMContext> llvmContext;
   std::unique_ptr<llvm::Module> module;
   std::unique_ptr<llvm::IRBuilder<>> builder;
+  bool arcEnabled = true;
 
   std::map<std::string, llvm::Value *> namedValues;
   std::map<std::string, llvm::GlobalVariable *> globalValues;
@@ -274,6 +275,7 @@ inline void CodegenContext::reset() {
   arcScopeStack.clear();
   functionReturnStack.clear();
   currentLifetimePlan = nullptr;
+  const bool preservedArcEnabled = arcEnabled;
   const bool arcTraceEnabled = arcTrace.traceEnabled;
   const bool arcOptimizerEnabled = arcTrace.optimizerEnabled;
   arcTrace = {};
@@ -281,6 +283,7 @@ inline void CodegenContext::reset() {
   arcTrace.optimizerEnabled = arcOptimizerEnabled;
   const ArcDebugOptions preservedDebug = arcDebug;
   arcDebug = preservedDebug;
+  arcEnabled = preservedArcEnabled;
 }
 
 #endif // HYBRID_CODEGEN_CONTEXT_H

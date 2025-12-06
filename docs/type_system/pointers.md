@@ -8,7 +8,7 @@ Hybrid provides C++ style pointer operations with C#-inspired memory safety thro
 
 ### Pointer Type Declaration
 
-Pointers use the `@` symbol (instead of C's `*`):
+Pointers use the `@` symbol instead of C's `*` to avoid confusion with multiplication. A pointer to type `T` is declared as `T@`:
 
 ```cs
 int@ ptr            // Pointer to int
@@ -18,7 +18,7 @@ char@ cptr          // Pointer to char
 
 ### Multi-level Pointers
 
-Multi-level pointers (pointer-to-pointer) are declared with a numeric suffix:
+Multi-level pointers (pointer-to-pointer) are declared with a numeric suffix indicating the level of indirection:
 
 ```cs
 int@2 ptrToPtr      // Pointer to pointer to int (int**)
@@ -36,9 +36,12 @@ float@[] fptrArr    // Array of float pointers
 
 ## Pointer Operators
 
+> [!NOTE]  
+> Smart pointers (`unique<T>`, `shared<T>`, `weak<T>`) reuse the same `@` / `->` surface for payload access, but they are allowed in safe code. The rules below continue to apply to raw pointers, which require `unsafe`.
+
 ### Address-of Operator (`#`)
 
-Takes the address of a variable (like `&` in C++):
+Takes the address of a variable, using `#` instead of `&` in C to avoid confusion with bitwise AND:
 
 ```cs
 unsafe
@@ -159,6 +162,9 @@ void test()
     }
 }
 ```
+
+### Smart Pointers in Safe Code
+Smart pointer wrappers are safe: `@sharedValue` and `sharedValue->member` work in ordinary code without an `unsafe` block, while raw pointers continue to require one.
 
 ### Unsafe Structs
 

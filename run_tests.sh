@@ -81,6 +81,7 @@ EXTRA_COMPILER_ARGS=()
 FORCE_VERBOSE_FROM_ENV=0
 VERBOSE_FROM_ARGS=0
 ARC_RUNTIME_REQUIRED=0
+ARC_ENABLED_OVERRIDE=""
 
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
 echo "==============================="
@@ -686,6 +687,26 @@ while [[ $# -gt 0 ]]; do
             FAILURES_ONLY=0
             shift
             ;;
+        -a)
+            if [ $# -lt 2 ]; then
+                echo -e "${RED}Error: -a requires a value (on/off)${NC}"
+                exit 1
+            fi
+            lower=$(printf "%s" "$2" | tr '[:upper:]' '[:lower:]')
+            case "$lower" in
+                on|true|1)
+                    ARC_ENABLED_OVERRIDE="true"
+                    ;;
+                off|false|0)
+                    ARC_ENABLED_OVERRIDE="false"
+                    ;;
+                *)
+                    echo -e "${RED}Error: invalid value for -a (use on/off)${NC}"
+                    exit 1
+                    ;;
+            esac
+            shift 2
+            ;;
         --failures-only)
             FAILURES_ONLY=1
             shift
@@ -696,6 +717,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  -v, --verbose       Show detailed output for each test"
             echo "  -f, --full          Show full output for each test"
+            echo "  -a on|off           Toggle ARC lowering (--arc-enabled) for this run"
             echo "      --failures-only Show only failing tests (default)"
             echo "  -h, --help          Show this help message"
             echo
@@ -736,6 +758,10 @@ fi
 
 if [ $FORCE_VERBOSE_FROM_ENV -eq 1 ] && [ $VERBOSE_FROM_ARGS -eq 0 ]; then
     VERBOSE_MODE=1
+fi
+
+if [ -n "$ARC_ENABLED_OVERRIDE" ]; then
+    EXTRA_COMPILER_ARGS+=("--arc-enabled=$ARC_ENABLED_OVERRIDE")
 fi
 
 # Filter tests if pattern provided

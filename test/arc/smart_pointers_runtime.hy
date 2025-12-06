@@ -31,14 +31,14 @@ class Counter
 // Test unique<T> exclusive ownership
 void testUniqueOwnership()
 {
-    unique<Counter> owner = (1, 100)
+    unique<Counter> owner = #(1, 100)
     // After scope exit, owner should be destroyed and Counter freed
 }
 
 // Test shared<T> reference counting with multiple owners
 void testSharedRefCounting()
 {
-    shared<Counter> primary = (2, 200)
+    shared<Counter> primary = #(2, 200)
     shared<Counter> secondary = primary  // Increment strong count
     shared<Counter> tertiary = secondary // Increment strong count again
     // All three share ownership; object destroyed when last one goes out of scope
@@ -47,15 +47,15 @@ void testSharedRefCounting()
 // Test weak<T> observation without ownership
 void testWeakObservation()
 {
-    shared<Counter> strongOwner = (3, 300)
-    weak<Counter> observer = (strongOwner)
+    shared<Counter> strongOwner = #(3, 300)
+    weak<Counter> observer = #strongOwner
     // observer does not keep Counter alive
     // When strongOwner is destroyed, observer should be zeroed
 }
 
 void testSharedUseCount()
 {
-    shared<Counter> primary = (5, 500)
+    shared<Counter> primary = #(5, 500)
     int first = primary.use_count()
     assert first == 1
 
@@ -66,16 +66,16 @@ void testSharedUseCount()
 
 void testWeakLock()
 {
-    shared<Counter> owner = (6, 600)
-    weak<Counter> observer = (owner)
+    shared<Counter> owner = #(6, 600)
+    weak<Counter> observer = #owner
     shared<Counter> promoted = observer.lock()
     assert promoted.use_count() == 2
 
-    weak<Counter> dangling = ()
+    weak<Counter> dangling = #()
     if true
     {
-        shared<Counter> temp = (7, 700)
-        dangling = (temp)
+        shared<Counter> temp = #(7, 700)
+        dangling = #temp
     }
 
     shared<Counter> expired = dangling.lock()
@@ -85,7 +85,7 @@ void testWeakLock()
 // Test shared<T> with primitive types
 void testSharedPrimitives()
 {
-    shared<int> sharedNum = (777)
+    shared<int> sharedNum = #777
     shared<int> copy1 = sharedNum
     shared<int> copy2 = sharedNum
     shared<int> copy3 = copy1
@@ -95,20 +95,20 @@ void testSharedPrimitives()
 // Test weak<T> with multiple weak observers
 void testMultipleWeakObservers()
 {
-    shared<Counter> owner = (4, 400)
-    weak<Counter> observer1 = (owner)
-    weak<Counter> observer2 = (owner)
-    weak<Counter> observer3 = (owner)
+    shared<Counter> owner = #(4, 400)
+    weak<Counter> observer1 = #owner
+    weak<Counter> observer2 = #owner
+    weak<Counter> observer3 = #owner
     // All observers watch the same shared owner
 }
 
 void testSharedReassignmentLoop()
 {
-    shared<Counter> head = (20, 2000)
+    shared<Counter> head = #(20, 2000)
     int i = 0
     while i < 20
     {
-        shared<Counter> next = (20 + i, 2000 + i)
+        shared<Counter> next = #(20 + i, 2000 + i)
         shared<Counter> copy = next
         head = copy
         i++
@@ -117,13 +117,13 @@ void testSharedReassignmentLoop()
 
 void testWeakReassignmentLoop()
 {
-    shared<Counter> source = (30, 3000)
-    weak<Counter> watcher = (source)
+    shared<Counter> source = #(30, 3000)
+    weak<Counter> watcher = #source
     int i = 0
     while i < 20
     {
-        shared<Counter> next = (30 + i, 3000 + i)
-        weak<Counter> alias = (next)
+        shared<Counter> next = #(30 + i, 3000 + i)
+        weak<Counter> alias = #next
         watcher = alias
         source = next
         i++
@@ -132,16 +132,16 @@ void testWeakReassignmentLoop()
 
 void testUniqueReassignmentLoop()
 {
-    unique<Counter> donor = (40, 4000)
-    unique<Counter> slot = (41, 4100)
+    unique<Counter> donor = #(40, 4000)
+    unique<Counter> slot = #(41, 4100)
     int i = 0
     while i < 25
     {
         slot = donor
-        donor = (100 + i, 5000 + i)
-        unique<Counter> scratch = (200 + i, 6000 + i)
+        donor = #(100 + i, 5000 + i)
+        unique<Counter> scratch = #(200 + i, 6000 + i)
         slot = scratch
-        donor = (300 + i, 7000 + i)
+        donor = #(300 + i, 7000 + i)
         i++
     }
 }
@@ -160,9 +160,9 @@ int main()
     testUniqueReassignmentLoop()
 
     // Basic smoke test with direct usage
-    unique<int> u = (10)
-    shared<int> s = (20)
-    weak<int> w = (s)
+    unique<int> u = #10
+    shared<int> s = #20
+    weak<int> w = #s
 
     return 0
 }

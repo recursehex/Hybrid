@@ -17,10 +17,10 @@ class Gadget
 
 int main()
 {
-    unique<Gadget> owned = (7)
-    shared<Gadget> sharedOwner = (9)
-    weak<Gadget> observer = (sharedOwner)
-    shared<int> sharedNumber = (42)
-    weak<int> numberObserver = (sharedNumber)
+    unique<Gadget> owned = #7
+    shared<Gadget> sharedOwner = #9
+    weak<Gadget> observer = #sharedOwner
+    shared<int> sharedNumber = #42
+    weak<int> numberObserver = #sharedNumber
     return 0
 }

@@ -19,6 +19,9 @@ The primary way to run tests is using the platform-specific test runner:
 # Run tests with verbose output
 ./run_tests.sh -v
 
+# Run all tests with ARC lowering disabled
+./run_tests.sh -a off
+
 # Run specific test or pattern
 ./run_tests.sh expr             # Runs expr.hy
 ./run_tests.sh array            # Runs all tests containing "array"

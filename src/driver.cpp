@@ -116,6 +116,8 @@ void printUsage() {
   fprintf(stderr, "  --arc-trace-retains\n");
   fprintf(stderr, "                     Emit per-function retain/release/autorelease counts\n");
   fprintf(stderr, "  --arc-escape-debug Enable ARC escape analysis logging\n");
+  fprintf(stderr, "  --arc-enabled=<bool>\n");
+  fprintf(stderr, "                     Toggle ARC insertion (default: true)\n");
   fprintf(stderr, "  --arc-debug        Enable runtime ARC debugging (trace, verify, leaks)\n");
   fprintf(stderr, "  --arc-leak-detect  Track live ARC objects and dump leaks on exit\n");
   fprintf(stderr, "  --arc-verify-runtime\n");
@@ -175,6 +177,27 @@ bool parseUnsignedValue(const std::string &text, T &out) {
     return false;
   out = static_cast<T>(value);
   return true;
+}
+
+bool parseBoolOption(const std::string &text, bool &out) {
+  std::string lowered;
+  lowered.reserve(text.size());
+  for (char ch : text) {
+    lowered.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+
+  if (lowered == "1" || lowered == "true" || lowered == "on" ||
+      lowered == "yes") {
+    out = true;
+    return true;
+  }
+  if (lowered == "0" || lowered == "false" || lowered == "off" ||
+      lowered == "no") {
+    out = false;
+    return true;
+  }
+  return false;
 }
 
 void emitGenericsMetricsSummary(const CodegenContext &context) {
@@ -265,6 +288,7 @@ int main(int argc, char **argv) {
   bool enableArcVerifyRuntime = false;
   bool enableArcDebugUmbrella = false;
   bool enableArcPoolDebug = false;
+  bool arcEnabledFlag = true;
 
   session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
@@ -370,6 +394,25 @@ int main(int argc, char **argv) {
       enableArcRuntimeTrace = true;
     } else if (arg == "--arc-escape-debug") {
       enableArcEscapeDebug = true;
+    } else if (arg == "--arc-enabled") {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --arc-enabled requires a value\n");
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+      if (!parseBoolOption(argv[++i], arcEnabledFlag)) {
+        fprintf(stderr, "Error: Invalid value for --arc-enabled (expected true/false)\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg.rfind("--arc-enabled=", 0) == 0) {
+      std::string value = arg.substr(std::strlen("--arc-enabled="));
+      if (!parseBoolOption(value, arcEnabledFlag)) {
+        fprintf(stderr, "Error: Invalid value for --arc-enabled (expected true/false)\n");
+        popCompilerSession();
+        return 1;
+      }
     } else if (arg == "--arc-debug") {
       enableArcDebugUmbrella = true;
       enableArcRuntimeTrace = true;
@@ -424,8 +467,11 @@ int main(int argc, char **argv) {
       enableArcVerifyRuntime || enableArcDebugUmbrella;
   codegenCtx.arcDebug.poolDebug =
       enableArcPoolDebug || enableArcDebugUmbrella;
+  codegenCtx.arcEnabled = arcEnabledFlag;
 
   auto runArcPasses = [&](llvm::Module *module) {
+    if (!codegenCtx.arcEnabled)
+      return;
     if (!module)
       return;
     const bool arcDebug = std::getenv("HYBRID_ARC_OPT_DEBUG") != nullptr;

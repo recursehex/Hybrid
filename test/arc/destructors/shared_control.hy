@@ -17,7 +17,7 @@ class Widget
 
 void buildShared()
 {
-    shared<Widget> primary = (5)
+    shared<Widget> primary = #5
     shared<Widget> secondary = primary
     {
         shared<Widget> tertiary = secondary

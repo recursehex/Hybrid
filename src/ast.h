@@ -43,6 +43,8 @@ struct GenericBindingKey {
   bool empty() const { return typeName.empty() && typeArguments.empty(); }
 };
 
+bool isArcLoweringEnabled();
+
 struct TypeInfo {
   std::string typeName;           // canonical language-visible type
   std::string baseTypeName;       // base identifier without generic arguments or suffixes
@@ -70,7 +72,9 @@ struct TypeInfo {
   bool isAlias() const { return refStorage == RefStorageClass::RefAlias; }
   bool hasTypeArguments() const { return !typeArguments.empty(); }
   bool isSmartPointer() const { return smartPointerKind != SmartPointerKind::None; }
-  bool participatesInARC() const { return arcManaged; }
+  bool participatesInARC() const {
+    return arcManaged && isArcLoweringEnabled();
+  }
   bool requiresARC() const {
     return participatesInARC() && ownership == OwnershipQualifier::Strong;
   }
@@ -799,16 +803,21 @@ class UnaryExprAST : public ExprAST {
   std::string Op;
   std::unique_ptr<ExprAST> Operand;
   bool isPrefix;
+  bool ParsedInUnsafe = false;
 
 public:
-  UnaryExprAST(const std::string &Op, std::unique_ptr<ExprAST> Operand, bool isPrefix)
-      : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix) {}
+  UnaryExprAST(const std::string &Op, std::unique_ptr<ExprAST> Operand,
+               bool isPrefix, bool parsedInUnsafe = false)
+      : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix),
+        ParsedInUnsafe(parsedInUnsafe) {}
 
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
   [[nodiscard]] const std::string &getOp() const { return Op; }
   ExprAST *getOperand() const { return Operand.get(); }
   bool getIsPrefix() const { return isPrefix; }
+  bool wasParsedInUnsafe() const { return ParsedInUnsafe; }
+  std::unique_ptr<ExprAST> takeOperand() { return std::move(Operand); }
 };
 
 /// CastExprAST - Expression class for type casting.
@@ -1053,15 +1062,17 @@ class MemberAccessExprAST : public ExprAST {
   std::string MemberName;
   std::string GenericArguments;
   bool IsDestructor = false;
+  bool IsSafeSmartArrow = false;
 
 public:
   MemberAccessExprAST(std::unique_ptr<ExprAST> Object, std::string MemberName,
                       std::string GenericArguments = {},
-                      bool IsDestructor = false)
+                      bool IsDestructor = false,
+                      bool IsSafeSmartArrow = false)
       : Object(std::move(Object)),
         MemberName(std::move(MemberName)),
         GenericArguments(std::move(GenericArguments)),
-        IsDestructor(IsDestructor) {}
+        IsDestructor(IsDestructor), IsSafeSmartArrow(IsSafeSmartArrow) {}
   
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
@@ -1070,6 +1081,7 @@ public:
   bool hasExplicitGenerics() const { return !GenericArguments.empty(); }
   const std::string &getGenericArguments() const { return GenericArguments; }
   bool isDestructorAccess() const { return IsDestructor; }
+  bool isSafeSmartArrow() const { return IsSafeSmartArrow; }
 };
 
 /// NullSafeAccessExprAST - Expression class for null-safe member access (e.g. obj?.field).

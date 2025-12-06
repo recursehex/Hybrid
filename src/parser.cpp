@@ -1573,6 +1573,7 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
   }
 
   int Opc = CurTok;
+  bool parsedInUnsafe = false;
   std::string OpStr;
   if (Opc == '-') OpStr = "-";
   else if (Opc == tok_not) OpStr = "!";
@@ -1580,17 +1581,11 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
   else if (Opc == tok_dec) OpStr = "--";
   else if (Opc == tok_hash) {
     OpStr = "#";  // Address-of operator
-    if (!isInUnsafeContext()) {
-      LogError("Address-of operator (#) can only be used within unsafe blocks or unsafe functions");
-      return nullptr;
-    }
+    parsedInUnsafe = isInUnsafeContext();
   }
   else if (Opc == tok_at) {
     OpStr = "@";    // Dereference operator
-    if (!isInUnsafeContext()) {
-      LogError("Dereference operator (@) can only be used within unsafe blocks or unsafe functions");
-      return nullptr;
-    }
+    parsedInUnsafe = isInUnsafeContext();
   }
 
   getNextToken(); // eat the operator.
@@ -1605,7 +1600,7 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
       // Represent -x as 0 - x
       return std::make_unique<BinaryExprAST>("-", std::make_unique<NumberExprAST>(NumericLiteral::fromSigned(0)), std::move(Operand));
   }
-  return std::make_unique<UnaryExprAST>(OpStr, std::move(Operand), true /* isPrefix */);
+  return std::make_unique<UnaryExprAST>(OpStr, std::move(Operand), true /* isPrefix */, parsedInUnsafe);
 }
 
 /// primary
@@ -1903,6 +1898,9 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       } else if (CurTok == tok_identifier) {
         MemberName = IdentifierStr;
         getNextToken();
+      } else if (CurTok == tok_weak) {
+        MemberName = "weak";
+        getNextToken();
       } else if (CurTok == tok_this) {
         MemberName = "this";
         getNextToken();
@@ -1936,11 +1934,12 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         reportCompilerError("Null-safe destructor access is not supported");
         return nullptr;
       }
-      if (CurTok != tok_identifier) {
+      if (CurTok != tok_identifier && CurTok != tok_weak) {
         LogError("Expected member name after '?.'");
         return nullptr;
       }
-      std::string MemberName = IdentifierStr;
+      std::string MemberName =
+          (CurTok == tok_weak) ? std::string("weak") : IdentifierStr;
       getNextToken(); // eat member name
       std::string DecoratedName = MemberName;
       if (!ParseOptionalGenericArgumentList(DecoratedName, true))
@@ -1953,19 +1952,18 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       LHS = std::make_unique<NullSafeAccessExprAST>(std::move(LHS), MemberName);
     } else if (CurTok == tok_arrow) {
       // Pointer member access (-> is syntactic sugar for (@ptr).member)
-      if (!isInUnsafeContext()) {
-        LogError("Arrow operator (->) can only be used within unsafe blocks or unsafe functions");
-        return nullptr;
-      }
+      const bool allowSafeArrow = !isInUnsafeContext();
       getNextToken(); // eat '->'
       bool isDestructor = false;
       if (CurTok == tok_tilde_identifier)
         isDestructor = true;
-      if (CurTok != tok_identifier && CurTok != tok_tilde_identifier) {
+      if (CurTok != tok_identifier && CurTok != tok_tilde_identifier &&
+          CurTok != tok_weak) {
         LogError("Expected member name after '->'");
         return nullptr;
       }
-      std::string MemberName = IdentifierStr;
+      std::string MemberName =
+          (CurTok == tok_weak) ? std::string("weak") : IdentifierStr;
       getNextToken(); // eat member name
       std::string MemberGenericSuffix;
       if (!isDestructor) {
@@ -1982,11 +1980,18 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
           }
         }
       }
-      // Create (@ptr).member
-      auto Deref = std::make_unique<UnaryExprAST>("@", std::move(LHS), true);
-      LHS = std::make_unique<MemberAccessExprAST>(std::move(Deref), MemberName,
-                                                  std::move(MemberGenericSuffix),
-                                                  isDestructor);
+      if (allowSafeArrow) {
+        LHS = std::make_unique<MemberAccessExprAST>(
+            std::move(LHS), MemberName, std::move(MemberGenericSuffix),
+            isDestructor, true);
+      } else {
+        // Create (@ptr).member
+        auto Deref =
+            std::make_unique<UnaryExprAST>("@", std::move(LHS), true, true);
+        LHS = std::make_unique<MemberAccessExprAST>(
+            std::move(Deref), MemberName, std::move(MemberGenericSuffix),
+            isDestructor, false);
+      }
     } else if (CurTok == '(') {
       std::vector<std::unique_ptr<ExprAST>> Args;
       if (!ParseArgumentList(Args))

@@ -12,10 +12,10 @@ struct Node
 
 int main()
 {
-    shared<int> payload = (7)
+    shared<int> payload = #7
 
     Node node = Node()
-    node.watcher = weak<int>(payload)
+    node.watcher = #payload
 
     weak<int> copy = node.watcher
 

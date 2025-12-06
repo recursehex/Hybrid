@@ -1,8 +1,8 @@
 # Classes
 
-Hybrid supports classes that extend the struct model with member functions (methods), access modifiers, and formatter support for full object-oriented programming. Unlike structs, which are restricted to only member variables and constructors, classes allow you to define instance methods, static methods, and properties to create rich, encapsulated types. Classes continue to use value semantics by default, but add rules around initialization and visibility that mirror familiar behaviour while enforcing safer guarantees.
+Hybrid supports classes that extend the struct model with member functions (methods), access modifiers, and formatter support for full object-oriented programming. Unlike structs, which are restricted to only member variables and constructors, classes allow you to define instance methods, static methods, and properties to create complex, encapsulated types.
 
-**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities. Classes may define multiple constructors, but each one must leave every instance field initialized before returning.
+**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities.
 
 ## Quick Example
 
@@ -42,13 +42,22 @@ class Door
 - This shorthand also works for other target-typed contexts:
   - Arrays: `Widget[] items = [(5), (6)]` calls the `Widget(int)` constructor for each element.
   - Strings: ``string label = $"Value: `(rect)`"`` or `print(rect)` will call `string this()` when present.
-  - Smart pointers: `shared<Widget> primary = (5)` builds the payload with `Widget(5)` and wraps it in a `shared<Widget>`; the same applies to `unique<T>`. For `weak<T>`, the shorthand expects a `shared<T>` value, e.g. `weak<Widget> watcher = (sharedOwner)`.
+  - Smart pointers: `shared<Widget> primary = #5` builds the payload with `Widget(5)` and wraps it in a `shared<Widget>`; the same applies to `unique<T>`. For `weak<T>`, the shorthand expects a `shared<T>` value, e.g. `weak<Widget> watcher = #sharedOwner`.
 
 ```cs
 Door front = (2)    // shorthand for Door front = Door(2)
 Door copy = (front) // invokes the copy constructor when available
-shared<Door> refDoor = (2) // payload constructed via Door(int)
+shared<Door> refDoor = #2 // payload constructed via Door(int)
 ```
+
+## Smart Pointers and ARC Helpers
+
+- ARC already frees class and struct instances when they leave scope; the smart pointer wrappers are optional conveniences for sharing, exclusivity, and weak observation.
+- Helper builders: `make_unique<T>(args...)`, `make_shared<T>(args...)`, `weak_from_shared<T>(shared<T>)`, and `shared<T>.weak()` construct the payload (or reuse an existing shared handle) and wire the appropriate retain/release or weak control block plumbing.
+- Accessors: `@ptr` yields the payload value for smart pointers (e.g. `@owner == 5` for `shared<int>`). `ptr->member` works only for smart pointers in safe code; raw pointers still require `unsafe` and explicit dereference.
+- Construction shorthand: use `#payload` to build smart pointers from a target type. It accepts payload constructors (`shared<Foo> handle = #5` calls `Foo(int)`), and `weak<T>` expects a `shared<T>` payload (`weak<Foo> watcher = #handle`).
+- Smart pointers and raw references point to the same ARC-managed allocations, so you can pass either to APIs without special conversion functions; pick the wrapper only when you need its ownership semantics.
+- Disabling ARC lowering (`--arc-enabled=false`) keeps these helpers available but they degrade to type-correct stubs: `use_count()` reports `0` and `weak.lock()` returns an empty handle so ARC-on vs ARC-off comparisons do not require source changes.
 
 ## Heap Allocation with `new` and `free`
 
@@ -119,7 +128,7 @@ class Ticker
 
 ## Access Modifiers and Mutability
 
-- Members are **read-only outside the class** unless explicitly marked `public`. This behaviour is identical to structs and is documented in detail in [`docs/access_modifiers.md`](access_modifiers.md).
+- Members are **read-only outside the class** unless explicitly marked `public`.
 - `public`, `private`, and `protected` control read/write visibility. For example, `public int opens` allows external code both to read and assign.
 - `const` members may only be assigned in constructors (or at the declaration site for statics). Any later mutation produces `Cannot write to const member ...`.
 
@@ -186,7 +195,7 @@ class Ticker
 
       string this()
       {
-          return $"radius = {this.radius}, location = {this.location}"
+          return $"radius = `this.radius`, location = `this.location`"
       }
   }
   ```
@@ -201,9 +210,9 @@ class Ticker
 
 ## Inheritance
 
-Classes participate in single inheritance and interface implementation. The language enforces the following rules:
+Classes support single inheritance and multi-interface implementation. The language enforces the following rules:
 
-- A class may inherit from **one** base class and implement zero or more interfaces using the `inherits` clause: `class Player inherits Entity, Drawable`.
+- A class may inherit from at most one base class and implement zero or more interfaces using the `inherits` clause: `class Player inherits Entity, Drawable`.
 - Interfaces are pure contracts. They cannot declare fields or constructors and every member is implicitly abstract.
 - Classes that declare an interface must implement all of its members. Implementations may be inherited from the base class; otherwise the derived class must provide an override.
 - Use `virtual` on base class members that may be customised and `override` in derived classes. Attempting to override a non-virtual member produces a diagnostic.
@@ -259,7 +268,7 @@ Attempting to omit an interface member or forget to override an abstract base me
 
 ## Generics
 
-Classes, interfaces, and functions can declare generic type parameters without any compiler switches-the feature is always enabled. You currently **must** provide explicit type arguments because type inference is not yet implemented. The parser performs context-sensitive lookahead so that nested templates such as `Box<List<int>>` and expressions like `left < right >> 1` coexist.
+Classes, interfaces, and functions can declare generic type parameters. You must provide explicit type arguments because type inference is not supported.
 
 ```cs
 class Box<T>

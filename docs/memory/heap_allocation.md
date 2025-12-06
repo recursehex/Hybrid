@@ -6,8 +6,8 @@ Hybrid supports explicit heap allocation and release using the `new` expression 
 
 ```cs
 // Objects
-Rectangle box = new Rectangle(10, 20)
-Rectangle box2 = new()          // target-typed; inherits the variable's type
+Rectangle box = new Rectangle(10, 20)   // useful for polymorphism
+Rectangle box2 = new()                  // inherits the variable's type
 Shape polymorphic = new Rectangle(5, 6)
 
 // Arrays
@@ -30,6 +30,11 @@ free box
 - Arrays allocated with `new` carry their length in the `{ ptr, len, dims }` struct Hybrid uses for array values. Bounds checks continue to apply.
 - `free` lowers to `hybrid_release`, triggering destructors once the refcount reaches zero. It is rarely used as ARC releases automatically at scope exit or on reassignment, but it is available for deterministic teardown sites.
 
+## Toggling ARC
+- The driver flag `--arc-enabled={true,false}` controls whether ARC retain/release calls are emitted (default: `true`).
+- When ARC is disabled the compiler still accepts ARC-capable types, but retain/release/autorelease insertion and ARC diagnostics are skipped. Smart pointer helpers stay available and compile to type-correct stubs (`use_count()` returns `0`, `weak.lock()` yields an empty handle).
+- The test runner forwards the flag via `./run_tests.sh -a on|off`, or individual tests can add `// RUN_OPTS: --arc-enabled=false` to opt out of ARC for a single fixture.
+
 ## Valid targets
 - Classes and structs (ARC-managed reference types).
 - Arrays created via `new` (or any other ARC-managed array reference).
@@ -49,6 +54,11 @@ class Widget
 {
     int weight
 
+    Widget()
+    {
+        this.weight = 1
+    }
+
     Widget(int w)
     {
         this.weight = w
@@ -60,10 +70,10 @@ class Widget
     }
 }
 
-int main()
+void main()
 {
     Widget cached = new Widget(10)
-    Widget quick = new()      // type comes from the variable
+    Widget quick = new()
 
     int[] samples = new[3]
     samples[0] = 1
@@ -71,6 +81,6 @@ int main()
     samples[2] = 3
 
     free cached               // optional manual release point
-    return samples[0] + samples[1] + samples[2]
+    //` samples` and `quick` are released automatically at scope exit
 }
 ```

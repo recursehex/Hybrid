@@ -18,66 +18,66 @@ class TestObject
 
 void testUniquePointers()
 {
-    unique<int> uniqueInt = (42)
-    unique<TestObject> uniqueObj = (10)
+    unique<int> uniqueInt = #42
+    unique<TestObject> uniqueObj = #10
 }
 
 void testUniqueReassignment()
 {
-    unique<TestObject> donor = (11)
-    unique<TestObject> slot = (12)
+    unique<TestObject> donor = #11
+    unique<TestObject> slot = #12
 
     slot = donor
-    donor = (13)
+    donor = #13
 
     int i = 0
     while i < 15
     {
         slot = donor
-        donor = (20 + i)
+        donor = #(20 + i)
         i++
     }
 }
 
 void testSharedPointers()
 {
-    shared<int> sharedInt = (99)
-    shared<TestObject> sharedObj = (20)
+    shared<int> sharedInt = #99
+    shared<TestObject> sharedObj = #20
     shared<TestObject> sharedCopy = sharedObj
-    shared<TestObject> sharedNext = (25)
+    shared<TestObject> sharedNext = #25
     sharedCopy = sharedNext
 }
 
 void testWeakPointers()
 {
-    shared<int> sharedInt = (55)
-    weak<int> weakInt = (sharedInt)
+    shared<int> sharedInt = #55
+    weak<int> weakInt = #sharedInt
 }
 
 void testSmartPointerAssignments()
 {
-    shared<TestObject> sharedA = (30)
-    shared<TestObject> sharedB = (31)
+    shared<TestObject> sharedA = #30
+    shared<TestObject> sharedB = #31
     sharedA = sharedB
-    shared<TestObject> sharedC = (32)
+    shared<TestObject> sharedC = #32
     sharedA = sharedC
 
-    shared<TestObject> owner = (40)
-    weak<TestObject> watcher = (owner)
-    weak<TestObject> watcher2 = (owner)
+    shared<TestObject> owner = #40
+    weak<TestObject> watcher = #owner
+    weak<TestObject> watcher2 = #owner
     watcher = watcher2
 }
 
 void testTypeDescriptions()
 {
     string uniqueDesc = describeType("unique<int>")
-    assert uniqueDesc == "type:unique<int>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:none"
+    assert uniqueDesc == "type:unique<int>|kind:struct|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:unique.get=1"
 
     string sharedDesc = describeType("shared<TestObject>")
-    assert sharedDesc == "type:shared<TestObject>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=TestObject|genericMethodInstantiations:shared.use_count=1"
+    assert sharedDesc == "type:shared<TestObject>|kind:struct|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=TestObject|genericMethodInstantiations:shared.get=1,shared.use_count=1,shared.weak=1"
 
     string weakDesc = describeType("weak<int>")
-    assert weakDesc == "type:weak<int>|kind:class|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:weak.lock=1"
+    assert weakDesc == "type:weak<int>|kind:struct|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:weak.get=1,weak.lock=1"
 }
 
 int main()
