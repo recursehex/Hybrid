@@ -93,6 +93,9 @@ The test runner automatically finds all `.hy` files in the `test/` directory:
 - Directories whose name ends with `_fail` (or that contain an `EXPECT_FAIL` file) are expected to fail.
 - These directory-based tests can be run in isolation via `./run_tests.sh multi_unit`.
 
+> [!IMPORTANT]
+> When adding a multi-file test that should fail, be sure the directory name ends with `_fail` or `_error` (or includes `EXPECT_FAIL`). Otherwise, the harness will expect the suite to pass and will flag the run as a regression.
+
 ### Binary Execution
 
 The test suite compiles and executes generated LLVM IR:
@@ -131,6 +134,9 @@ Error reporting is centralized through `reportCompilerError()` in `compiler_sess
 - Capture precise token locations via the lexer's `SourceLocation` plumbing and pass them through the parser.
 - Emit diagnostics with contextual hints by calling `LogError`, `LogErrorS`, `LogErrorP`, or `LogErrorV` so messages stay consistent.
 - Add regression coverage in `test/errors/` whenever a new diagnostic string is introduced to ensure the test runner continues to recognize expected failures.
+
+> [!IMPORTANT]
+> Every new diagnostic message needs a matching `test/errors/` fixture. Without it, the wording can drift silently, breaking IDE/CLI consumers that parse Hybrid's standardized error format.
 
 Treat descriptive errors as a first-class requirement. Pipe new failure paths through the shared helpers instead of printing ad-hoc messages.
 

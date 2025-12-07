@@ -72,6 +72,9 @@ When using character literals without explicit type declaration, the compiler au
 
 Character literals also adapt to the surrounding context. When an expression expects an 8-bit `schar`/`byte`, 16-bit `char`/`short`, or 32-bit `lchar`/`int`, the literal is regenerated at that width so comparisons like `'A' == byteValue` and declarations such as `schar small = 'A'` work without manual casts. Once the value is stored, however, converting it to a different width (or to an integer type) does require an explicit cast, e.g. `schar narrow = schar: wideChar`, `char ascii = char: codePoint`, or `int code = int: letter`. If the literal cannot fit the target width, the compiler falls back to the wider default and reports a type error. Invalid UTF-8 sequences produce diagnostics during lexing so they never reach codegen.
 
+> [!IMPORTANT]
+> `char` tops out at the BMP. Any codepoint above U+FFFF requires `lchar`; storing it in `char` will fail during lexing or type checking rather than producing a surrogate pair silently.
+
 ### Type-Specific Assignment
 
 You can explicitly specify the character type:

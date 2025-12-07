@@ -4,6 +4,9 @@
 
 Structs in Hybrid are user-defined composite types that group related data together. Structs cannot define methods, unlike classes. This design keeps structs as simple data containers, similar to C structs but with constructor support. Because fields do not receive implicit default values, every struct must declare at least one constructor so instances can initialize their storage. Structs may declare multiple constructors, provided each one initializes all instance fields before returning. If you need methods, access modifiers, or full object-oriented programming capabilities, use classes instead.
 
+> [!IMPORTANT]
+> Every constructor overload must assign every instance field before exiting, as field have no default values. Omitting a field assignment in any constructor results in a compile-time error.
+
 ## Struct Declaration
 
 ### Basic Syntax

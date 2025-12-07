@@ -173,7 +173,19 @@ void noReturn()
 
 ### Array Return Types
 
-Currently, functions cannot return arrays directly. Arrays must be passed as parameters and modified in place.
+Functions can return arrays directly. Returned arrays are full values, so callers can index them, pass them to other functions, or store them in variables.
+
+```c
+int[] makeNumbers()
+{
+    return [1, 2, 3]
+}
+
+string[]? maybeNames(bool include)
+{
+    return ["alpha", "beta"] if include else null
+}
+```
 
 ## Return Statements
 

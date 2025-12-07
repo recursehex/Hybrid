@@ -30,6 +30,9 @@ free box
 - Arrays allocated with `new` carry their length in the `{ ptr, len, dims }` struct Hybrid uses for array values. Bounds checks continue to apply.
 - `free` lowers to `hybrid_release`, triggering destructors once the refcount reaches zero. It is rarely used as ARC releases automatically at scope exit or on reassignment, but it is available for deterministic teardown sites.
 
+> [!TIP]
+> Only use `free` when you need a deterministic release point (for example, to flush a buffer or close a handle before leaving a long-lived scope).
+
 ## Toggling ARC
 - The driver flag `--arc-enabled={true,false}` controls whether ARC retain/release calls are emitted (default: `true`).
 - When ARC is disabled the compiler still accepts ARC-capable types, but retain/release/autorelease insertion and ARC diagnostics are skipped. Smart pointer helpers stay available and compile to type-correct stubs (`use_count()` returns `0`, `weak.lock()` yields an empty handle).
@@ -46,6 +49,9 @@ free box
 - `free` is compile-time checked, so double frees and any subsequent use of a manually released value both emit diagnostics to prevent use-after-free bugs.
 - `new` requires an ARC-managed reference type. Attempting `new` on smart-pointer wrappers emits a diagnostic.
 - Array allocations expect a single length expression; negative lengths are rejected.
+
+> [!CAUTION]
+> Attempting to use `free` on stack locals or smart pointers is rejected at compile time, so use it only on objects created with `new`.
 
 ## Examples
 

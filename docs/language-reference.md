@@ -13,6 +13,9 @@ Hybrid programs run through a `main` function defined in the root compilation un
 
 Both forms run global initializers and top-level expressions (when present) before executing user code. Pick the signature that matches your intent: use `void main()` for scripts that never fail, and `int main()` when downstream tooling should observe failure exit codes.
 
+> [!IMPORTANT]
+> CI and tooling rely on the process exit code. Use `int main()` whenever you need failing runs to surface as non-zero exits; `void main()` always returns `0`, which can mask missing error checks.
+
 ## Basic Syntax
 
 ### Comments

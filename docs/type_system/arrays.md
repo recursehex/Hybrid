@@ -172,6 +172,9 @@ Hybrid performs both compile-time and runtime bounds validation when you index a
 
 These checks apply while you operate on Hybrid array values (the `{ ptr, size }` representation produced by the compiler). If you explicitly convert an array to a raw pointer (`int@`, `float@`, etc.) you step outside these guarantees, so raw pointer arithmetic and dereferencing remain unsafe and unchecked.
 
+> [!CAUTION]
+> Converting a Hybrid array to a raw pointer drops bounds validation entirely. Keep indexing through the array value when you want safety; switch to pointers only when you intentionally accept unchecked accesses.
+
 ## Nullable Arrays
 
 Use nullable annotations to express optional arrays or optional elements:
@@ -360,13 +363,11 @@ Array indexing uses `getelementptr` instruction:
 ### Current Limitations
 
 1. **Fixed Size**: Arrays must be initialized with literals; dynamic sizing not supported
-2. **No Length Property**: Array length must be tracked separately
-3. **Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
+2. **Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
 
 ### Future Enhancements
 
 Planned features include:
-- Array length property `size`
 - Bounds checking support for additional unsafe scenarios
 - Array slicing operations
 

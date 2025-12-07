@@ -166,6 +166,12 @@ void test()
 ### Smart Pointers in Safe Code
 Smart pointer wrappers are safe: `@sharedValue` and `sharedValue->member` work in ordinary code without an `unsafe` block, while raw pointers continue to require one.
 
+### Raw Pointers vs. Smart Pointers
+- Raw pointers still require `unsafe` and never participate in ARC; use them only for low-level interop or tightly scoped stack work.
+- Smart pointers (`unique<T>`, `shared<T>`, `weak<T>`) use the same `@`/`->` surface but stay safe and ARC-aware; no implicit conversions exist between raw and smart pointers.
+- Class references already follow automatic ARC without wrappers; prefer smart pointers only when you need shared/exclusive ownership outside `unsafe`.
+- When dereferencing, apply `@` to the pointer value itself (`@sharedBox`, `ptr->field`); avoid mixing raw pointer arithmetic with smart pointers.
+
 ### Unsafe Structs
 
 Structs containing pointer fields must be declared as unsafe:

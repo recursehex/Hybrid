@@ -58,13 +58,21 @@ increment(ref x)  // x is now 6
 ### Function Return Types
 
 ```cs
-// Function returning a ref
-ref int getRef()
+// Return a ref that aliases caller-owned storage
+ref int pickLarger(ref int left, ref int right)
 {
-    int localVar = 42
-    return ref localVar
+    if (left > right) return ref left
+    return ref right
 }
+
+int a = 5
+int b = 10
+ref int biggest = pickLarger(ref a, ref b)
+biggest = 42  // Mutates b, because pickLarger returned ref b
 ```
+
+> [!WARNING]
+> Do not return a reference to a stack-local or temporary. The compiler rejects escaping refs that would dangle. Instead, return a value or store it in longer-lived storage first (e.g. a global, static, or caller-provided ref).
 
 ## Use Cases
 

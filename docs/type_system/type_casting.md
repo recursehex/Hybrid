@@ -121,6 +121,9 @@ int userInput = 1000
 byte result = byte: userInput   // Truncates to fit at runtime
 ```
 
+> [!CAUTION]
+> Currently, range checks only apply to literal casts. Casting runtime values can silently truncate or reinterpret bits; validate user data before narrowing.
+
 ### Character Type Casting
 
 Character types can be cast to and from integers:

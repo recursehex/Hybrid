@@ -59,6 +59,9 @@ class Person
 }
 ```
 
+> [!IMPORTANT]
+> Hybrid never allows uninitialized locals. If you see a declaration without an initializer, move the calculation into the initializer or refactor the control flow until every path sets the value.
+
 ## Nullable Types
 
 All value and reference types are non-nullable by default. Append `?` to the type name to allow `null` assignments and propagate nullable results:
@@ -99,4 +102,4 @@ int localExample() {
 }
 ```
 
-Global variables are stored as LLVM global variables and persist for the program's lifetime.
+Global variables are stored as LLVM global variables and persist for the program's lifetime. Local variables are allocated on the stack when the function is called and deallocated when it returns.

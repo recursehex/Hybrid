@@ -17,6 +17,9 @@ While types must be explicitly declared, the compiler performs automatic type in
 > [!NOTE]
 > Leading-dot literals such as `.5` are interpreted as floating-point numbers (`0.5`).
 
+> [!IMPORTANT]
+> Inference only regenerates literals; it never inserts implicit casts for stored values. Declarations need an explicit type, and narrowing assignments (e.g. `int` to `byte`) require `type: expr`.
+
 ## Context-Aware Literal Type Inference
 
 Number literals automatically adapt to the target type in binary operations, eliminating the need for explicit casts in most common cases. This feature improves code readability while maintaining type safety.

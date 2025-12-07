@@ -44,6 +44,9 @@ class Door
   - Strings: ``string label = $"Value: `(rect)`"`` or `print(rect)` will call `string this()` when present.
   - Smart pointers: `shared<Widget> primary = #5` builds the payload with `Widget(5)` and wraps it in a `shared<Widget>`; the same applies to `unique<T>`. For `weak<T>`, the shorthand expects a `shared<T>` value, e.g. `weak<Widget> watcher = #sharedOwner`.
 
+> [!IMPORTANT]
+> The compiler never synthesizes constructors for classes. Declare at least one and initialize every instance member inside each overload, or construction fails with "cannot assign uninitialized member" diagnostics.
+
 ```cs
 Door front = (2)    // shorthand for Door front = Door(2)
 Door copy = (front) // invokes the copy constructor when available
