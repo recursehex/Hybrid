@@ -28,10 +28,10 @@ int main()
     shared<Dummy> locked2 = watcher2.lock()
 
     // ARC is disabled, so the helpers return stub counts
-    assert owner.use_count() == 0
-    assert copy.use_count() == 0
-    assert locked.use_count() == 0
-    assert locked2.use_count() == 0
+    assert owner.arcUseCount() == 0
+    assert copy.arcUseCount() == 0
+    assert locked.arcUseCount() == 0
+    assert locked2.arcUseCount() == 0
     assert (@owner).value == 5
 
     return 0

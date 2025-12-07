@@ -5731,7 +5731,7 @@ static bool emitSmartPointerHelpers(const std::string &constructedName,
       return nullptr;
     llvm::Type *intTy = llvm::Type::getInt32Ty(*TheContext);
     llvm::Function *fn = createSmartPointerHelperFunction(
-        constructedName, "shared.use_count", intTy, {structPtrTy},
+        constructedName, "shared.arcUseCount", intTy, {structPtrTy},
         {"self"});
     if (!fn)
       return nullptr;
@@ -6121,7 +6121,7 @@ static bool emitSmartPointerHelpers(const std::string &constructedName,
       metadata.smartPointerDestroyHelper = destroyFn->getName().str();
       TypeInfo countReturn = makeTypeInfo("int");
       finalizeTypeInfoMetadata(countReturn);
-      registerMethod("use_count", useCountFn, countReturn);
+      registerMethod("arcUseCount", useCountFn, countReturn);
       registerMethod("get", getFn, getReturn);
       registerMethod("weak", weakHelper, weakReturnInfo);
     }
@@ -12128,16 +12128,25 @@ llvm::Value *NewExprAST::codegen() {
 
   TypeInfo allocationInfo = makeTypeInfo(compositeName);
   finalizeTypeInfoMetadata(allocationInfo);
+
+  if (allocationInfo.isSmartPointer()) {
+    bool treatAsTuple = Args.size() > 1;
+    ParenExprAST paren(std::move(Args), treatAsTuple);
+    paren.setTypeName(typeNameFromInfo(allocationInfo));
+    llvm::Value *constructed =
+        emitTargetTypedConstruction(allocationInfo, paren);
+    Args = paren.takeElements();
+    if (!constructed)
+      return nullptr;
+    markTemporary();
+    setTypeName(typeNameFromInfo(allocationInfo));
+    return constructed;
+  }
+
   if (!allocationInfo.requiresARC()) {
     reportCompilerError(
         "The 'new' keyword is only supported for ARC-managed reference types",
         "Use value construction without 'new' for stack values or enable ARC support on the target type.");
-    return nullptr;
-  }
-  if (allocationInfo.isSmartPointer()) {
-    reportCompilerError(
-        "Cannot allocate smart pointers with 'new'",
-        "Use the smart pointer helper functions to create managed values instead.");
     return nullptr;
   }
 

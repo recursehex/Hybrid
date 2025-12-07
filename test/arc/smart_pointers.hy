@@ -74,7 +74,7 @@ void testTypeDescriptions()
     assert uniqueDesc == "type:unique<int>|kind:struct|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:unique.get=1"
 
     string sharedDesc = describeType("shared<TestObject>")
-    assert sharedDesc == "type:shared<TestObject>|kind:struct|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=TestObject|genericMethodInstantiations:shared.get=1,shared.use_count=1,shared.weak=1"
+    assert sharedDesc == "type:shared<TestObject>|kind:struct|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=TestObject|genericMethodInstantiations:shared.arcUseCount=1,shared.get=1,shared.weak=1"
 
     string weakDesc = describeType("weak<int>")
     assert weakDesc == "type:weak<int>|kind:struct|baseClass:none|interfaces:none|genericParameters:T|typeArgumentBindings:T=int|genericMethodInstantiations:weak.get=1,weak.lock=1"

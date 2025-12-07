@@ -60,7 +60,8 @@ shared<Door> refDoor = #2 // payload constructed via Door(int)
 - Accessors: `@ptr` yields the payload value for smart pointers (e.g. `@owner == 5` for `shared<int>`). `ptr->member` works only for smart pointers in safe code; raw pointers still require `unsafe` and explicit dereference.
 - Construction shorthand: use `#payload` to build smart pointers from a target type. It accepts payload constructors (`shared<Foo> handle = #5` calls `Foo(int)`), and `weak<T>` expects a `shared<T>` payload (`weak<Foo> watcher = #handle`).
 - Smart pointers and raw references point to the same ARC-managed allocations, so you can pass either to APIs without special conversion functions; pick the wrapper only when you need its ownership semantics.
-- Disabling ARC lowering (`--arc-enabled=false`) keeps these helpers available but they degrade to type-correct stubs: `use_count()` reports `0` and `weak.lock()` returns an empty handle so ARC-on vs ARC-off comparisons do not require source changes.
+- Target-typed `new(...)` also works with smart pointer destinations, constructing the payload from the wrapper’s generic type before wiring the control block; `weak<T>` still expects a `shared<T>` payload.
+- Disabling ARC lowering (`--arc-enabled=false`) keeps these helpers available but they degrade to type-correct stubs: `arcUseCount()` reports `0` and `weak.lock()` returns an empty handle so ARC-on vs ARC-off comparisons do not require source changes.
 
 ## Heap Allocation with `new` and `free`
 

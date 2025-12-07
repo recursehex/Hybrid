@@ -31,10 +31,10 @@ int main()
     shared<Counter> promoted = watcher.lock()
     shared<Counter> promoted2 = watcher2.lock()
 
-    assert owner.use_count() == 4
-    assert alias.use_count() == 4
-    assert promoted.use_count() == 4
-    assert promoted2.use_count() == 4
+    assert owner.arcUseCount() == 4
+    assert alias.arcUseCount() == 4
+    assert promoted.arcUseCount() == 4
+    assert promoted2.arcUseCount() == 4
     assert (@promoted).value == 20
     assert (@owner).value == 20
     assert @uniqueNumber == 5

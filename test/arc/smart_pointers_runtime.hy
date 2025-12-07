@@ -56,12 +56,12 @@ void testWeakObservation()
 void testSharedUseCount()
 {
     shared<Counter> primary = #(5, 500)
-    int first = primary.use_count()
+    int first = primary.arcUseCount()
     assert first == 1
 
     shared<Counter> secondary = primary
-    assert primary.use_count() == 2
-    assert secondary.use_count() == 2
+    assert primary.arcUseCount() == 2
+    assert secondary.arcUseCount() == 2
 }
 
 void testWeakLock()
@@ -69,7 +69,7 @@ void testWeakLock()
     shared<Counter> owner = #(6, 600)
     weak<Counter> observer = #owner
     shared<Counter> promoted = observer.lock()
-    assert promoted.use_count() == 2
+    assert promoted.arcUseCount() == 2
 
     weak<Counter> dangling = #()
     if true
@@ -79,7 +79,7 @@ void testWeakLock()
     }
 
     shared<Counter> expired = dangling.lock()
-    assert expired.use_count() == 0
+    assert expired.arcUseCount() == 0
 }
 
 // Test shared<T> with primitive types
