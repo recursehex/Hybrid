@@ -2,7 +2,7 @@
 
 ## Overview
 
-Arrays in Hybrid are fixed-size collections of elements of the same type. They are declared using the `[]` syntax after the element type and must be initialized with array literals at declaration.
+Arrays in Hybrid are fixed-size collections of elements of the same type. They are declared using the `[]` syntax after the element type and must be initialized at declaration, typically with array literals or the sized fill shorthand.
 
 ## Array Declaration
 
@@ -29,6 +29,15 @@ bool[] flags = [true, false, true, false]
 
 // String array
 string[] names = ["Alice", "Bob", "Charlie"]
+```
+
+### Sized Fill Shorthand
+
+When you know the desired length up front, you can place the size inside the brackets and assign a single value. The compiler allocates the array with that size and copies the initializer into every slot:
+
+```c
+int[3] offsets = 2          // offsets == [2, 2, 2]
+int[2, 3] grid = 5          // Every cell in the 2x3 grid is 5
 ```
 
 ## Array Literals

@@ -733,9 +733,30 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
       std::string segment = "[";
       getNextToken(); // eat '['
 
-      while (CurTok == ',') {
-        segment += ",";
-        getNextToken(); // eat ','
+      while (CurTok != ']' && CurTok != tok_eof) {
+        if (CurTok == tok_newline) {
+          getNextToken();
+          continue;
+        }
+
+        if (CurTok == ',') {
+          segment += ",";
+          getNextToken(); // eat ','
+          continue;
+        }
+
+        if (CurTok == tok_number) {
+          if (!LexedNumericLiteral.isInteger()) {
+            reportCompilerError("Array bounds in a type must be an integer literal");
+            return false;
+          }
+          segment += LexedNumericLiteral.getSpelling();
+          getNextToken(); // eat number
+          continue;
+        }
+
+        reportCompilerError("Expected ',' or ']' in array type");
+        return false;
       }
 
       if (CurTok != ']') {

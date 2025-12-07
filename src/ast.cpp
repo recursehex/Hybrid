@@ -1062,6 +1062,89 @@ static std::string typeNameFromInfo(const TypeInfo &info) {
   return result;
 }
 
+static std::optional<TypeInfo>
+extractElementTypeInfo(const TypeInfo &arrayInfo) {
+  if (!arrayInfo.isArray)
+    return std::nullopt;
+
+  std::string arrayTypeName =
+      stripNullableAnnotations(typeNameFromInfo(arrayInfo));
+  if (!isArrayTypeName(arrayTypeName))
+    return std::nullopt;
+
+  std::string elementTypeName = removeLastArrayGroup(arrayTypeName);
+  if (elementTypeName.empty())
+    return std::nullopt;
+
+  TypeInfo elementInfo = makeTypeInfo(elementTypeName);
+  if (arrayInfo.elementNullable && !elementInfo.isNullable)
+    elementInfo.isNullable = true;
+  finalizeTypeInfoMetadata(elementInfo);
+  return elementInfo;
+}
+
+static std::vector<int64_t>
+parseExplicitArrayDimensions(const TypeInfo &info) {
+  if (!info.isArray || info.arrayDepth != 1)
+    return {};
+
+  std::string typeName = stripNullableAnnotations(typeNameFromInfo(info));
+  size_t openPos = typeName.rfind('[');
+  if (openPos == std::string::npos)
+    return {};
+  size_t closePos = typeName.find(']', openPos);
+  if (closePos == std::string::npos || closePos <= openPos + 1)
+    return {};
+
+  std::string contents =
+      typeName.substr(openPos + 1, closePos - openPos - 1);
+  std::vector<int64_t> dims;
+  size_t pos = 0;
+  while (pos < contents.size()) {
+    while (pos < contents.size() &&
+           std::isspace(static_cast<unsigned char>(contents[pos])))
+      ++pos;
+    if (pos >= contents.size())
+      break;
+
+    size_t start = pos;
+    while (pos < contents.size() &&
+           std::isdigit(static_cast<unsigned char>(contents[pos])))
+      ++pos;
+    if (start == pos)
+      return {};
+
+    int64_t value = 0;
+    try {
+      value = std::stoll(contents.substr(start, pos - start));
+    } catch (...) {
+      return {};
+    }
+    if (value < 0)
+      return {};
+
+    dims.push_back(value);
+    while (pos < contents.size() &&
+           std::isspace(static_cast<unsigned char>(contents[pos])))
+      ++pos;
+    if (pos >= contents.size())
+      break;
+    if (contents[pos] != ',')
+      return {};
+    ++pos;
+  }
+
+  if (dims.empty())
+    return {};
+
+  unsigned expectedRank =
+      info.arrayRanks.empty() ? 1 : std::max(1u, info.arrayRanks.back());
+  if (dims.size() != expectedRank)
+    return {};
+
+  return dims;
+}
+
 static bool typeHasDestructor(const TypeInfo &info) {
   std::string base = sanitizeCompositeLookupName(typeNameFromInfo(info));
   if (base.empty())
@@ -8141,6 +8224,113 @@ bool areTypesCompatible(llvm::Type* type1, llvm::Type* type2) {
   return false;
 }
 
+static llvm::Value *emitArrayFillValue(const TypeInfo &arrayInfo,
+                                       const TypeInfo &elementInfo,
+                                       llvm::Type *elementType,
+                                       llvm::Value *elementValue,
+                                       const std::vector<int64_t> &dimensions,
+                                       std::string_view label) {
+  if (!elementType || !elementValue)
+    return nullptr;
+
+  unsigned rank =
+      arrayInfo.arrayRanks.empty() ? 1 : std::max(1u, arrayInfo.arrayRanks.back());
+  if (dimensions.size() != rank) {
+    reportCompilerError("Array initializer does not match declared dimensions");
+    return nullptr;
+  }
+
+  uint64_t totalCount = 1;
+  for (int64_t dim : dimensions)
+    totalCount *= static_cast<uint64_t>(dim);
+
+  llvm::Value *arrayDataPtr =
+      llvm::ConstantPointerNull::get(pointerType(elementType));
+
+  if (totalCount > 0) {
+    uint64_t elemSize = getTypeSizeInBytes(elementType);
+    if (elemSize == 0)
+      return LogErrorV("Unable to determine element size for array initialization");
+
+    llvm::Value *elemSizeVal =
+        llvm::ConstantInt::get(getSizeType(), elemSize);
+    llvm::Value *lengthSize =
+        llvm::ConstantInt::get(getSizeType(), totalCount);
+    llvm::Value *descriptorPtr =
+        Builder->CreateCall(getHybridArrayDescriptorFunction(), {},
+                            buildArcOpLabel(label, "array.fill.descriptor"));
+    llvm::Value *releaseFn = selectArrayElementReleaseFunction(
+        elementInfo, buildArcOpLabel(label, "array.fill.releasefn"));
+    llvm::Value *rawPtr = Builder->CreateCall(
+        getHybridAllocArrayFunction(),
+        {elemSizeVal, lengthSize, descriptorPtr},
+        buildArcOpLabel(label, "array.fill.raw"));
+
+    if (!llvm::isa<llvm::ConstantPointerNull>(releaseFn)) {
+      llvm::Value *releaseFnCasted = releaseFn;
+      if (releaseFn->getType() != getArrayReleaseCallbackPointerType()) {
+        releaseFnCasted = Builder->CreateBitCast(
+            releaseFn, getArrayReleaseCallbackPointerType(),
+            buildArcOpLabel(label, "array.fill.releasefn.cast"));
+      }
+      Builder->CreateCall(getHybridArraySetReleaseFunction(),
+                          {rawPtr, releaseFnCasted});
+    }
+
+    llvm::Value *rawBytePtr = Builder->CreateBitCast(
+        rawPtr, pointerType(llvm::Type::getInt8Ty(*TheContext)),
+        buildArcOpLabel(label, "array.fill.byteptr"));
+    llvm::Value *payloadBytePtr = Builder->CreateInBoundsGEP(
+        llvm::Type::getInt8Ty(*TheContext), rawBytePtr,
+        llvm::ConstantInt::get(getSizeType(), getArrayPayloadOffsetBytes()),
+        buildArcOpLabel(label, "array.fill.payload.byte"));
+    arrayDataPtr = Builder->CreateBitCast(
+        payloadBytePtr, pointerType(elementType),
+        buildArcOpLabel(label, "array.fill.payload"));
+  }
+
+  if (totalCount > 0) {
+    for (uint64_t idx = 0; idx < totalCount; ++idx) {
+      llvm::Value *valueToStore = elementValue;
+      if (elementInfo.requiresARC() && !elementInfo.isSmartPointer() && idx > 0) {
+        valueToStore = emitArcRetain(
+            elementValue, elementInfo,
+            buildArcOpLabel(label, "array.fill.retain"));
+        if (!valueToStore)
+          return nullptr;
+      }
+
+      llvm::Value *Idx = llvm::ConstantInt::get(
+          llvm::Type::getInt32Ty(*TheContext), idx);
+      llvm::Value *ElemPtr = Builder->CreateGEP(
+          elementType, arrayDataPtr, Idx,
+          buildArcOpLabel(label, "array.fill.elemptr"));
+      Builder->CreateStore(valueToStore, ElemPtr);
+    }
+  }
+
+  llvm::StructType *arrayStructTy = getArrayStructType(elementType, rank);
+  llvm::Value *arrayValue = llvm::UndefValue::get(arrayStructTy);
+
+  llvm::Value *opaquePtr =
+      Builder->CreateBitCast(arrayDataPtr, pointerType(),
+                             buildArcOpLabel(label, "array.fill.ptrcast"));
+  arrayValue = Builder->CreateInsertValue(arrayValue, opaquePtr, {0});
+
+  llvm::Value *sizeVal = llvm::ConstantInt::get(
+      llvm::Type::getInt32Ty(*TheContext), totalCount);
+  arrayValue = Builder->CreateInsertValue(arrayValue, sizeVal, {1});
+
+  for (unsigned i = 0; i < rank; ++i) {
+    llvm::Value *dimVal = llvm::ConstantInt::get(
+        llvm::Type::getInt32Ty(*TheContext),
+        dimensions.size() > i ? dimensions[i] : 0);
+    arrayValue = Builder->CreateInsertValue(arrayValue, dimVal, {2u, i});
+  }
+
+  return arrayValue;
+}
+
 // Generate code for array literals
 llvm::Value *ArrayExprAST::codegen_with_element_target(llvm::Type *TargetElementType,
                                                        const std::string &TargetElementTypeName,
@@ -8725,16 +8915,16 @@ llvm::Value *NullSafeElementAccessExprAST::codegen() {
   std::string elemTypeStr;
   if (!arrayTypeName.empty()) {
     std::string sanitized = stripNullableAnnotations(arrayTypeName);
-    if (sanitized.size() > 2 && sanitized.substr(sanitized.size() - 2) == "[]") {
-      elemTypeStr = sanitized.substr(0, sanitized.size() - 2);
-    }
+    if (isArrayTypeName(sanitized))
+      elemTypeStr = removeLastArrayGroup(sanitized);
   }
 
   if (elemTypeStr.empty()) {
     if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
       if (const TypeInfo *info = lookupTypeInfo(VarExpr->getName())) {
-        if (info->isArray && info->typeName.size() > 2) {
-          elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
+        if (info->isArray && isArrayTypeName(info->typeName)) {
+          elemTypeStr = removeLastArrayGroup(
+              stripNullableAnnotations(typeNameFromInfo(*info)));
           elementAllowsNull = elementAllowsNull || info->elementNullable;
         }
       }
@@ -8947,17 +9137,16 @@ llvm::Value *NullSafeElementAccessExprAST::codegen_ptr() {
   std::string elemTypeStr;
   if (!arrayTypeName.empty()) {
     std::string sanitized = stripNullableAnnotations(arrayTypeName);
-    if (sanitized.size() > 2 && sanitized.substr(sanitized.size() - 2) == "[]") {
-      elemTypeStr = sanitized.substr(0, sanitized.size() - 2);
-    }
+    if (isArrayTypeName(sanitized))
+      elemTypeStr = removeLastArrayGroup(sanitized);
   }
 
   if (elemTypeStr.empty()) {
     if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getArray())) {
       if (const TypeInfo *info = lookupTypeInfo(VarExpr->getName())) {
-        if (info->isArray && info->typeName.size() > 2) {
-          elemTypeStr = info->typeName.substr(0, info->typeName.size() - 2);
-        }
+        if (info->isArray && isArrayTypeName(info->typeName))
+          elemTypeStr = removeLastArrayGroup(
+              stripNullableAnnotations(typeNameFromInfo(*info)));
       }
     }
   }
@@ -13511,6 +13700,7 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   const ExprAST *NullableCheckExpr = unwrapRefExpr(InitializerExpr);
   const bool shouldCheckNullability = NullableCheckExpr && !RefInitializer;
   std::string targetDescription = "variable '" + getName() + "'";
+  std::vector<int64_t> trackedArraySizes;
 
   if (InitializerExpr) {
     if (!validateInvariantAssignment(declaredInfo, InitializerExpr,
@@ -13520,35 +13710,17 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
   std::string declaredElementTypeName;
   llvm::Type *declaredElementType = nullptr;
+  std::optional<TypeInfo> declaredElementInfo;
   if (declaredInfo.isArray) {
-    if (declaredInfo.typeName.size() > 2 &&
-        declaredInfo.typeName.substr(declaredInfo.typeName.size() - 2) == "[]") {
-      declaredElementTypeName = declaredInfo.typeName.substr(0, declaredInfo.typeName.size() - 2);
-    } else {
-      ParsedTypeDescriptor declaredDesc = parseTypeString(declaredInfo.typeName);
-      if (declaredDesc.sanitized.size() > 2 &&
-          declaredDesc.sanitized.substr(declaredDesc.sanitized.size() - 2) == "[]") {
-        declaredElementTypeName = declaredDesc.sanitized.substr(0, declaredDesc.sanitized.size() - 2);
-      }
-    }
-
-    if (!declaredElementTypeName.empty())
+    declaredElementInfo = extractElementTypeInfo(declaredInfo);
+    if (declaredElementInfo) {
+      declaredElementTypeName = typeNameFromInfo(*declaredElementInfo);
       declaredElementType = getTypeFromString(declaredElementTypeName);
+    }
   }
 
-  auto generateInitializerValue = [&](ExprAST *expr) -> llvm::Value * {
-    if (!expr)
-      return nullptr;
-    if (declaredInfo.isSmartPointer()) {
-      if (auto *paren = dynamic_cast<ParenExprAST *>(expr))
-        return emitTargetTypedConstruction(declaredInfo, *paren);
-    }
-    if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(expr)) {
-      if (declaredInfo.isArray)
-        return ArrayInit->codegen_with_element_target(declaredElementType, declaredElementTypeName, &declaredInfo);
-    }
-    return expr->codegen();
-  };
+  const std::vector<int64_t> explicitArrayDims =
+      parseExplicitArrayDimensions(declaredInfo);
 
   auto computeLiteralDimensions = [&](const ArrayExprAST *arrayLiteral) -> std::vector<int64_t> {
     std::vector<int64_t> dims;
@@ -13607,6 +13779,106 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     }
 
     return dims;
+  };
+
+  auto formatDims = [](const std::vector<int64_t> &dims) {
+    if (dims.empty())
+      return std::string("unknown");
+    std::string formatted;
+    for (size_t i = 0; i < dims.size(); ++i) {
+      if (i != 0)
+        formatted += "x";
+      formatted += std::to_string(dims[i]);
+    }
+    return formatted;
+  };
+
+  auto generateInitializerValue = [&](ExprAST *expr) -> llvm::Value * {
+    if (!expr)
+      return nullptr;
+    if (declaredInfo.isSmartPointer()) {
+      if (auto *paren = dynamic_cast<ParenExprAST *>(expr))
+        return emitTargetTypedConstruction(declaredInfo, *paren);
+    }
+    if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(expr)) {
+      if (declaredInfo.isArray) {
+        llvm::Value *value = ArrayInit->codegen_with_element_target(
+            declaredElementType, declaredElementTypeName, &declaredInfo);
+        if (!value)
+          return nullptr;
+
+        auto literalDims = computeLiteralDimensions(ArrayInit);
+        if (!explicitArrayDims.empty() && !literalDims.empty() &&
+            literalDims != explicitArrayDims) {
+          reportCompilerError(
+              "Array initializer does not match declared size for '" +
+                  getName() + "'",
+              "Declared dimensions: " + formatDims(explicitArrayDims) +
+                  ", initializer dimensions: " + formatDims(literalDims));
+          return nullptr;
+        }
+
+        if (!literalDims.empty())
+          trackedArraySizes = std::move(literalDims);
+        else if (!explicitArrayDims.empty())
+          trackedArraySizes = explicitArrayDims;
+        return value;
+      }
+    }
+
+    llvm::Value *value = expr->codegen();
+    if (!value)
+      return nullptr;
+
+    if (declaredInfo.isArray && !explicitArrayDims.empty()) {
+      if (value->getType() == VarType) {
+        if (trackedArraySizes.empty())
+          trackedArraySizes = explicitArrayDims;
+        return value;
+      }
+
+      TypeInfo elementInfo = declaredElementInfo
+                                 ? *declaredElementInfo
+                                 : makeTypeInfo(removeLastArrayGroup(
+                                       stripNullableAnnotations(
+                                           typeNameFromInfo(declaredInfo))));
+      if (!declaredElementInfo && declaredInfo.elementNullable &&
+          !elementInfo.isNullable)
+        elementInfo.isNullable = true;
+      finalizeTypeInfoMetadata(elementInfo);
+      std::string elementName = typeNameFromInfo(elementInfo);
+
+      if (!typeAllowsNull(elementInfo) &&
+          expressionIsNullable(unwrapRefExpr(expr))) {
+        reportCompilerError(
+            "Array elements of type '" + elementName + "' cannot be null",
+            "Make the element type nullable with '?' or use a non-null value.");
+        return nullptr;
+      }
+
+      llvm::Type *elementType =
+          declaredElementType ? declaredElementType : getTypeFromString(elementName);
+      if (!elementType)
+        return LogErrorV("Unknown element type in array initializer");
+
+      if (diagnoseDisallowedImplicitIntegerConversion(
+              expr, value, elementType, elementName,
+              "initializer for '" + getName() + "'"))
+        return nullptr;
+      llvm::Value *castValue =
+          castToType(value, elementType, elementName);
+      if (!castValue)
+        return nullptr;
+
+      llvm::Value *filled = emitArrayFillValue(declaredInfo, elementInfo,
+                                               elementType, castValue,
+                                               explicitArrayDims, getName());
+      if (filled)
+        trackedArraySizes = explicitArrayDims;
+      return filled;
+    }
+
+    return value;
   };
 
   // Check if at global scope
@@ -13803,11 +14075,15 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
     // Track array size for compile-time bounds checking
     if (!isRefVar && declaredInfo.isArray) {
-      if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
-        auto dims = computeLiteralDimensions(ArrayInit);
-        if (!dims.empty())
-          ArraySizes[getName()] = std::move(dims);
+      if (trackedArraySizes.empty()) {
+        if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(getInitializer())) {
+          auto dims = computeLiteralDimensions(ArrayInit);
+          if (!dims.empty())
+            trackedArraySizes = std::move(dims);
+        }
       }
+      if (!trackedArraySizes.empty())
+        ArraySizes[getName()] = trackedArraySizes;
     }
 
     // Return the value that was stored
@@ -14023,12 +14299,16 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
 
         // Track array size for compile-time bounds checking
         if (declaredInfo.isArray) {
-          if (auto *ArrayInit =
-                  dynamic_cast<ArrayExprAST *>(getInitializer())) {
-            auto dims = computeLiteralDimensions(ArrayInit);
-            if (!dims.empty())
-              ArraySizes[getName()] = std::move(dims);
+          if (trackedArraySizes.empty()) {
+            if (auto *ArrayInit =
+                    dynamic_cast<ArrayExprAST *>(getInitializer())) {
+              auto dims = computeLiteralDimensions(ArrayInit);
+              if (!dims.empty())
+                trackedArraySizes = std::move(dims);
+            }
           }
+          if (!trackedArraySizes.empty())
+            ArraySizes[getName()] = trackedArraySizes;
         }
 
         // Return the value that was stored
@@ -14107,8 +14387,8 @@ llvm::Value *ForEachStmtAST::codegen() {
       ParsedTypeDescriptor desc = parseTypeString(collectionTypeName);
       if (desc.isArray) {
         std::string sanitized = desc.sanitized;
-        if (sanitized.size() > 2 && sanitized.substr(sanitized.size() - 2) == "[]") {
-          std::string baseTypeName = sanitized.substr(0, sanitized.size() - 2);
+        if (isArrayTypeName(sanitized)) {
+          std::string baseTypeName = removeLastArrayGroup(sanitized);
           if (llvm::Type *InferredElemType = getTypeFromString(baseTypeName))
             SourceElemType = InferredElemType;
         }
