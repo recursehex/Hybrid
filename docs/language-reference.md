@@ -23,6 +23,9 @@ Both forms run global initializers and top-level expressions (when present) befo
 ```c
 // This is a single-line comment
 // Comments continue until the end of the line
+
+/* Block comments can span multiple lines
+   and are ignored by the compiler */
 ```
 
 ### Statement Termination

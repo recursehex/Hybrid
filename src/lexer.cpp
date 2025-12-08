@@ -822,6 +822,33 @@ char_literal_end:
       if (LastChar != EOF)
         return gettok();
     }
+
+    // Handle /* */ block comments
+    if (Op == '/' && NextChar == '*') {
+      SourceLocation commentStart = start;
+      LastChar = lex.consumeChar(); // move past the initial "/*"
+      while (true) {
+        if (LastChar == EOF) {
+          lex.setTokenStart(commentStart);
+          reportCompilerError("Unterminated block comment");
+          return tok_error;
+        }
+
+        if (LastChar == '*') {
+          int maybeSlash = lex.consumeChar();
+          if (maybeSlash == '/') {
+            LastChar = lex.consumeChar(); // consume '/' and continue lexing
+            break;
+          }
+          LastChar = maybeSlash;
+          continue;
+        }
+
+        LastChar = lex.consumeChar();
+      }
+
+      return gettok();
+    }
     
     // Handle increment operator
     if (Op == '+' && NextChar == '+') {
