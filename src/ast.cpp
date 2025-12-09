@@ -13541,13 +13541,67 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
 // Statement Code Generation
 //===----------------------------------------------------------------------===//
 
+static bool isParameterName(llvm::Function *fn, const std::string &name) {
+  if (!fn)
+    return false;
+  for (const auto &arg : fn->args()) {
+    if (arg.getName() == name)
+      return true;
+  }
+  return false;
+}
+
+static bool isLocalReturnReference(const std::string &name,
+                                   llvm::Function *currentFunction) {
+  if (!NamedValues.contains(name))
+    return false;
+  if (const auto *entry = lookupLifetimePlanEntry(name)) {
+    if (entry->isParameter)
+      return false;
+  }
+  return !isParameterName(currentFunction, name);
+}
+
+static std::optional<std::string>
+findEscapingLocalRef(ExprAST *expr, llvm::Function *currentFunction) {
+  if (!expr)
+    return std::nullopt;
+
+  if (auto *varExpr = dynamic_cast<VariableExprAST *>(expr)) {
+    if (isLocalReturnReference(varExpr->getName(), currentFunction))
+      return varExpr->getName();
+    return std::nullopt;
+  }
+
+  if (auto *indexExpr = dynamic_cast<ArrayIndexExprAST *>(expr))
+    return findEscapingLocalRef(indexExpr->getArray(), currentFunction);
+
+  if (auto *memberExpr = dynamic_cast<MemberAccessExprAST *>(expr))
+    return findEscapingLocalRef(memberExpr->getObject(), currentFunction);
+
+  return std::nullopt;
+}
+
 // Generate code for return statements
 llvm::Value *ReturnStmtAST::codegen() {
+  llvm::Function *currentFunction = nullptr;
+  if (auto *currentBlock = Builder->GetInsertBlock())
+    currentFunction = currentBlock->getParent();
+
   if (getReturnValue()) {
     llvm::Value *Val;
 
     // Check if this is a ref return
     if (isRef()) {
+      if (auto escapingLocal =
+              findEscapingLocalRef(getReturnValue(), currentFunction)) {
+        reportCompilerError("Cannot return local variable '" + *escapingLocal +
+                            "' by reference",
+                            "Return a value or a reference to caller-owned "
+                            "storage instead");
+        return nullptr;
+      }
+
       // For ref return, need to return a pointer
       // Use codegen_ptr if the return value supports it
       if (auto *VarExpr = dynamic_cast<VariableExprAST*>(getReturnValue())) {
@@ -13568,10 +13622,6 @@ llvm::Value *ReturnStmtAST::codegen() {
 
     if (!Val)
       return nullptr;
-
-    llvm::Function *currentFunction = nullptr;
-    if (auto *currentBlock = Builder->GetInsertBlock())
-      currentFunction = currentBlock->getParent();
 
     if (!isRef()) {
       auto maybePromoteStackReturn = [&](llvm::Value *value) -> llvm::Value * {

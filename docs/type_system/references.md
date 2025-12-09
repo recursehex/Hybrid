@@ -357,7 +357,7 @@ func(ref f)  // ERROR: Type mismatch
    x = ref b  // This assigns b's value to a, doesn't relink x
    ```
 
-3. **Function scope**: Returning ref to local variables is unsafe (like C++)
+3. **Function scope**: Returning ref to local variables is disallowed
    ```cs
    ref int getRef()
    {
@@ -365,3 +365,4 @@ func(ref f)  // ERROR: Type mismatch
        return ref local  // Dangerous - local goes out of scope
    }
    ```
+   The compiler rejects this pattern with a clear diagnostic. Return a value copy or a reference to caller-owned/storage with a longer lifetime instead.

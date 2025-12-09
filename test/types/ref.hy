@@ -56,10 +56,15 @@ int copy = linked
 assert copy == 42   // copy should be 42 (value copied, not linked)
 
 // Test 8: Reference type returning function
-ref int getRef()
+ref int aliasParameter(ref int source)
 {
-    int local = 42
-    return ref local
+    return ref source
 }
 
-assert getRef() == 42
+int refSource = 7
+int copied = aliasParameter(ref refSource)
+assert copied == 7
+
+ref int viaParam = ref refSource
+viaParam = 9
+assert refSource == 9 && viaParam == 9
