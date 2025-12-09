@@ -10593,6 +10593,21 @@ llvm::Value *BinaryExprAST::codegen() {
           llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
 
           if (const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName()); info && info->isAlias()) {
+            if (dynamic_cast<RefExprAST *>(getRHS())) {
+              llvm::Value *newPtr = getRHS()->codegen();
+              if (!newPtr)
+                return nullptr;
+              llvm::Type *expectedPtrTy = Alloca->getAllocatedType();
+              if (newPtr->getType() != expectedPtrTy)
+                newPtr = Builder->CreateBitCast(
+                    newPtr, expectedPtrTy,
+                    (LHSE->getName() + ".rebind.cast").c_str());
+              Builder->CreateStore(newPtr, Variable);
+              updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+              setTypeName("void");
+              return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+            }
+
             llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (LHSE->getName() + "_ptr").c_str());
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
@@ -10712,6 +10727,21 @@ llvm::Value *BinaryExprAST::codegen() {
         llvm::GlobalVariable *GV = GlobalValues[LHSE->getName()];
         if (GV) {
           if (const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName()); info && info->isAlias()) {
+            if (dynamic_cast<RefExprAST *>(getRHS())) {
+              llvm::Value *newPtr = getRHS()->codegen();
+              if (!newPtr)
+                return nullptr;
+              llvm::Type *expectedPtrTy = GV->getValueType();
+              if (newPtr->getType() != expectedPtrTy)
+                newPtr = Builder->CreateBitCast(
+                    newPtr, expectedPtrTy,
+                    (LHSE->getName() + ".rebind.cast").c_str());
+              Builder->CreateStore(newPtr, GV);
+              updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+              setTypeName("void");
+              return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+            }
+
             llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, (LHSE->getName() + "_ptr").c_str());
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)

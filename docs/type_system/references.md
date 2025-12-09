@@ -341,6 +341,19 @@ float f = 3.14
 func(ref f)  // ERROR: Type mismatch
 ```
 
+## Ref Rebinding
+
+Rebinding a `ref` variable requires the `ref` keyword on the right-hand side.
+Without it, assignment writes through the existing binding.
+```cs
+int a = 10
+int b = 20
+ref int x = ref a
+x = 15       // Writes to a
+x = ref b    // Rebinds x to b
+x = 25       // Writes to b
+```
+
 ## Restrictions
 
 1. **No ref to temporaries**: Cannot create refs to literal values
@@ -349,15 +362,7 @@ func(ref f)  // ERROR: Type mismatch
    ref int y = ref 10  // Not allowed - 10 is not a variable
    ```
 
-2. **No ref reassignment**: Once a ref is linked, it cannot be relinked
-   ```cs
-   int a = 10
-   int b = 20
-   int x = ref a
-   x = ref b  // This assigns b's value to a, doesn't relink x
-   ```
-
-3. **Function scope**: Returning ref to local variables is disallowed
+2. **Function scope**: Returning ref to local variables is disallowed
    ```cs
    ref int getRef()
    {

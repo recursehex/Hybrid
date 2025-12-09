@@ -1716,6 +1716,14 @@ std::unique_ptr<ExprAST> ParsePrimary() {
       getNextToken(); // consume the character literal
       return std::move(Result);
     }
+  case tok_ref: {
+    getNextToken(); // consume 'ref'
+    SkipNewlines();
+    auto Operand = ParsePrimaryWithPostfix();
+    if (!Operand)
+      return nullptr;
+    return std::make_unique<RefExprAST>(std::move(Operand));
+  }
   case '(':
     return ParseParenExpr();
   case '[':
