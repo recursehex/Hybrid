@@ -22,6 +22,12 @@ All diagnostics flow through `reportCompilerError(...)`, and the parser relies o
 
 The combination of these changes gives us the safety of C#/Java-style syntax with the predictable codegen of C++ templates.
 
+## ARC and specialization
+
+- ARC lowering is emitted per instantiation: each specialised class/struct/function body carries the retain/release and destructor sequencing for its bound types, and the overload registry keeps copies distinct so ref-counting matches the concrete layout.
+- Generated copy/move constructors for generic types reuse the bound member types so retains happen in declaration order instead of being shared across unrelated bindings.
+- Building with `--arc-enabled=false` (or `./run_tests.sh -a off`) still instantiates the same bodies but strips ARC calls and ARC-only diagnostics; use that mode when a fixture needs to show ARC-disabled behavior without rewriting source.
+
 ## Troubleshooting & Telemetry
 
 - `--diagnostics generics` prints a one-line summary covering cache hits, the number of unique type/function specialisations, peak binding depth, and the size of the generated LLVM module. Set `HYBRID_SHOW_GENERIC_METRICS=1` when running `run_tests.sh` to enable this automatically.

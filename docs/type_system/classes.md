@@ -63,6 +63,32 @@ shared<Door> refDoor = #2   // payload constructed via Door(int)
 - Target-typed `new(...)` also works with smart pointer destinations, constructing the payload from the wrapper’s generic type before wiring the control block; `weak<T>` still expects a `shared<T>` payload.
 - Disabling ARC lowering (`--arc-enabled=false`) keeps these helpers available but they degrade to type-correct stubs: `arcUseCount()` reports `0` and `weak.lock()` returns an empty handle so ARC-on vs ARC-off comparisons do not require source changes.
 
+### Construction syntax
+
+- `#payload` wraps an existing value or builds one with constructor arguments: `shared<int> a = #42`, `unique<Gadget> g = #(1, 2)`.
+- Target-typed payload construction also works without `#`: `shared<WatchTarget> owner = (30)` or `unique<Resource> r = (1)`.
+- `new(...)` can target the wrapper type to build and wrap in one step: `shared<int> n = new(11)` or `shared<int> explicitN = new shared<int>(3)`.
+- Weak handles come from a `shared<T>` owner (`weak<Foo> w = #owner`, `owner.weak()`, or `weak_from_shared(owner)`) and can be cleared with `()` / `#()`; locking an empty weak yields a zero-count `shared<T>`.
+
+### Avoiding reference cycles
+
+- Mark back references `weak<T>` whenever the forward edge holds a strong owner (parent/child trees, UI hierarchies, cache entries) so ARC can reclaim both sides.
+- Observer lists should keep `weak<T>` handles and lock them when dispatching to avoid resurrecting already-destroyed listeners.
+
+```cs
+class Widget
+{
+    shared<Widget>[] children
+    weak<Widget> parent
+
+    Widget(shared<Widget> parent)
+    {
+        this.parent = parent
+        this.children = []
+    }
+}
+```
+
 ## Heap Allocation with `new` and `free`
 
 - `new ClassName(args)` allocates a heap instance, runs the class constructor, and returns a strong ARC-managed reference. The type can be inferred from the assignment target using `new(args)`.

@@ -76,6 +76,12 @@ build\hybrid.exe < test\expr.hy > output.txt
 build\hybrid.exe < test\fail.hy 2>&1
 ```
 
+## ARC runtime and diagnostics
+
+- When `clang` is available the harness builds a lightweight stub runtime (`runtime/test_runtime_stub.c`) for tests that do not emit ARC/smart-pointer symbols, keeping quick suites fast.
+- If the generated IR references ARC helpers (`hybrid_retain`, `__hybrid_shared_control`, smart pointer shims) or any of `HYBRID_ARC_DEBUG`, `HYBRID_ARC_TRACE_RUNTIME`, `HYBRID_ARC_LEAK_DETECT`, or `HYBRID_ARC_VERIFY_RUNTIME` are set, the runner links the real runtime (`src/runtime_support.cpp`, `src/runtime/arc.cpp`, `src/runtime/weak_table.cpp`, `src/memory/ref_count.cpp`) instead. Set one of those env vars in CI to force the full runtime for ARC suites.
+- Toggle ARC lowering with `./run_tests.sh -a on|off` or `// RUN_OPTS: --arc-enabled=false`; with ARC disabled the compiler omits retain/release insertion and ARC-specific diagnostics so fixtures can demonstrate the difference between ARC-on and ARC-off behavior.
+
 ## Test Suite Features
 
 ### Automatic Test Discovery

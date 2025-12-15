@@ -229,7 +229,22 @@ Hybrid exposes `new` and `free` for explicit heap management on top of ARC:
 - `new Type[len]` or `new[len]` allocate a 1-D array, zero-initialized with the length stored alongside the data for bounds checks.
 - `free expr` schedules an explicit ARC release. Its use is rare, as ARC still releases automatically, and is only valid for ARC-managed references (classes, arrays, and pointers to those). Smart pointers and stack values reject `free`.
 
-See `docs/memory/new_free.md` for full semantics and diagnostics.
+See `docs/memory/heap_allocation.md` for full semantics and diagnostics.
+
+### Automatic Reference Counting (ARC)
+
+- ARC is enabled by default. Class, struct, and array references are retained on assignment and released when they leave scope; destructors run when the last strong reference drops to zero.
+- `free` is optional and only valid for ARC-managed heap references when you need a deterministic release point. Stack values and smart pointer handles reject it because ARC already tears them down automatically.
+- Toggle ARC with `--arc-enabled=true|false` (or `./run_tests.sh -a on|off`). Disabling ARC skips retain/release insertion and suppresses ARC-only diagnostics so tooling can compare behaviors without rewriting source.
+- Smart pointer helpers (`unique<T>`, `shared<T>`, `weak<T>`) wrap the same ARC-managed payloads; use them when you need exclusive/shared/weak semantics beyond the current scope, not to get basic lifetime management.
+
+```cs
+Door local = new(2)                   // Freed automatically when it leaves scope
+shared<Door> sharedDoor = (3)
+weak<Door> watcher = #sharedDoor      // Observer that won't keep the Door alive
+```
+
+See `docs/memory/arc_best_practices.md` for ownership patterns and common ARC pitfalls.
 
 ## Nullability
 
