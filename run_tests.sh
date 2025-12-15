@@ -5,11 +5,8 @@
 
 set -e  # Exit on any error
 
-START_TIME=$(date +%s)
-TIMED_DURATION=0
+TIMED_DURATION=0.0
 TIMED_TESTS=0
-
-START_TIME=$(date +%s)
 
 # Colors for output
 RED='\033[0;31m'
@@ -28,6 +25,25 @@ PROGRESS_BAR_WIDTH=40
 PROGRESS_COUNT=0
 PROGRESS_TOTAL=0
 PROGRESS_VISIBLE=0
+
+now_time() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY'
+import time, sys
+sys.stdout.write(f"{time.time():.6f}")
+PY
+    else
+        date +%s
+    fi
+}
+
+sum_durations() {
+    awk "BEGIN { printf \"%.6f\", $1 + $2 }"
+}
+
+diff_durations() {
+    awk "BEGIN { printf \"%.6f\", $2 - $1 }"
+}
 
 ensure_progress_newline() {
     if [ $PROGRESS_VISIBLE -eq 1 ]; then
@@ -219,7 +235,7 @@ echo
 run_test() {
     local test_file="$1"
     local test_name=$(basename "$test_file" .hy)
-    local test_wall_start=$(date +%s)
+    local test_wall_start=$(now_time)
     local counts_for_timing=1
     if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
         counts_for_timing=0
@@ -546,10 +562,10 @@ run_test() {
     
     mark_test_completed
 
-    local test_wall_end=$(date +%s)
-    local test_elapsed=$((test_wall_end - test_wall_start))
+    local test_wall_end=$(now_time)
+    local test_elapsed=$(diff_durations "$test_wall_start" "$test_wall_end")
     if [ $counts_for_timing -eq 1 ]; then
-        TIMED_DURATION=$((TIMED_DURATION + test_elapsed))
+        TIMED_DURATION=$(sum_durations "$TIMED_DURATION" "$test_elapsed")
         TIMED_TESTS=$((TIMED_TESTS + 1))
     fi
 }
@@ -572,7 +588,7 @@ run_multi_unit_tests() {
         if [ -n "$MULTI_UNIT_FILTER" ] && [ "$test_name" != "$MULTI_UNIT_FILTER" ]; then
             continue
         fi
-        local suite_start=$(date +%s)
+        local suite_start=$(now_time)
         local expect="pass"
         if [ -f "${dir}/EXPECT_FAIL" ] || [[ "$test_name" == *_fail ]]; then
             expect="fail"
@@ -663,10 +679,10 @@ run_multi_unit_tests() {
             update_progress_display
         fi
 
-        local suite_end=$(date +%s)
-        local suite_elapsed=$((suite_end - suite_start))
+        local suite_end=$(now_time)
+        local suite_elapsed=$(diff_durations "$suite_start" "$suite_end")
         if [ $counts_for_timing -eq 1 ]; then
-            TIMED_DURATION=$((TIMED_DURATION + suite_elapsed))
+            TIMED_DURATION=$(sum_durations "$TIMED_DURATION" "$suite_elapsed")
             TIMED_TESTS=$((TIMED_TESTS + 1))
         fi
     done
@@ -860,7 +876,7 @@ echo
 echo "Timing (runtime tests only):"
 if [ $TIMED_TESTS -gt 0 ]; then
     printf "  Counted tests: %d\n" "$TIMED_TESTS"
-    printf "  Total elapsed: %ds\n" "$TIMED_DURATION"
+    printf "  Total elapsed: %.2fs\n" "$TIMED_DURATION"
     printf "  Avg per test: %ss\n" "$AVG_TIME"
 else
     echo "  No runtime tests were timed."
