@@ -19,7 +19,7 @@ class Door
         this.maxOpens = maxOpens
         this.knocks = 0
         this.opens = 0
-        Door.created++  // allowed: static field was initialized at declaration
+        Door.created++
     }
 
     void Knock()
@@ -48,9 +48,9 @@ class Door
 > The compiler never synthesizes constructors for classes. Declare at least one and initialize every instance member inside each overload, or construction fails with "cannot assign uninitialized member" diagnostics.
 
 ```cs
-Door front = (2)    // shorthand for Door front = Door(2)
-Door copy = (front) // invokes the copy constructor when available
-shared<Door> refDoor = #2 // payload constructed via Door(int)
+Door front = (2)            // shorthand for Door front = Door(2)
+Door copy = (front)         // invokes the copy constructor when available
+shared<Door> refDoor = #2   // payload constructed via Door(int)
 ```
 
 ## Smart Pointers and ARC Helpers
