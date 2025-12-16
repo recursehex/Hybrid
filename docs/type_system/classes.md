@@ -53,6 +53,26 @@ Door copy = (front)         // invokes the copy constructor when available
 shared<Door> refDoor = #2   // payload constructed via Door(int)
 ```
 
+### Default Parameters and Named Arguments
+
+- Constructors and methods may declare trailing default parameter values. Defaults must be compile-time constants, cannot appear on `ref` parameters, and once one parameter has a default all following parameters must as well.
+- Calls can supply arguments by name; positional arguments must come first and the remaining arguments must be named. Named arguments let you override a later default without providing earlier ones.
+
+```cs
+class Logger
+{
+    bool appendNewline
+
+    Logger(bool appendNewline = true)
+    {
+        this.appendNewline = appendNewline
+    }
+}
+
+Logger loud = Logger()                     // uses default
+Logger quiet = Logger(appendNewline=false) // named argument skips earlier defaults
+```
+
 ## Smart Pointers and ARC Helpers
 
 - ARC already frees class and struct instances when they leave scope; the smart pointer wrappers are optional conveniences for sharing, exclusivity, and weak observation.

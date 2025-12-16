@@ -97,6 +97,34 @@ int result = transform(
 )
 ```
 
+### Default Parameters
+
+Hybrid supports default values on trailing parameters for free functions, methods, and constructors:
+
+```c
+int log(string message, bool writeToFile = true, bool append = true)
+{
+    // ...
+}
+```
+
+- Defaults must be compile-time evaluable (literals, simple arithmetic, enum values, address-of globals) and side-effect free.
+- Once a parameter declares a default, all parameters to its right must also declare defaults.
+- `ref` and variadic parameters cannot have defaults.
+- Defaults are injected at call sites; function signatures and mangling do not change.
+
+### Named Arguments
+
+Calls may supply arguments by name, which is required when skipping earlier defaults:
+
+```c
+log("startup", append = false)   // skips writeToFile, overrides append
+```
+
+- Positional arguments must precede any named arguments; once named, the rest must be named.
+- Named arguments can target required parameters but only parameters with defaults may be omitted.
+- Duplicate or unknown names are rejected at compile time.
+
 ### Array Parameters
 
 Arrays can be passed as parameters by reference:

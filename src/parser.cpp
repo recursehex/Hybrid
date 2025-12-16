@@ -32,7 +32,10 @@
 static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr();
 static void RecoverAfterExpressionError();
 static void SkipNewlines();
-static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args);
+static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args,
+                              std::vector<std::string> &ArgNames,
+                              std::vector<SourceLocation> &ArgNameLocations,
+                              std::vector<SourceLocation> &ArgEqualsLocations);
 static std::string ParseCompleteType();
 static std::unique_ptr<ExprAST> ParseNewExpression();
 static bool ParseGenericParameterList(std::vector<std::string> &parameters);
@@ -1001,8 +1004,9 @@ static std::unique_ptr<ExprAST> ParseNewExpression() {
     getNextToken(); // eat ']'
 
     auto NewExpr = std::make_unique<NewExprAST>(
-        typeName, std::vector<std::unique_ptr<ExprAST>>{}, std::move(Length),
-        true, !sawType);
+        typeName, std::vector<std::unique_ptr<ExprAST>>{},
+        std::vector<std::string>{}, std::vector<SourceLocation>{},
+        std::vector<SourceLocation>{}, std::move(Length), true, !sawType);
     if (!typeName.empty()) {
       std::string resultType = typeName;
       if (resultType.size() < 2 || resultType.substr(resultType.size() - 2) != "[]")
@@ -1024,11 +1028,16 @@ static std::unique_ptr<ExprAST> ParseNewExpression() {
   }
 
   std::vector<std::unique_ptr<ExprAST>> Args;
-  if (!ParseArgumentList(Args))
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocs;
+  std::vector<SourceLocation> ArgEqualLocs;
+  if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
     return nullptr;
 
   auto NewExpr = std::make_unique<NewExprAST>(
-      typeName, std::move(Args), nullptr, false, !sawType);
+      typeName, std::move(Args), std::move(ArgNames),
+      std::move(ArgNameLocs), std::move(ArgEqualLocs), nullptr, false,
+      !sawType);
   if (!typeName.empty())
     NewExpr->setTypeName(typeName);
   NewExpr->markTemporary();
@@ -1217,9 +1226,14 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
   return std::make_unique<InterpolatedStringExprAST>(std::move(merged));
 }
 
-static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
+static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args,
+                              std::vector<std::string> &ArgNames,
+                              std::vector<SourceLocation> &ArgNameLocations,
+                              std::vector<SourceLocation> &ArgEqualsLocations) {
   getNextToken(); // eat '('
   SkipNewlines();
+
+  bool sawNamedArgument = false;
 
   if (CurTok == ')') {
     getNextToken(); // eat ')'
@@ -1227,6 +1241,40 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
   }
 
   while (true) {
+    SkipNewlines();
+
+    std::string argName;
+    SourceLocation argNameLoc{};
+    SourceLocation equalsLoc{};
+    bool isNamed = false;
+
+    if (CurTok == tok_identifier) {
+      TokenReplayScope replay(true);
+      argName = IdentifierStr;
+      argNameLoc = currentParser().currentTokenLocation;
+
+      getNextToken(); // tentative consume identifier
+      SkipNewlines();
+      if (CurTok == '=') {
+        isNamed = true;
+        equalsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        replay.commit();
+      } else {
+        argName.clear();
+        argNameLoc = {};
+        equalsLoc = {};
+        replay.rollback();
+      }
+    }
+
+    if (sawNamedArgument && !isNamed) {
+      reportCompilerError("Positional argument cannot follow a named argument");
+      return false;
+    }
+
+    sawNamedArgument = sawNamedArgument || isNamed;
+
     SkipNewlines();
     bool argIsRef = false;
     if (CurTok == tok_ref) {
@@ -1244,6 +1292,10 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
     else
       Args.push_back(std::move(Arg));
 
+    ArgNames.push_back(std::move(argName));
+    ArgNameLocations.push_back(argNameLoc);
+    ArgEqualsLocations.push_back(equalsLoc);
+
     SkipNewlines();
 
     if (CurTok == ')') {
@@ -1258,6 +1310,40 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
 
     getNextToken(); // eat ','
     SkipNewlines();
+  }
+
+  return true;
+}
+
+static void setDiagnosticLocation(SourceLocation loc) {
+  if (!loc.isValid())
+    return;
+  currentParser().currentTokenLocation = loc;
+  currentLexer().setTokenStart(loc);
+}
+
+static bool ValidateParameterDefaults(const std::vector<Parameter> &Args) {
+  bool sawDefault = false;
+  for (const auto &param : Args) {
+    if (param.HasDefault) {
+      if (param.IsRef) {
+        setDiagnosticLocation(param.DefaultEqualsLocation.isValid()
+                                  ? param.DefaultEqualsLocation
+                                  : param.NameLocation);
+        reportCompilerError(
+            "Parameters passed by reference cannot declare default values");
+        return false;
+      }
+      sawDefault = true;
+      continue;
+    }
+
+    if (sawDefault) {
+      setDiagnosticLocation(param.NameLocation);
+      reportCompilerError(
+          "Parameters with default values must be the trailing parameters");
+      return false;
+    }
   }
 
   return true;
@@ -1456,10 +1542,16 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
     return std::make_unique<VariableExprAST>(IdName);
 
   std::vector<std::unique_ptr<ExprAST>> Args;
-  if (!ParseArgumentList(Args))
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocs;
+  std::vector<SourceLocation> ArgEqualLocs;
+  if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
     return nullptr;
 
-  return std::make_unique<CallExprAST>(IdName, std::move(Args));
+  return std::make_unique<CallExprAST>(IdName, std::move(Args),
+                                       std::move(ArgNames),
+                                       std::move(ArgNameLocs),
+                                       std::move(ArgEqualLocs));
 }
 
 /// unaryexpr ::= ('-' | '!') primary
@@ -1700,9 +1792,15 @@ std::unique_ptr<ExprAST> ParsePrimary() {
       getNextToken(); // consume the string literal
       if (CurTok == '(') {
         std::vector<std::unique_ptr<ExprAST>> Args;
-        if (!ParseArgumentList(Args))
+        std::vector<std::string> ArgNames;
+        std::vector<SourceLocation> ArgNameLocs;
+        std::vector<SourceLocation> ArgEqualLocs;
+        if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
           return nullptr;
-        return std::make_unique<CallExprAST>(literal, std::move(Args));
+        return std::make_unique<CallExprAST>(literal, std::move(Args),
+                                             std::move(ArgNames),
+                                             std::move(ArgNameLocs),
+                                             std::move(ArgEqualLocs));
       }
       return std::move(Result);
     }
@@ -2023,11 +2121,17 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       }
     } else if (CurTok == '(') {
       std::vector<std::unique_ptr<ExprAST>> Args;
-      if (!ParseArgumentList(Args))
+      std::vector<std::string> ArgNames;
+      std::vector<SourceLocation> ArgNameLocs;
+      std::vector<SourceLocation> ArgEqualLocs;
+      if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
         return nullptr;
       std::unique_ptr<ExprAST> CalleeExpr = std::move(LHS);
       auto Call = std::make_unique<CallExprAST>(std::move(CalleeExpr),
-                                                std::move(Args));
+                                                std::move(Args),
+                                                std::move(ArgNames),
+                                                std::move(ArgNameLocs),
+                                                std::move(ArgEqualLocs));
       if (auto *member =
               dynamic_cast<MemberAccessExprAST *>(Call->getCalleeExpr())) {
         if (member->isDestructorAccess())
@@ -2116,57 +2220,69 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   getNextToken(); // eat '('
   SkipNewlines();
 
-  // Handle empty parameter list
-  if (CurTok == ')') {
-    getNextToken(); // eat ')'
-    TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
-    return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName,
-                                          std::move(Args), isUnsafe, returnsByRef,
-                                          std::move(GenericParams));
-  }
+  if (CurTok != ')') {
+    // Parse parameters
+    while (true) {
+      SkipNewlines();
+      // Check for ref parameter
+      bool paramIsRef = false;
+      if (CurTok == tok_ref) {
+        paramIsRef = true;
+        getNextToken(); // eat 'ref'
+        SkipNewlines();
+      }
 
-  // Parse parameters
-  while (true) {
-    SkipNewlines();
-    // Check for ref parameter
-    bool paramIsRef = false;
-    if (CurTok == tok_ref) {
-      paramIsRef = true;
-      getNextToken(); // eat 'ref'
+      if (!IsValidType())
+        return LogErrorP("Expected parameter type");
+
+      std::string ParamType = ParseCompleteType();
+      if (ParamType.empty())
+        return LogErrorP("Failed to parse parameter type");
+
+      if (CurTok != tok_identifier)
+        return LogErrorP("Expected parameter name");
+
+      std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
+      getNextToken();
+
+      Parameter param;
+      param.Type = ParamType;
+      param.Name = ParamName;
+      param.IsRef = paramIsRef;
+      param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+      param.NameLocation = nameLoc;
+
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return nullptr;
+      }
+
+      Args.push_back(std::move(param));
+
+      if (CurTok == ')') {
+        getNextToken(); // eat ')'
+        break;
+      }
+
+      if (CurTok != ',')
+        return LogErrorP("Expected ',' or ')' in parameter list");
+
+      getNextToken(); // eat ','
       SkipNewlines();
     }
-
-    if (!IsValidType())
-      return LogErrorP("Expected parameter type");
-
-    std::string ParamType = ParseCompleteType();
-    if (ParamType.empty())
-      return LogErrorP("Failed to parse parameter type");
-
-    if (CurTok != tok_identifier)
-      return LogErrorP("Expected parameter name");
-
-    std::string ParamName = IdentifierStr;
-    getNextToken();
-
-    Parameter param;
-    param.Type = ParamType;
-    param.Name = ParamName;
-    param.IsRef = paramIsRef;
-    param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
-    Args.push_back(param);
-
-    if (CurTok == ')') {
-      getNextToken(); // eat ')'
-      break;
-    }
-
-    if (CurTok != ',')
-      return LogErrorP("Expected ',' or ')' in parameter list");
-
-    getNextToken(); // eat ','
-    SkipNewlines();
+  } else {
+    getNextToken(); // eat ')'
   }
+
+  if (!ValidateParameterDefaults(Args))
+    return nullptr;
 
   TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
   return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName,
@@ -3236,40 +3352,17 @@ bool ParseTypeIdentifier(bool isRef) {
 
   // Handle constructor call (struct name followed directly by '(')
   if (CurTok == '(' && (StructNames.contains(Type) || ClassNames.contains(Type))) {
-    getNextToken(); // eat '('
-    SkipNewlines();
-
     std::vector<std::unique_ptr<ExprAST>> Args;
-    if (CurTok != ')') {
-      while (true) {
-        SkipNewlines();
-        if (auto Arg = ParseExpression()) {
-          Args.push_back(std::move(Arg));
-        } else {
-          reportCompilerError("Expected expression in constructor arguments");
-          return false;
-        }
-
-        SkipNewlines();
-        if (CurTok == ')')
-          break;
-
-        if (CurTok != ',') {
-          reportCompilerError("Expected ')' or ',' in constructor arguments");
-          return false;
-        }
-        getNextToken(); // eat ','
-        SkipNewlines();
-      }
-    }
-
-    if (CurTok != ')') {
-      reportCompilerError("Expected ')' after constructor arguments");
+    std::vector<std::string> ArgNames;
+    std::vector<SourceLocation> ArgNameLocs;
+    std::vector<SourceLocation> ArgEqualLocs;
+    if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
       return false;
-    }
-    getNextToken(); // eat ')'
 
-    auto Call = std::make_unique<CallExprAST>(Type, std::move(Args));
+    auto Call = std::make_unique<CallExprAST>(Type, std::move(Args),
+                                              std::move(ArgNames),
+                                              std::move(ArgNameLocs),
+                                              std::move(ArgEqualLocs));
     if (auto CallIR = Call->codegen()) {
       fprintf(stderr, "Generated struct instantiation IR:\n");
       CallIR->print(llvm::errs());
@@ -3334,6 +3427,7 @@ bool ParseTypeIdentifier(bool isRef) {
         }
 
         std::string ParamName = IdentifierStr;
+        SourceLocation nameLoc = currentParser().currentTokenLocation;
         getNextToken();
 
         Parameter param;
@@ -3341,7 +3435,18 @@ bool ParseTypeIdentifier(bool isRef) {
         param.Name = ParamName;
         param.IsRef = paramIsRef;
         param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
-        Args.push_back(param);
+        param.NameLocation = nameLoc;
+        SkipNewlines();
+        if (CurTok == '=') {
+          param.HasDefault = true;
+          param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+          getNextToken(); // eat '='
+          SkipNewlines();
+          param.DefaultValue = ParseExpression();
+          if (!param.DefaultValue)
+            return false;
+        }
+        Args.push_back(std::move(param));
 
         SkipNewlines();
 
@@ -3362,6 +3467,9 @@ bool ParseTypeIdentifier(bool isRef) {
       getNextToken(); // eat ')'
     }
     
+    if (!ValidateParameterDefaults(Args))
+      return false;
+
     // Create prototype
     TypeInfo returnInfo = buildDeclaredTypeInfo(Type, isRef);
     auto Proto = std::make_unique<PrototypeAST>(std::move(returnInfo), Name,
@@ -3618,6 +3726,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       }
 
       std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
       getNextToken();
 
       Parameter param;
@@ -3625,6 +3734,17 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       param.Name = ParamName;
       param.IsRef = false;
       param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
+      param.NameLocation = nameLoc;
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return false;
+      }
       Args.push_back(std::move(param));
 
       SkipNewlines();
@@ -3645,6 +3765,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       return false;
     }
     getNextToken();
+
+    if (!ValidateParameterDefaults(Args))
+      return false;
 
     std::vector<ConstructorInitializer> ctorInitializers;
 
@@ -3717,6 +3840,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       }
 
       std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
       getNextToken();
 
       Parameter param;
@@ -3724,6 +3848,17 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       param.Name = ParamName;
       param.IsRef = paramIsRef;
       param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+      param.NameLocation = nameLoc;
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return false;
+      }
       Args.push_back(std::move(param));
 
       if (CurTok == ')')
@@ -3741,6 +3876,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       return false;
     }
     getNextToken();
+
+    if (!ValidateParameterDefaults(Args))
+      return false;
 
     while (CurTok == tok_newline)
       getNextToken();

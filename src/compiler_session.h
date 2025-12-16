@@ -16,13 +16,6 @@
 #include "codegen_context.h"
 #include "analysis/semantics.h"
 
-struct SourceLocation {
-  std::size_t line = 0;
-  std::size_t column = 0;
-
-  constexpr bool isValid() const noexcept { return line != 0; }
-};
-
 /// LexerContext holds all mutable lexer state for a compilation unit.
 struct LexerContext {
   std::string identifierStr;

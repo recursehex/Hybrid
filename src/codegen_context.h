@@ -46,6 +46,9 @@ struct FunctionOverload {
   bool returnsByRef = false;
   std::vector<TypeInfo> parameterTypes;
   std::vector<bool> parameterIsRef;
+  std::vector<std::string> parameterNames;
+  std::vector<DefaultArgInfo> parameterDefaults;
+  std::vector<SourceLocation> parameterDefaultLocations;
   bool isUnsafe = false;
   bool isExtern = false;
   llvm::Function *function = nullptr;

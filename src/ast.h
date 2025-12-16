@@ -13,7 +13,13 @@
 #include "concepts.h"
 #include "numeric_literal.h"
 
-struct SourceLocation;
+struct SourceLocation {
+  std::size_t line = 0;
+  std::size_t column = 0;
+
+  constexpr bool isValid() const noexcept { return line != 0; }
+};
+
 struct FunctionOverload;
 struct ClassDescriptor;
 
@@ -882,6 +888,9 @@ public:
 class NewExprAST : public ExprAST {
   std::string RequestedTypeName;
   std::vector<std::unique_ptr<ExprAST>> Args;
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocations;
+  std::vector<SourceLocation> ArgEqualsLocations;
   std::unique_ptr<ExprAST> ArraySizeExpr;
   bool ArrayForm = false;
   bool TypeElided = false;
@@ -889,12 +898,20 @@ class NewExprAST : public ExprAST {
 public:
   NewExprAST(std::string TypeName,
              std::vector<std::unique_ptr<ExprAST>> Args,
-             std::unique_ptr<ExprAST> ArraySizeExpr,
-             bool IsArray,
-             bool WasTypeElided)
+             std::vector<std::string> ArgNames = {},
+             std::vector<SourceLocation> ArgNameLocations = {},
+             std::vector<SourceLocation> ArgEqualsLocations = {},
+             std::unique_ptr<ExprAST> ArraySizeExpr = nullptr,
+             bool IsArray = false,
+             bool WasTypeElided = false)
       : RequestedTypeName(std::move(TypeName)), Args(std::move(Args)),
+        ArgNames(std::move(ArgNames)),
+        ArgNameLocations(std::move(ArgNameLocations)),
+        ArgEqualsLocations(std::move(ArgEqualsLocations)),
         ArraySizeExpr(std::move(ArraySizeExpr)), ArrayForm(IsArray),
-        TypeElided(WasTypeElided) {}
+        TypeElided(WasTypeElided) {
+    normalizeArgMetadata();
+  }
 
   llvm::Value *codegen() override;
   [[nodiscard]] bool isArray() const { return ArrayForm; }
@@ -904,10 +921,23 @@ public:
   [[nodiscard]] bool typeWasElided() const { return TypeElided && RequestedTypeName.empty(); }
   [[nodiscard]] const std::string &getRequestedTypeName() const { return RequestedTypeName; }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+  [[nodiscard]] const std::vector<std::string> &getArgNames() const { return ArgNames; }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgNameLocations() const {
+    return ArgNameLocations;
+  }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgEqualsLocations() const {
+    return ArgEqualsLocations;
+  }
   [[nodiscard]] ExprAST *getArraySize() const { return ArraySizeExpr.get(); }
   void setInferredType(std::string TypeName) {
     if (RequestedTypeName.empty())
       RequestedTypeName = std::move(TypeName);
+  }
+  void normalizeArgMetadata() {
+    const std::size_t count = Args.size();
+    ArgNames.resize(count);
+    ArgNameLocations.resize(count);
+    ArgEqualsLocations.resize(count);
   }
 };
 
@@ -918,24 +948,50 @@ class CallExprAST : public ExprAST {
   std::string Callee;
   std::unique_ptr<ExprAST> CalleeExpr;
   std::vector<std::unique_ptr<ExprAST>> Args;
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocations;
+  std::vector<SourceLocation> ArgEqualsLocations;
   bool IsDestructorCall = false;
   std::string DestructorTypeName;
   bool IsBaseConstructorCall = false;
 
 public:
   CallExprAST(const std::string &Callee,
-              std::vector<std::unique_ptr<ExprAST>> Args)
-      : Callee(Callee), Args(std::move(Args)) {}
+              std::vector<std::unique_ptr<ExprAST>> Args,
+              std::vector<std::string> ArgNames = {},
+              std::vector<SourceLocation> ArgNameLocations = {},
+              std::vector<SourceLocation> ArgEqualsLocations = {})
+      : Callee(Callee), Args(std::move(Args)),
+        ArgNames(std::move(ArgNames)),
+        ArgNameLocations(std::move(ArgNameLocations)),
+        ArgEqualsLocations(std::move(ArgEqualsLocations)) {
+    normalizeArgMetadata();
+  }
 
   CallExprAST(std::unique_ptr<ExprAST> CalleeExpr,
-              std::vector<std::unique_ptr<ExprAST>> Args)
-      : CalleeExpr(std::move(CalleeExpr)), Args(std::move(Args)) {}
+              std::vector<std::unique_ptr<ExprAST>> Args,
+              std::vector<std::string> ArgNames = {},
+              std::vector<SourceLocation> ArgNameLocations = {},
+              std::vector<SourceLocation> ArgEqualsLocations = {})
+      : CalleeExpr(std::move(CalleeExpr)), Args(std::move(Args)),
+        ArgNames(std::move(ArgNames)),
+        ArgNameLocations(std::move(ArgNameLocations)),
+        ArgEqualsLocations(std::move(ArgEqualsLocations)) {
+    normalizeArgMetadata();
+  }
 
   llvm::Value *codegen() override;
   [[nodiscard]] const std::string &getCallee() const { return Callee; }
   ExprAST *getCalleeExpr() const { return CalleeExpr.get(); }
   bool hasCalleeExpr() const { return static_cast<bool>(CalleeExpr); }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+  [[nodiscard]] const std::vector<std::string> &getArgNames() const { return ArgNames; }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgNameLocations() const {
+    return ArgNameLocations;
+  }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgEqualsLocations() const {
+    return ArgEqualsLocations;
+  }
   bool isDestructorCall() const { return IsDestructorCall; }
   const std::string &getDestructorTypeName() const { return DestructorTypeName; }
   void markDestructorCall(std::string typeName) {
@@ -946,6 +1002,8 @@ public:
   bool isBaseConstructorCall() const { return IsBaseConstructorCall; }
 
 private:
+  void normalizeArgMetadata();
+  void resetArgs(std::vector<std::unique_ptr<ExprAST>> NewArgs);
   llvm::Value *emitResolvedCall(const std::string &callee,
                                 std::vector<llvm::Value *> ArgValues,
                                 const std::vector<bool> &ArgIsRef,
@@ -954,12 +1012,29 @@ private:
   llvm::Value *codegenMemberCall(MemberAccessExprAST &member);
 };
 
+struct DefaultArgInfo {
+  enum class Kind : uint8_t { None, Number, Bool, String, Char, Null };
+
+  Kind kind = Kind::None;
+  NumericLiteral numberValue;
+  bool boolValue = false;
+  std::string stringValue;
+  uint32_t charValue = 0;
+
+  bool isSet() const { return kind != Kind::None; }
+};
+
 /// Parameter - Represents a function parameter with type and name
 struct Parameter {
   std::string Type;
   std::string Name;
   bool IsRef = false;
   TypeInfo DeclaredType;
+  bool HasDefault = false;
+  std::unique_ptr<ExprAST> DefaultValue;
+  DefaultArgInfo ResolvedDefault;
+  SourceLocation NameLocation{};
+  SourceLocation DefaultEqualsLocation{};
 };
 
 /// PrototypeAST - Represents the "prototype" for a function,
@@ -985,6 +1060,7 @@ public:
   const TypeInfo &getReturnTypeInfo() const { return ReturnTypeInfo; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
+  std::vector<Parameter> &getMutableArgs() { return Args; }
   const std::vector<std::string> &getGenericParameters() const { return GenericParameters; }
   bool isUnsafe() const { return IsUnsafe; }
   bool returnsByRef() const { return ReturnsByRef; }
