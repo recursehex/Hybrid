@@ -56,6 +56,7 @@ shared<Door> refDoor = #2   // payload constructed via Door(int)
 ### Default Parameters and Named Arguments
 
 - Constructors and methods may declare trailing default parameter values. Defaults must be compile-time constants, cannot appear on `ref` parameters, and once one parameter has a default all following parameters must as well.
+- Overrides and redeclarations must keep those default values identical to the original signature; changing or omitting a default is rejected.
 - Calls can supply arguments by name; positional arguments must come first and the remaining arguments must be named. Named arguments let you override a later default without providing earlier ones.
 
 ```cs

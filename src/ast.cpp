@@ -83,6 +83,11 @@ struct ProvidedArgument {
   SourceLocation equalsLoc{};
 };
 
+static std::unique_ptr<ExprAST> instantiateDefaultExpr(
+    const DefaultArgInfo &info);
+static std::string buildArcOpLabel(std::string_view label,
+                                   std::string_view suffix);
+
 static bool convertUTF8LiteralToUTF16(const std::string &input,
                                       std::vector<uint16_t> &output,
                                       std::string &errorMessage) {
@@ -2010,9 +2015,11 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
                                             llvm::Value *functionPointer,
                                             std::vector<llvm::Value *> argValues,
                                             const std::vector<bool> &argIsRef) {
+  const size_t paramCount = memberInfo.parameterTypes.size();
+
   std::vector<llvm::Type *> paramLLVMTypes;
-  paramLLVMTypes.reserve(memberInfo.parameterTypes.size());
-  for (std::size_t idx = 0; idx < memberInfo.parameterTypes.size(); ++idx) {
+  paramLLVMTypes.reserve(paramCount);
+  for (std::size_t idx = 0; idx < paramCount; ++idx) {
     const std::string paramTypeName =
         typeNameFromInfo(memberInfo.parameterTypes[idx]);
     llvm::Type *paramType = getTypeFromString(paramTypeName);
@@ -2037,17 +2044,153 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
 
   llvm::FunctionType *fnType =
       llvm::FunctionType::get(retType, paramLLVMTypes, false);
-  std::vector<llvm::Value *> callArgs;
-  callArgs.reserve(argValues.size());
+
+  std::vector<ProvidedArgument> provided;
+  provided.reserve(argValues.size());
+  const auto &callExprArgs = callExpr.getArgs();
+  const auto &argNames = callExpr.getArgNames();
+  const auto &argNameLocs = callExpr.getArgNameLocations();
+  const auto &argEqualsLocs = callExpr.getArgEqualsLocations();
 
   for (std::size_t idx = 0; idx < argValues.size(); ++idx) {
-    llvm::Value *arg = argValues[idx];
-    if (memberInfo.parameterIsRef[idx]) {
-      callArgs.push_back(arg);
+    ProvidedArgument arg;
+    arg.value = argValues[idx];
+    arg.isRef = idx < argIsRef.size() ? argIsRef[idx] : false;
+    if (idx > 0 && idx - 1 < callExprArgs.size()) {
+      arg.expr = callExprArgs[idx - 1].get();
+      if (idx - 1 < argNames.size())
+        arg.name = argNames[idx - 1];
+      if (idx - 1 < argNameLocs.size())
+        arg.nameLoc = argNameLocs[idx - 1];
+      if (idx - 1 < argEqualsLocs.size())
+        arg.equalsLoc = argEqualsLocs[idx - 1];
+    }
+    provided.push_back(std::move(arg));
+  }
+
+  std::vector<int> binding(paramCount, -1);
+  size_t nextPositional = 0;
+  std::set<std::string> seenNames;
+
+  for (std::size_t i = 0; i < provided.size(); ++i) {
+    const ProvidedArgument &arg = provided[i];
+    if (arg.name.empty()) {
+      while (nextPositional < paramCount && binding[nextPositional] != -1)
+        ++nextPositional;
+      if (nextPositional >= paramCount) {
+        reportCompilerError("Too many arguments provided to call '" +
+                            memberInfo.signature + "'");
+        return nullptr;
+      }
+      binding[nextPositional] = static_cast<int>(i);
+      ++nextPositional;
       continue;
     }
 
+    if (!seenNames.insert(arg.name).second) {
+      ScopedErrorLocation scoped(arg.nameLoc);
+      reportCompilerError("Duplicate argument for parameter '" + arg.name +
+                          "'");
+      return nullptr;
+    }
+
+    auto nameIt = std::find(memberInfo.parameterNames.begin(),
+                            memberInfo.parameterNames.end(), arg.name);
+    if (nameIt == memberInfo.parameterNames.end()) {
+      ScopedErrorLocation scoped(arg.nameLoc);
+      reportCompilerError("Unknown parameter name '" + arg.name +
+                          "' for call to '" + memberInfo.signature + "'");
+      return nullptr;
+    }
+    size_t paramIndex =
+        static_cast<size_t>(nameIt - memberInfo.parameterNames.begin());
+    if (binding[paramIndex] != -1) {
+      ScopedErrorLocation scoped(arg.nameLoc);
+      reportCompilerError("Duplicate argument for parameter '" + arg.name +
+                          "'");
+      return nullptr;
+    }
+    binding[paramIndex] = static_cast<int>(i);
+  }
+
+  std::vector<llvm::Value *> resolvedArgs;
+  std::vector<bool> resolvedIsRef;
+  std::vector<std::unique_ptr<ExprAST>> ownedDefaultExprs;
+  resolvedArgs.reserve(paramCount);
+  resolvedIsRef.reserve(paramCount);
+
+  for (std::size_t idx = 0; idx < paramCount; ++idx) {
+    if (binding[idx] >= 0) {
+      const ProvidedArgument &arg = provided[static_cast<size_t>(binding[idx])];
+      resolvedArgs.push_back(arg.value);
+      resolvedIsRef.push_back(arg.isRef);
+      continue;
+    }
+
+    const bool hasDefault =
+        idx < memberInfo.parameterDefaults.size() &&
+        memberInfo.parameterDefaults[idx].isSet();
+    if (!hasDefault) {
+      const std::string paramName =
+          idx < memberInfo.parameterNames.size()
+              ? memberInfo.parameterNames[idx]
+              : std::to_string(idx);
+      reportCompilerError("Missing argument for parameter '" + paramName +
+                          "' in call to '" + memberInfo.signature + "'");
+      return nullptr;
+    }
+
+    ScopedErrorLocation scoped(
+        idx < memberInfo.parameterDefaultLocations.size()
+            ? memberInfo.parameterDefaultLocations[idx]
+            : SourceLocation{});
+    std::unique_ptr<ExprAST> defaultExpr =
+        instantiateDefaultExpr(memberInfo.parameterDefaults[idx]);
+    if (!defaultExpr) {
+      const std::string paramName =
+          idx < memberInfo.parameterNames.size()
+              ? memberInfo.parameterNames[idx]
+              : std::to_string(idx);
+      reportCompilerError("Default value unavailable for parameter '" +
+                          paramName + "'");
+      return nullptr;
+    }
+    defaultExpr->setTypeName(typeNameFromInfo(memberInfo.parameterTypes[idx]));
+    defaultExpr->markTemporary();
+    llvm::Value *value = defaultExpr->codegen();
+    if (!value)
+      return nullptr;
+    resolvedArgs.push_back(value);
+    resolvedIsRef.push_back(false);
+    ownedDefaultExprs.push_back(std::move(defaultExpr));
+  }
+
+  std::vector<llvm::Value *> callOperands;
+  callOperands.reserve(resolvedArgs.size());
+
+  for (std::size_t idx = 0; idx < resolvedArgs.size(); ++idx) {
+    llvm::Value *arg = resolvedArgs[idx];
     llvm::Type *expected = fnType->getParamType(idx);
+
+    if (memberInfo.parameterIsRef[idx]) {
+      if (expected && expected->isPointerTy() &&
+          !arg->getType()->isPointerTy()) {
+        llvm::AllocaInst *tmp = Builder->CreateAlloca(
+            arg->getType(), nullptr,
+            buildArcOpLabel(memberInfo.signature, "ref.arg"));
+        Builder->CreateStore(arg, tmp);
+        arg = tmp;
+      }
+      if (expected && expected->isPointerTy() &&
+          arg->getType() != expected) {
+        arg = Builder->CreateBitCast(
+            arg, expected,
+            buildArcOpLabel(memberInfo.signature, "ref.cast"));
+      }
+      callOperands.push_back(arg);
+      continue;
+    }
+
     if (arg->getType() != expected) {
       const std::string targetTypeName =
           typeNameFromInfo(memberInfo.parameterTypes[idx]);
@@ -2055,7 +2198,7 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
       if (!arg)
         return nullptr;
     }
-    callArgs.push_back(arg);
+    callOperands.push_back(arg);
   }
 
   llvm::Value *typedFnPtr =
@@ -2063,13 +2206,14 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
                              "hybrid.dispatch.fn");
 
   if (fnType->getReturnType()->isVoidTy()) {
-    llvm::Value *callVal = Builder->CreateCall(fnType, typedFnPtr, callArgs);
+    llvm::Value *callVal =
+        Builder->CreateCall(fnType, typedFnPtr, callOperands);
     callExpr.setTypeName("void");
     return callVal;
   }
 
   llvm::Value *callVal =
-      Builder->CreateCall(fnType, typedFnPtr, callArgs, "calltmp");
+      Builder->CreateCall(fnType, typedFnPtr, callOperands, "calltmp");
   callExpr.setTypeName(typeNameFromInfo(memberInfo.returnType));
   return callVal;
 }
@@ -2933,6 +3077,39 @@ static bool isReferenceLikeParameter(const TypeInfo &info) {
          info.isReference() || info.participatesInARC() || info.isSmartPointer();
 }
 
+static bool numericLiteralEquals(const NumericLiteral &lhs,
+                                 const NumericLiteral &rhs) {
+  if (lhs.kind != rhs.kind)
+    return false;
+  if (lhs.isInteger() && rhs.isInteger())
+    return lhs.getIntegerValue() == rhs.getIntegerValue();
+  if (lhs.isFloating() && rhs.isFloating())
+    return lhs.getFloatValue().compare(rhs.getFloatValue()) ==
+           llvm::APFloat::cmpEqual;
+  return false;
+}
+
+static bool defaultArgEquals(const DefaultArgInfo &lhs,
+                             const DefaultArgInfo &rhs) {
+  if (lhs.kind != rhs.kind)
+    return false;
+  switch (lhs.kind) {
+  case DefaultArgInfo::Kind::None:
+    return true;
+  case DefaultArgInfo::Kind::Number:
+    return numericLiteralEquals(lhs.numberValue, rhs.numberValue);
+  case DefaultArgInfo::Kind::Bool:
+    return lhs.boolValue == rhs.boolValue;
+  case DefaultArgInfo::Kind::String:
+    return lhs.stringValue == rhs.stringValue;
+  case DefaultArgInfo::Kind::Char:
+    return lhs.charValue == rhs.charValue;
+  case DefaultArgInfo::Kind::Null:
+    return true;
+  }
+  return false;
+}
+
 static DefaultArgInfo makeNumericDefault(const ConstantValue &value) {
   DefaultArgInfo info;
   info.kind = DefaultArgInfo::Kind::Number;
@@ -3295,20 +3472,68 @@ static FunctionOverload *findRegisteredOverload(const std::string &name,
   return nullptr;
 }
 
-static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
+static SourceLocation selectDefaultDiagnosticLocation(
+    size_t idx, const std::vector<SourceLocation> &defaultLocs,
+    const std::vector<SourceLocation> &nameLocs) {
+  if (idx < defaultLocs.size() && defaultLocs[idx].isValid())
+    return defaultLocs[idx];
+  if (idx < nameLocs.size())
+    return nameLocs[idx];
+  return {};
+}
+
+static bool defaultsAreCompatible(
+    const FunctionOverload &existing,
+    const std::vector<DefaultArgInfo> &incomingDefaults,
+    const std::vector<SourceLocation> &incomingDefaultLocs,
+    const std::vector<SourceLocation> &incomingNameLocs,
+    const std::vector<std::string> &paramNames,
+    const std::string &functionName) {
+  const size_t paramCount =
+      std::max(existing.parameterDefaults.size(), incomingDefaults.size());
+  for (size_t idx = 0; idx < paramCount; ++idx) {
+    const bool existingHas =
+        idx < existing.parameterDefaults.size() &&
+        existing.parameterDefaults[idx].isSet();
+    const bool incomingHas =
+        idx < incomingDefaults.size() && incomingDefaults[idx].isSet();
+    if (existingHas != incomingHas ||
+        (existingHas &&
+         !defaultArgEquals(existing.parameterDefaults[idx],
+                           incomingDefaults[idx]))) {
+      ScopedErrorLocation scoped(selectDefaultDiagnosticLocation(
+          idx, incomingDefaultLocs, incomingNameLocs));
+      const std::string paramLabel =
+          idx < paramNames.size() && !paramNames[idx].empty()
+              ? paramNames[idx]
+              : std::to_string(idx);
+      reportCompilerError("Default value for parameter '" + paramLabel +
+                          "' of '" + functionName +
+                          "' must match previous declaration");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static FunctionOverload *registerFunctionOverload(const PrototypeAST &proto,
                                                   const std::string &mangledName) {
   std::vector<TypeInfo> paramTypes = gatherParamTypes(proto.getArgs());
   std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
   std::vector<std::string> paramNames;
   std::vector<DefaultArgInfo> paramDefaults;
   std::vector<SourceLocation> paramDefaultLocs;
+  std::vector<SourceLocation> paramNameLocs;
   paramNames.reserve(proto.getArgs().size());
   paramDefaults.reserve(proto.getArgs().size());
   paramDefaultLocs.reserve(proto.getArgs().size());
+  paramNameLocs.reserve(proto.getArgs().size());
   for (const auto &param : proto.getArgs()) {
     paramNames.push_back(param.Name);
     paramDefaults.push_back(param.ResolvedDefault);
     paramDefaultLocs.push_back(param.DefaultEqualsLocation);
+    paramNameLocs.push_back(param.NameLocation);
   }
   TypeInfo boundReturn = applyActiveTypeBindings(proto.getReturnTypeInfo());
 
@@ -3317,6 +3542,9 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
       paramTypes, paramIsRef);
 
   if (existing) {
+    if (!defaultsAreCompatible(*existing, paramDefaults, paramDefaultLocs,
+                               paramNameLocs, paramNames, proto.getName()))
+      return nullptr;
     if (existing->mangledName.empty())
       existing->mangledName = mangledName;
     existing->isUnsafe = proto.isUnsafe();
@@ -3326,7 +3554,7 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
     existing->parameterDefaultLocations = paramDefaultLocs;
     if (!proto.getGenericParameters().empty())
       existing->isGenericInstantiation = true;
-    return *existing;
+    return existing;
   }
 
   FunctionOverload entry;
@@ -3344,7 +3572,52 @@ static FunctionOverload &registerFunctionOverload(const PrototypeAST &proto,
 
   auto &overloads = CG.functionOverloads[proto.getName()];
   overloads.push_back(std::move(entry));
-  return overloads.back();
+  return &overloads.back();
+}
+
+static bool verifyOverrideDefaultCompatibility(
+    const CompositeMemberInfo &baseMember, const PrototypeAST &overrideProto,
+    const std::string &baseOwner, const std::string &methodName,
+    const std::string &derivedOwner) {
+  const auto &args = overrideProto.getArgs();
+  std::vector<SourceLocation> nameLocs;
+  std::vector<SourceLocation> defaultLocs;
+  nameLocs.reserve(args.size());
+  defaultLocs.reserve(args.size());
+  for (const auto &param : args) {
+    nameLocs.push_back(param.NameLocation);
+    defaultLocs.push_back(param.DefaultEqualsLocation);
+  }
+
+  for (size_t idx = 0; idx < args.size(); ++idx) {
+    const bool baseHas =
+        idx < baseMember.parameterDefaults.size() &&
+        baseMember.parameterDefaults[idx].isSet();
+    const bool overrideHas = args[idx].ResolvedDefault.isSet();
+    if (baseHas != overrideHas ||
+        (baseHas &&
+         !defaultArgEquals(baseMember.parameterDefaults[idx],
+                           args[idx].ResolvedDefault))) {
+      ScopedErrorLocation scoped(selectDefaultDiagnosticLocation(
+          idx, defaultLocs, nameLocs));
+      std::string paramLabel;
+      if (idx < baseMember.parameterNames.size() &&
+          !baseMember.parameterNames[idx].empty()) {
+        paramLabel = baseMember.parameterNames[idx];
+      } else if (idx < args.size() && !args[idx].Name.empty()) {
+        paramLabel = args[idx].Name;
+      } else {
+        paramLabel = std::to_string(idx);
+      }
+      reportCompilerError("Override of '" + baseOwner + "." + methodName +
+                          "' in '" + derivedOwner +
+                          "' must use the same default for parameter '" +
+                          paramLabel + "'");
+      return false;
+    }
+  }
+
+  return true;
 }
 
 static FunctionOverload *lookupFunctionOverload(const PrototypeAST &proto) {
@@ -16073,8 +16346,12 @@ llvm::Function *PrototypeAST::codegen() {
   for (auto &Arg : F->args())
     Arg.setName(Args[Idx++].Name);
 
-  FunctionOverload &entry = registerFunctionOverload(*this, Mangled);
-  entry.function = F;
+  FunctionOverload *entry = registerFunctionOverload(*this, Mangled);
+  if (!entry) {
+    F->eraseFromParent();
+    return nullptr;
+  }
+  entry->function = F;
 
   return F;
 }
@@ -16803,9 +17080,17 @@ llvm::Type *StructAST::codegen() {
         llvm::verifyFunction(*ConstructorFunc);
 
         metadata.constructorMangledNames.push_back(ConstructorName);
-        FunctionOverload &ctorEntry =
+        FunctionOverload *ctorEntry =
             registerFunctionOverload(*CtorProto, ConstructorName);
-        ctorEntry.function = ConstructorFunc;
+        if (!ctorEntry) {
+          ConstructorFunc->eraseFromParent();
+          NamedValues.clear();
+          LocalTypes.clear();
+          NonNullFacts.clear();
+          Builder->ClearInsertionPoint();
+          return nullptr;
+        }
+        ctorEntry->function = ConstructorFunc;
         if (CtorProto->getName() != typeKey) {
           std::vector<TypeInfo> ctorParamTypes = gatherParamTypes(CtorProto->getArgs());
           std::vector<bool> ctorParamIsRef = gatherParamRefFlags(CtorProto->getArgs());
@@ -16814,7 +17099,7 @@ llvm::Type *StructAST::codegen() {
           if (!findRegisteredOverload(typeKey, boundCtorReturn,
                                       CtorProto->returnsByRef(), ctorParamTypes,
                                       ctorParamIsRef)) {
-            CG.functionOverloads[typeKey].push_back(ctorEntry);
+            CG.functionOverloads[typeKey].push_back(*ctorEntry);
           }
         }
       } else {
@@ -16940,6 +17225,9 @@ llvm::Type *StructAST::codegen() {
       MethodDef.markImplicitThisInjected();
     }
 
+    if (!resolveParameterDefaults(Proto->getMutableArgs(), Proto->getName()))
+      return nullptr;
+
     std::string overrideSignature;
 
     const std::string methodKey =
@@ -16978,6 +17266,11 @@ llvm::Type *StructAST::codegen() {
         return nullptr;
       }
 
+      if (!verifyOverrideDefaultCompatibility(
+              *baseMatch->info, *Proto, baseMatch->ownerType,
+              MethodDef.getDisplayName(), Name))
+        return nullptr;
+
       overrideSignature = baseMember.signature;
     }
 
@@ -16992,10 +17285,19 @@ llvm::Type *StructAST::codegen() {
     memberInfo.modifiers = MethodDef.getModifiers();
     memberInfo.signature = Proto->getName();
     memberInfo.dispatchKey = methodKey;
-   memberInfo.overridesSignature = overrideSignature;
+    memberInfo.overridesSignature = overrideSignature;
     memberInfo.returnType = applyActiveTypeBindings(Proto->getReturnTypeInfo());
     memberInfo.parameterTypes = gatherParamTypes(Proto->getArgs());
     memberInfo.parameterIsRef = gatherParamRefFlags(Proto->getArgs());
+    memberInfo.parameterNames.reserve(Proto->getArgs().size());
+    memberInfo.parameterDefaults.reserve(Proto->getArgs().size());
+    memberInfo.parameterDefaultLocations.reserve(Proto->getArgs().size());
+    for (const auto &param : Proto->getArgs()) {
+      memberInfo.parameterNames.push_back(param.Name);
+      memberInfo.parameterDefaults.push_back(param.ResolvedDefault);
+      memberInfo.parameterDefaultLocations.push_back(
+          param.DefaultEqualsLocation);
+    }
     memberInfo.returnsByRef = Proto->returnsByRef();
     memberInfo.isGenericTemplate = methodIsGeneric;
     memberInfo.genericArity =

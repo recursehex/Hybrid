@@ -64,6 +64,9 @@ struct CompositeMemberInfo {
   TypeInfo returnType;
   std::vector<TypeInfo> parameterTypes;
   std::vector<bool> parameterIsRef;
+  std::vector<std::string> parameterNames;
+  std::vector<DefaultArgInfo> parameterDefaults;
+  std::vector<SourceLocation> parameterDefaultLocations;
   bool returnsByRef = false;
   unsigned vtableSlot = std::numeric_limits<unsigned>::max();
   bool isGenericTemplate = false;
