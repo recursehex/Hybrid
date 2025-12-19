@@ -7,6 +7,7 @@ Hybrid's ARC frees heap allocations automatically. Use these patterns to keep ow
     - ARC retains on assignment and releases at scope exit, running destructors when the last strong reference dies.
 - Use `free` only when you need deterministic teardown (e.g. closing files, flushing buffers) on heap references. It is rejected for stack values and smart pointer handles because ARC already manages them.
 - Compare behaviors with `--arc-enabled=true|false` or `./run_tests.sh -a on|off` when tooling needs ARC-on vs ARC-off baselines.
+- The compiler will implicitly promote a stack-allocated ARC value to a heap object when it would otherwise be retained past the stack frame (e.g. storing a stack-built class/struct into an ARC field or returning it by value). This avoids dangling pointers without changing source, but you still pay one allocation + copy only in those escaping cases.
 
 ## Avoiding cycles with weak references
 - Mark back references `weak<T>` when children hold strong owners (trees, UI hierarchies) so the parent can be reclaimed.

@@ -1326,14 +1326,6 @@ static bool ValidateParameterDefaults(const std::vector<Parameter> &Args) {
   bool sawDefault = false;
   for (const auto &param : Args) {
     if (param.HasDefault) {
-      if (param.IsRef) {
-        setDiagnosticLocation(param.DefaultEqualsLocation.isValid()
-                                  ? param.DefaultEqualsLocation
-                                  : param.NameLocation);
-        reportCompilerError(
-            "Parameters passed by reference cannot declare default values");
-        return false;
-      }
       sawDefault = true;
       continue;
     }

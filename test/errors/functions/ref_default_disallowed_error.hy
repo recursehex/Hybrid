@@ -1,6 +1,5 @@
-// EXPECT_OUTPUT: Parameters passed by reference cannot [currently] declare default values
-int bad(ref int value = 0)
+// EXPECT_OUTPUT: Null default value is not allowed for ref parameter 'value'
+int bad(ref int value = null)
 {
     return value
 }
-

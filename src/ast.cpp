@@ -2161,7 +2161,10 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
     if (!value)
       return nullptr;
     resolvedArgs.push_back(value);
-    resolvedIsRef.push_back(false);
+    resolvedIsRef.push_back(
+        idx < memberInfo.parameterIsRef.size()
+            ? memberInfo.parameterIsRef[idx]
+            : false);
     ownedDefaultExprs.push_back(std::move(defaultExpr));
   }
 
@@ -2805,11 +2808,73 @@ static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
                                      const TypeInfo &info,
                                      std::string_view label,
                                      bool incomingIsTemporary) {
+  auto promoteStackArcValueIfNeeded = [&](llvm::Value *value) -> llvm::Value * {
+    if (!value || !info.requiresARC() || info.isSmartPointer() ||
+        info.isAlias())
+      return value;
+
+    llvm::Value *stripped = value->stripPointerCasts();
+    auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(stripped);
+    if (!alloca)
+      return value;
+
+    auto *structTy =
+        llvm::dyn_cast<llvm::StructType>(alloca->getAllocatedType());
+    if (!structTy)
+      return value;
+
+    std::string lookupName =
+        sanitizeCompositeLookupName(typeNameFromInfo(info));
+    const CompositeTypeInfo *meta =
+        lookupCompositeInfo(lookupName, /*countHit=*/false);
+    if (!meta || !meta->hasARCHeader)
+      return value;
+
+    if (meta->descriptorGlobalName.empty()) {
+      reportCompilerError("Internal error: missing descriptor for '" +
+                          lookupName + "' while storing value");
+      return nullptr;
+    }
+
+    llvm::GlobalVariable *descriptorGV =
+        TheModule->getGlobalVariable(meta->descriptorGlobalName, true);
+    if (!descriptorGV) {
+      reportCompilerError("Internal error: descriptor '" +
+                          meta->descriptorGlobalName +
+                          "' missing while storing '" + lookupName + "'");
+      return nullptr;
+    }
+
+    const llvm::DataLayout &DL = TheModule->getDataLayout();
+    uint64_t typeSize = DL.getTypeAllocSize(structTy);
+    llvm::Value *sizeVal =
+        llvm::ConstantInt::get(getSizeType(), typeSize);
+
+    llvm::Value *descriptorPtr = llvm::ConstantExpr::getBitCast(
+        descriptorGV, pointerType(getTypeDescriptorType()));
+
+    llvm::Value *rawPtr = Builder->CreateCall(
+        getHybridAllocObjectFunction(), {sizeVal, descriptorPtr},
+        buildArcOpLabel(label, "stack.promote"));
+    llvm::Value *typedPtr =
+        Builder->CreateBitCast(rawPtr, pointerType(structTy),
+                               buildArcOpLabel(label, "stack.promote.typed"));
+
+    llvm::Value *loadedVal = Builder->CreateLoad(
+        structTy, alloca, buildArcOpLabel(label, "stack.init"));
+    Builder->CreateStore(loadedVal, typedPtr);
+    return typedPtr;
+  };
+
   if (!storagePtr || !incoming) {
     if (storagePtr)
       Builder->CreateStore(incoming, storagePtr);
     return incoming;
   }
+
+  incoming = promoteStackArcValueIfNeeded(incoming);
+  if (!incoming)
+    return nullptr;
   if (!info.requiresARC() || info.isSmartPointer() || info.isAlias()) {
     Builder->CreateStore(incoming, storagePtr);
     return incoming;
@@ -3186,11 +3251,23 @@ static bool resolveDefaultArgument(Parameter &param,
   TypeInfo declared = param.DeclaredType;
   finalizeTypeInfoMetadata(declared);
 
-  if (info.kind == DefaultArgInfo::Kind::Null &&
-      !isReferenceLikeParameter(declared)) {
-    reportCompilerError("Null default value is only allowed for reference or nullable parameter '" +
-                        param.Name + "'");
-    return false;
+  if (info.kind == DefaultArgInfo::Kind::Null) {
+    bool allowsNull = isReferenceLikeParameter(declared);
+    if (param.IsRef && declared.pointerDepth == 0 && !declared.isArray &&
+        !declared.isNullable && !declared.participatesInARC() &&
+        !declared.isSmartPointer()) {
+      allowsNull = false;
+    }
+    if (!allowsNull) {
+      if (param.IsRef) {
+        reportCompilerError("Null default value is not allowed for ref parameter '" +
+                            param.Name + "'");
+      } else {
+        reportCompilerError("Null default value is only allowed for reference or nullable parameter '" +
+                            param.Name + "'");
+      }
+      return false;
+    }
   }
 
   if (info.kind == DefaultArgInfo::Kind::String) {
@@ -5002,6 +5079,46 @@ static bool expressionIsNullable(const ExprAST *expr) {
     return false;
   ParsedTypeDescriptor desc = parseTypeString(typeName);
   return typeAllowsNull(desc);
+}
+
+static llvm::Value *materializeAliasPointer(llvm::Value *storage,
+                                            const TypeInfo &info,
+                                            const std::string &name) {
+  if (!storage)
+    return nullptr;
+
+  llvm::Type *expectedElement = getTypeFromString(info.typeName);
+  llvm::PointerType *expectedPtrTy =
+      expectedElement ? pointerType(expectedElement) : nullptr;
+
+  auto loadPointer = [&](llvm::Value *addr,
+                         llvm::Type *pointee) -> llvm::Value * {
+    llvm::Value *loaded =
+        Builder->CreateLoad(pointee, addr, name + "_ptr");
+    if (expectedPtrTy && loaded->getType() != expectedPtrTy) {
+      loaded = Builder->CreateBitCast(loaded, expectedPtrTy,
+                                      name + "_ptrcast");
+    }
+    return loaded;
+  };
+
+  if (auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(storage)) {
+    llvm::Type *pointee = alloca->getAllocatedType();
+    if (pointee && pointee->isPointerTy())
+      return loadPointer(storage, pointee);
+  } else if (auto *global = llvm::dyn_cast<llvm::GlobalVariable>(storage)) {
+    llvm::Type *pointee = global->getValueType();
+    if (pointee && pointee->isPointerTy())
+      return loadPointer(storage, pointee);
+  }
+
+  if (!storage->getType()->isPointerTy())
+    return storage;
+
+  if (expectedPtrTy && storage->getType() != expectedPtrTy)
+    return Builder->CreateBitCast(storage, expectedPtrTy,
+                                  name + "_ptrcast");
+  return storage;
 }
 
 static bool validateInvariantAssignment(const TypeInfo &targetInfo,
@@ -9477,15 +9594,15 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   if (V) {
     if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
       setTypeName(typeNameFromInfo(*info));
-      bool needsLoad = info->isAlias();
-      if (!needsLoad) {
-        if (info->isSmartPointer()) {
-          needsLoad = true;
-        } else if (const CompositeTypeInfo *comp =
-                       lookupCompositeInfo(info->typeName)) {
-          needsLoad = comp->kind == AggregateKind::Class ||
-                      comp->kind == AggregateKind::Interface;
-        }
+      if (info->isAlias())
+        return materializeAliasPointer(V, *info, getName());
+      bool needsLoad = false;
+      if (info->isSmartPointer()) {
+        needsLoad = true;
+      } else if (const CompositeTypeInfo *comp =
+                     lookupCompositeInfo(info->typeName)) {
+        needsLoad = comp->kind == AggregateKind::Class ||
+                    comp->kind == AggregateKind::Interface;
       }
       if (needsLoad) {
         llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
@@ -9500,15 +9617,15 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   if (G) {
     if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
       setTypeName(typeNameFromInfo(*info));
-      bool needsLoad = info->isAlias();
-      if (!needsLoad) {
-        if (info->isSmartPointer()) {
-          needsLoad = true;
-        } else if (const CompositeTypeInfo *comp =
-                       lookupCompositeInfo(info->typeName)) {
-          needsLoad = comp->kind == AggregateKind::Class ||
-                      comp->kind == AggregateKind::Interface;
-        }
+      if (info->isAlias())
+        return materializeAliasPointer(G, *info, getName());
+      bool needsLoad = false;
+      if (info->isSmartPointer()) {
+        needsLoad = true;
+      } else if (const CompositeTypeInfo *comp =
+                     lookupCompositeInfo(info->typeName)) {
+        needsLoad = comp->kind == AggregateKind::Class ||
+                    comp->kind == AggregateKind::Interface;
       }
       if (needsLoad) {
         llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(G);
@@ -9686,8 +9803,7 @@ llvm::Value *VariableExprAST::codegen() {
   // First look this variable up in the local function scope
   llvm::Value *V = NamedValues[getName()];
   if (V) {
-    // Local variable - load from alloca
-    llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
+    llvm::AllocaInst *Alloca = llvm::dyn_cast<llvm::AllocaInst>(V);
     // Set type name from local types
     if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
       TypeInfo effective = *info;
@@ -9696,16 +9812,22 @@ llvm::Value *VariableExprAST::codegen() {
       setTypeName(typeNameFromInfo(effective));
 
       if (info->isAlias()) {
-        llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
+        llvm::Value *Ptr = materializeAliasPointer(V, *info, getName());
+        if (!Ptr)
+          return nullptr;
         llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
         if (!ActualLLVMType)
           return LogErrorV("Invalid type for ref variable");
         return Builder->CreateLoad(ActualLLVMType, Ptr, (getName() + "_deref").c_str());
       }
 
+      if (!Alloca)
+        return LogErrorV("Internal error: expected stack storage for local variable");
       return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
     }
 
+    if (!Alloca)
+      return LogErrorV("Internal error: expected stack storage for local variable");
     return Builder->CreateLoad(Alloca->getAllocatedType(), V, getName().c_str());
   }
 
@@ -9721,7 +9843,9 @@ llvm::Value *VariableExprAST::codegen() {
       setTypeName(typeNameFromInfo(effective));
 
       if (info->isAlias()) {
-        llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, getName().c_str());
+        llvm::Value *Ptr = materializeAliasPointer(GV, *info, getName());
+        if (!Ptr)
+          return nullptr;
         llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
         if (!ActualLLVMType)
           return LogErrorV("Invalid type for ref variable");
@@ -10529,32 +10653,38 @@ llvm::Value *BinaryExprAST::codegen() {
       llvm::Value *StoragePtr = nullptr;   // Points to the actual value for alias variables
       llvm::Type *ValueType = nullptr;
       llvm::Value *CurrentVal = nullptr;
+      llvm::AllocaInst *Alloca =
+          isLocal ? llvm::dyn_cast<llvm::AllocaInst>(Variable) : nullptr;
+      llvm::GlobalVariable *GV =
+          isLocal ? nullptr : llvm::dyn_cast<llvm::GlobalVariable>(Variable);
 
-      if (isLocal) {
-        llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
-        if (isAlias) {
-          StoragePtr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (varName + "_ptr").c_str());
-          if (!StoragePtr->getType()->isPointerTy())
-            return LogErrorV("Invalid ref storage for compound assignment");
-          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
-          if (!ValueType)
-            return LogErrorV("Invalid type for ref variable in compound assignment");
-          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
-        } else {
+      if (isAlias) {
+        ValueType = info ? getTypeFromString(info->typeName) : nullptr;
+        if (!ValueType)
+          return LogErrorV("Invalid type for ref variable in compound assignment");
+        llvm::Type *slotType =
+            Alloca ? Alloca->getAllocatedType()
+                   : GV   ? GV->getValueType()
+                          : nullptr;
+        const bool hasPointerSlot = slotType && slotType->isPointerTy();
+        if (hasPointerSlot) {
+          StoragePtr = Builder->CreateLoad(slotType, Variable,
+                                           (varName + "_ptr").c_str());
+        } else if (info) {
+          StoragePtr = materializeAliasPointer(Variable, *info, varName);
+        }
+        if (!StoragePtr || !StoragePtr->getType()->isPointerTy())
+          return LogErrorV("Invalid ref storage for compound assignment");
+        CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
+      } else {
+        if (isLocal) {
+          if (!Alloca)
+            return LogErrorV("Internal error: expected stack storage for compound assignment");
           ValueType = Alloca->getAllocatedType();
           CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
-        }
-      } else {
-        llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(Variable);
-        if (isAlias) {
-          StoragePtr = Builder->CreateLoad(GV->getValueType(), Variable, (varName + "_ptr").c_str());
-          if (!StoragePtr->getType()->isPointerTy())
-            return LogErrorV("Invalid ref storage for compound assignment");
-          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
-          if (!ValueType)
-            return LogErrorV("Invalid type for ref variable in compound assignment");
-          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
         } else {
+          if (!GV)
+            return LogErrorV("Internal error: expected global storage for compound assignment");
           ValueType = GV->getValueType();
           CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
         }
@@ -11045,17 +11175,20 @@ llvm::Value *BinaryExprAST::codegen() {
         llvm::Value *Variable = NamedValues[LHSE->getName()];
         if (Variable) {
           // Local variable
-          llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
+          llvm::AllocaInst *Alloca = llvm::dyn_cast<llvm::AllocaInst>(Variable);
 
           if (const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName()); info && info->isAlias()) {
+            llvm::Type *slotType = Alloca ? Alloca->getAllocatedType() : nullptr;
+            const bool hasPointerSlot = slotType && slotType->isPointerTy();
             if (dynamic_cast<RefExprAST *>(getRHS())) {
+              if (!hasPointerSlot)
+                return LogErrorV(("Cannot rebind ref parameter '" + LHSE->getName() + "'").c_str());
               llvm::Value *newPtr = getRHS()->codegen();
               if (!newPtr)
                 return nullptr;
-              llvm::Type *expectedPtrTy = Alloca->getAllocatedType();
-              if (newPtr->getType() != expectedPtrTy)
+              if (slotType && newPtr->getType() != slotType)
                 newPtr = Builder->CreateBitCast(
-                    newPtr, expectedPtrTy,
+                    newPtr, slotType,
                     (LHSE->getName() + ".rebind.cast").c_str());
               Builder->CreateStore(newPtr, Variable);
               updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
@@ -11063,7 +11196,13 @@ llvm::Value *BinaryExprAST::codegen() {
               return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
             }
 
-            llvm::Value *Ptr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (LHSE->getName() + "_ptr").c_str());
+            llvm::Value *Ptr = nullptr;
+            if (hasPointerSlot)
+              Ptr = Builder->CreateLoad(slotType, Variable, (LHSE->getName() + "_ptr").c_str());
+            else
+              Ptr = materializeAliasPointer(Variable, *info, LHSE->getName());
+            if (!Ptr)
+              return nullptr;
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
@@ -11080,6 +11219,8 @@ llvm::Value *BinaryExprAST::codegen() {
           }
 
           // Regular variable assignment
+          if (!Alloca)
+            return LogErrorV("Internal error: expected stack storage for local variable");
           llvm::Type *VarType = Alloca->getAllocatedType();
           if (const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName())) {
             if (rhsIsNullable && !typeAllowsNull(*info)) {
@@ -11182,11 +11323,15 @@ llvm::Value *BinaryExprAST::codegen() {
         llvm::GlobalVariable *GV = GlobalValues[LHSE->getName()];
         if (GV) {
           if (const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName()); info && info->isAlias()) {
+            llvm::Type *slotType = GV->getValueType();
+            const bool hasPointerSlot = slotType && slotType->isPointerTy();
             if (dynamic_cast<RefExprAST *>(getRHS())) {
+              if (!hasPointerSlot)
+                return LogErrorV(("Cannot rebind ref parameter '" + LHSE->getName() + "'").c_str());
               llvm::Value *newPtr = getRHS()->codegen();
               if (!newPtr)
                 return nullptr;
-              llvm::Type *expectedPtrTy = GV->getValueType();
+              llvm::Type *expectedPtrTy = slotType;
               if (newPtr->getType() != expectedPtrTy)
                 newPtr = Builder->CreateBitCast(
                     newPtr, expectedPtrTy,
@@ -11197,7 +11342,12 @@ llvm::Value *BinaryExprAST::codegen() {
               return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
             }
 
-            llvm::Value *Ptr = Builder->CreateLoad(GV->getValueType(), GV, (LHSE->getName() + "_ptr").c_str());
+            llvm::Value *Ptr = hasPointerSlot
+                                   ? Builder->CreateLoad(slotType, GV,
+                                                         (LHSE->getName() + "_ptr").c_str())
+                                   : materializeAliasPointer(GV, *info, LHSE->getName());
+            if (!Ptr)
+              return nullptr;
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
@@ -11612,32 +11762,38 @@ llvm::Value *BinaryExprAST::codegen() {
       llvm::Value *StoragePtr = nullptr;   // Points to the actual value for alias variables
       llvm::Type *ValueType = nullptr;
       llvm::Value *CurrentVal = nullptr;
+      llvm::AllocaInst *Alloca =
+          isLocal ? llvm::dyn_cast<llvm::AllocaInst>(Variable) : nullptr;
+      llvm::GlobalVariable *GV =
+          isLocal ? nullptr : llvm::dyn_cast<llvm::GlobalVariable>(Variable);
 
-      if (isLocal) {
-        llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
-        if (isAlias) {
-          StoragePtr = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, (varName + "_ptr").c_str());
-          if (!StoragePtr->getType()->isPointerTy())
-            return LogErrorV("Invalid ref storage for compound assignment");
-          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
-          if (!ValueType)
-            return LogErrorV("Invalid type for ref variable in compound assignment");
-          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
-        } else {
+      if (isAlias) {
+        ValueType = info ? getTypeFromString(info->typeName) : nullptr;
+        if (!ValueType)
+          return LogErrorV("Invalid type for ref variable in compound assignment");
+        llvm::Type *slotType =
+            Alloca ? Alloca->getAllocatedType()
+                   : GV   ? GV->getValueType()
+                          : nullptr;
+        const bool hasPointerSlot = slotType && slotType->isPointerTy();
+        if (hasPointerSlot) {
+          StoragePtr = Builder->CreateLoad(slotType, Variable,
+                                           (varName + "_ptr").c_str());
+        } else if (info) {
+          StoragePtr = materializeAliasPointer(Variable, *info, varName);
+        }
+        if (!StoragePtr || !StoragePtr->getType()->isPointerTy())
+          return LogErrorV("Invalid ref storage for compound assignment");
+        CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
+      } else {
+        if (isLocal) {
+          if (!Alloca)
+            return LogErrorV("Internal error: expected stack storage for compound assignment");
           ValueType = Alloca->getAllocatedType();
           CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
-        }
-      } else {
-        llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(Variable);
-        if (isAlias) {
-          StoragePtr = Builder->CreateLoad(GV->getValueType(), Variable, (varName + "_ptr").c_str());
-          if (!StoragePtr->getType()->isPointerTy())
-            return LogErrorV("Invalid ref storage for compound assignment");
-          ValueType = info ? getTypeFromString(info->typeName) : nullptr;
-          if (!ValueType)
-            return LogErrorV("Invalid type for ref variable in compound assignment");
-          CurrentVal = Builder->CreateLoad(ValueType, StoragePtr, varName.c_str());
         } else {
+          if (!GV)
+            return LogErrorV("Internal error: expected global storage for compound assignment");
           ValueType = GV->getValueType();
           CurrentVal = Builder->CreateLoad(ValueType, Variable, varName.c_str());
         }
@@ -11898,22 +12054,58 @@ llvm::Value *BinaryExprAST::codegen() {
     if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
       // Simple variable compound assignment
       llvm::Value *Variable = NamedValues[LHSE->getName()];
+      bool isLocal = true;
       if (!Variable) {
         Variable = GlobalValues[LHSE->getName()];
+        isLocal = false;
         if (!Variable)
           return LogErrorV("Unknown variable name for compound assignment");
       }
-      
+      const TypeInfo *info = lookupTypeInfo(LHSE->getName());
+      const bool isAlias = info && info->isAlias();
+
       // Load current value
-      llvm::Value *CurrentVal;
-      if (NamedValues[LHSE->getName()]) {
-        // Local variable - alloca
-        llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(Variable);
-        CurrentVal = Builder->CreateLoad(Alloca->getAllocatedType(), Variable, LHSE->getName());
+      llvm::AllocaInst *Alloca =
+          isLocal ? llvm::dyn_cast<llvm::AllocaInst>(Variable) : nullptr;
+      llvm::GlobalVariable *GV =
+          isLocal ? nullptr : llvm::dyn_cast<llvm::GlobalVariable>(Variable);
+      llvm::Value *CurrentVal = nullptr;
+      llvm::Value *StoragePtr = nullptr;
+      llvm::Type *ValueType = nullptr;
+      if (isAlias) {
+        ValueType = info ? getTypeFromString(info->typeName) : nullptr;
+        if (!ValueType)
+          return LogErrorV("Invalid type for ref variable in compound assignment");
+        llvm::Type *slotType =
+            Alloca ? Alloca->getAllocatedType()
+                   : GV   ? GV->getValueType()
+                          : nullptr;
+        const bool hasPointerSlot = slotType && slotType->isPointerTy();
+        if (hasPointerSlot) {
+          StoragePtr = Builder->CreateLoad(slotType, Variable,
+                                           (LHSE->getName() + "_ptr").c_str());
+        } else if (info) {
+          StoragePtr =
+              materializeAliasPointer(Variable, *info, LHSE->getName());
+        }
+        if (!StoragePtr || !StoragePtr->getType()->isPointerTy())
+          return LogErrorV("Invalid ref storage for compound assignment");
+        CurrentVal =
+            Builder->CreateLoad(ValueType, StoragePtr, LHSE->getName());
       } else {
-        // Global variable
-        llvm::GlobalVariable *GV = static_cast<llvm::GlobalVariable*>(Variable);
-        CurrentVal = Builder->CreateLoad(GV->getValueType(), Variable, LHSE->getName());
+        if (isLocal) {
+          if (!Alloca)
+            return LogErrorV("Internal error: expected stack storage for compound assignment");
+          ValueType = Alloca->getAllocatedType();
+          CurrentVal =
+              Builder->CreateLoad(ValueType, Variable, LHSE->getName());
+        } else {
+          if (!GV)
+            return LogErrorV("Internal error: expected global storage for compound assignment");
+          ValueType = GV->getValueType();
+          CurrentVal =
+              Builder->CreateLoad(ValueType, Variable, LHSE->getName());
+        }
       }
       
       // Check that operands are integers
@@ -11922,7 +12114,7 @@ llvm::Value *BinaryExprAST::codegen() {
       
       // Promote types for the operation
       std::string lhsPromoteType;
-      if (const TypeInfo *info = lookupTypeInfo(LHSE->getName()))
+      if (info)
         lhsPromoteType = typeNameFromInfo(*info);
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
@@ -11953,7 +12145,11 @@ llvm::Value *BinaryExprAST::codegen() {
       }
       
       // Store the result back
-      Builder->CreateStore(Result, Variable);
+      if (isAlias) {
+        Builder->CreateStore(Result, StoragePtr);
+      } else {
+        Builder->CreateStore(Result, Variable);
+      }
       // Return a void value to indicate this is a statement, not an expression
       setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
@@ -13404,9 +13600,9 @@ static llvm::Value *emitResolvedCallInternal(
     unsigned conversions = 0;
 
     for (size_t idx = 0; idx < paramCount; ++idx) {
-      bool argIsRef =
-          binding[idx] >= 0 ? (*provided)[static_cast<size_t>(binding[idx])].isRef
-                            : false;
+      bool argIsRef = binding[idx] >= 0
+                          ? (*provided)[static_cast<size_t>(binding[idx])].isRef
+                          : overload->parameterIsRef[idx];
       if (overload->parameterIsRef[idx] != argIsRef) {
         compatible = false;
         break;
@@ -16440,25 +16636,34 @@ llvm::Function *FunctionAST::codegen() {
   for (auto &Arg : TheFunction->args()) {
     bool isRefParam = (i < Params.size() && Params[i].IsRef);
 
-    llvm::AllocaInst *Alloca = Builder->CreateAlloca(Arg.getType(), nullptr, Arg.getName());
+    llvm::AllocaInst *Alloca =
+        isRefParam ? nullptr
+                   : Builder->CreateAlloca(Arg.getType(), nullptr,
+                                           Arg.getName());
     if (i < Params.size()) {
       TypeInfo paramInfo = applyActiveTypeBindings(Params[i].DeclaredType);
       if (isRefParam) {
         paramInfo.refStorage = RefStorageClass::RefAlias;
         paramInfo.declaredRef = true;
-      }
-      if (!isRefParam && typeNeedsLifetimeTracking(paramInfo)) {
-        llvm::Value *zeroInit = llvm::Constant::getNullValue(Arg.getType());
-        Builder->CreateStore(zeroInit, Alloca);
-        emitManagedStore(Alloca, &Arg, paramInfo, Arg.getName().str());
+        NamedValues[std::string(Arg.getName())] = &Arg;
+        rememberLocalType(std::string(Arg.getName()), paramInfo);
       } else {
-        Builder->CreateStore(&Arg, Alloca);
+        if (typeNeedsLifetimeTracking(paramInfo)) {
+          llvm::Value *zeroInit =
+              llvm::Constant::getNullValue(Arg.getType());
+          Builder->CreateStore(zeroInit, Alloca);
+          emitManagedStore(Alloca, &Arg, paramInfo, Arg.getName().str());
+        } else {
+          Builder->CreateStore(&Arg, Alloca);
+        }
+        NamedValues[std::string(Arg.getName())] = Alloca;
+        rememberLocalType(std::string(Arg.getName()), paramInfo);
+        registerArcLocal(std::string(Arg.getName()), Alloca, paramInfo,
+                         false);
       }
-      NamedValues[std::string(Arg.getName())] = Alloca;
-      rememberLocalType(std::string(Arg.getName()), paramInfo);
-      if (!isRefParam)
-        registerArcLocal(std::string(Arg.getName()), Alloca, paramInfo, false);
     } else {
+      if (!Alloca)
+        Alloca = Builder->CreateAlloca(Arg.getType(), nullptr, Arg.getName());
       Builder->CreateStore(&Arg, Alloca);
       NamedValues[std::string(Arg.getName())] = Alloca;
     }
@@ -16469,9 +16674,17 @@ llvm::Function *FunctionAST::codegen() {
     if (!ctx->isStatic) {
       auto ThisIt = NamedValues.find("__hybrid_this");
       if (ThisIt != NamedValues.end()) {
-        if (auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(ThisIt->second)) {
-          llvm::Value *ThisPtr =
-              Builder->CreateLoad(Alloca->getAllocatedType(), Alloca, "this");
+        llvm::Value *storage = ThisIt->second;
+        llvm::Value *ThisPtr = storage;
+        if (const TypeInfo *thisInfo =
+                lookupLocalTypeInfo("__hybrid_this")) {
+          ThisPtr = materializeAliasPointer(storage, *thisInfo, "this");
+        } else if (auto *Alloca =
+                       llvm::dyn_cast<llvm::AllocaInst>(storage)) {
+          ThisPtr = Builder->CreateLoad(Alloca->getAllocatedType(), Alloca,
+                                        "this");
+        }
+        if (ThisPtr) {
           NamedValues["this"] = ThisPtr;
           TypeInfo thisInfo = makeTypeInfo(ctx->name);
           thisInfo.refStorage = RefStorageClass::RefAlias;
