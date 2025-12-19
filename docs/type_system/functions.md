@@ -111,7 +111,7 @@ int log(string message, bool writeToFile = true, bool append = true)
 - Defaults must be compile-time evaluable (literals, simple arithmetic, enum values, address-of globals) and side-effect free.
 - Constant-foldable arithmetic may include bitwise and shift operators as long as the expression contains no side effects.
 - Once a parameter declares a default, all parameters to its right must also declare defaults.
-- `ref` and variadic parameters cannot have defaults.
+- Variadic parameters cannot have defaults. `ref` parameters may when the expression is const-evaluable; null defaults are only valid when the ref target type itself permits null.
 - Defaults are injected at call sites; function signatures and mangling do not change.
 
 ### Named Arguments
@@ -125,6 +125,13 @@ log("startup", append = false)   // skips writeToFile, overrides append
 - Positional arguments must precede any named arguments; once named, the rest must be named.
 - Named arguments can target required parameters but only parameters with defaults may be omitted.
 - Duplicate or unknown names are rejected at compile time.
+
+### Style Guidance
+
+- Prefer positional calls for the common path; reach for named arguments when skipping earlier defaults or clarifying boolean/sentinel parameters.
+- Keep caller ordering aligned with parameter ordering unless skipping defaults; avoid reordering purely for style.
+- Avoid mixing positional and named arguments in short calls unless it materially improves readability; once named, keep the rest named.
+- For APIs with many optional flags, consider a small options struct instead of long chains of named arguments.
 
 ### Array Parameters
 
