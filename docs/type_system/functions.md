@@ -109,6 +109,7 @@ int log(string message, bool writeToFile = true, bool append = true)
 ```
 
 - Defaults must be compile-time evaluable (literals, simple arithmetic, enum values, address-of globals) and side-effect free.
+- Constant-foldable arithmetic may include bitwise and shift operators as long as the expression contains no side effects.
 - Once a parameter declares a default, all parameters to its right must also declare defaults.
 - `ref` and variadic parameters cannot have defaults.
 - Defaults are injected at call sites; function signatures and mangling do not change.

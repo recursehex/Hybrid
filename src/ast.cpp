@@ -3171,6 +3171,8 @@ static bool defaultArgEquals(const DefaultArgInfo &lhs,
     return lhs.charValue == rhs.charValue;
   case DefaultArgInfo::Kind::Null:
     return true;
+  case DefaultArgInfo::Kind::GlobalAddress:
+    return lhs.globalName == rhs.globalName;
   }
   return false;
 }
@@ -3232,9 +3234,23 @@ static bool resolveDefaultArgument(Parameter &param,
     info.charValue = ch->getValue();
   } else if (dynamic_cast<NullExprAST *>(param.DefaultValue.get())) {
     info.kind = DefaultArgInfo::Kind::Null;
+  } else if (auto *unary = dynamic_cast<UnaryExprAST *>(param.DefaultValue.get());
+             unary && unary->getOp() == "#") {
+    auto *var = dynamic_cast<VariableExprAST *>(unary->getOperand());
+    if (!var) {
+      reportCompilerError("Default value for parameter '" + param.Name +
+                          "' must take the address of a global value");
+      return false;
+    }
+    info.kind = DefaultArgInfo::Kind::GlobalAddress;
+    info.globalName = var->getName();
   } else {
     ConstantValue constVal(0LL);
-    if (!EvaluateConstantExpression(param.DefaultValue.get(), constVal)) {
+    SourceLocation failLoc{};
+    if (!EvaluateConstantExpression(param.DefaultValue.get(), constVal,
+                                    &failLoc)) {
+      ScopedErrorLocation failing(
+          failLoc.isValid() ? failLoc : errorLoc);
       reportCompilerError("Default value for parameter '" + param.Name +
                           "' must be a compile-time constant expression");
       return false;
@@ -3250,6 +3266,16 @@ static bool resolveDefaultArgument(Parameter &param,
 
   TypeInfo declared = param.DeclaredType;
   finalizeTypeInfoMetadata(declared);
+
+  if (info.kind == DefaultArgInfo::Kind::GlobalAddress) {
+    const bool expectsPointer =
+        declared.pointerDepth > 0 || declared.isArray || declared.isReference();
+    if (!expectsPointer) {
+      reportCompilerError("Default value for parameter '" + param.Name +
+                          "' must match its declared type");
+      return false;
+    }
+  }
 
   if (info.kind == DefaultArgInfo::Kind::Null) {
     bool allowsNull = isReferenceLikeParameter(declared);
@@ -3306,6 +3332,12 @@ static std::unique_ptr<ExprAST> instantiateDefaultExpr(
     return std::make_unique<CharExprAST>(info.charValue);
   case DefaultArgInfo::Kind::Null:
     return std::make_unique<NullExprAST>();
+  case DefaultArgInfo::Kind::GlobalAddress: {
+    auto var = std::make_unique<VariableExprAST>(info.globalName);
+    auto addr =
+        std::make_unique<UnaryExprAST>("#", std::move(var), true, true);
+    return addr;
+  }
   case DefaultArgInfo::Kind::None:
     break;
   }
@@ -17036,7 +17068,10 @@ llvm::Type *StructAST::codegen() {
       llvm::Constant *Init = llvm::Constant::getNullValue(FieldType);
       if (hasInitializer) {
         ConstantValue constVal(0LL);
-        if (!EvaluateConstantExpression(Field->getInitializer(), constVal)) {
+        SourceLocation failLoc{};
+        if (!EvaluateConstantExpression(Field->getInitializer(), constVal,
+                                        &failLoc)) {
+          ScopedErrorLocation scoped(failLoc);
           reportCompilerError("Static field initializer for '" + Field->getName() +
                                   "' must be a compile-time constant expression");
           abandonStructDefinition();

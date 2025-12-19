@@ -77,6 +77,7 @@ struct ConstantValue {
   ConstantValue(bool val) : type(BOOLEAN), boolVal(val) {}
 };
 
-bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result);
+bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result,
+                                SourceLocation *firstErrorLocation = nullptr);
 
 #endif // PARSER_H

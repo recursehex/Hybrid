@@ -243,6 +243,7 @@ protected:
   bool TemporaryValue = false;
   GenericBindingKey BoundGenericKey;
   bool HasBoundGenericKey = false;
+  SourceLocation ExprLocation{};
   
 public:
   virtual ~ExprAST() = default;
@@ -267,6 +268,10 @@ public:
   void clearGenericBindingKey() {
     BoundGenericKey = {};
     HasBoundGenericKey = false;
+  }
+  void setSourceLocation(SourceLocation loc) { ExprLocation = loc; }
+  [[nodiscard]] SourceLocation getSourceLocation() const {
+    return ExprLocation;
   }
 };
 
@@ -1013,12 +1018,13 @@ private:
 };
 
 struct DefaultArgInfo {
-  enum class Kind : uint8_t { None, Number, Bool, String, Char, Null };
+  enum class Kind : uint8_t { None, Number, Bool, String, Char, Null, GlobalAddress };
 
   Kind kind = Kind::None;
   NumericLiteral numberValue;
   bool boolValue = false;
   std::string stringValue;
+  std::string globalName;
   uint32_t charValue = 0;
 
   bool isSet() const { return kind != Kind::None; }

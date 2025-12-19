@@ -80,6 +80,14 @@ private:
   bool active = true;
 };
 
+template <typename T>
+static std::unique_ptr<T> withLocation(std::unique_ptr<T> expr,
+                                       SourceLocation loc) {
+  if (expr)
+    expr->setSourceLocation(loc);
+  return expr;
+}
+
 static std::vector<std::vector<ParserContext::PendingToken> *> &
 tokenCaptureStack() {
   static std::vector<std::vector<ParserContext::PendingToken> *> stack;
@@ -1465,13 +1473,16 @@ static bool AreTypesCompatible(const std::string& type1, const std::string& type
 
 /// numberexpr ::= number
 std::unique_ptr<ExprAST> ParseNumberExpr() {
+  SourceLocation loc = currentParser().currentTokenLocation;
   auto Result = std::make_unique<NumberExprAST>(LexedNumericLiteral);
+  Result->setSourceLocation(loc);
   getNextToken(); // consume the number
   return std::move(Result);
 }
 
 /// parenexpr ::= '(' expression ')'
 std::unique_ptr<ExprAST> ParseParenExpr() {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat '('
   SkipNewlines();
 
@@ -1504,7 +1515,9 @@ std::unique_ptr<ExprAST> ParseParenExpr() {
   getNextToken(); // eat ')'
 
   bool isTuple = sawComma || Elements.size() != 1;
-  return std::make_unique<ParenExprAST>(std::move(Elements), isTuple);
+  auto expr = std::make_unique<ParenExprAST>(std::move(Elements), isTuple);
+  expr->setSourceLocation(loc);
+  return expr;
 }
 
 // Forward declaration
@@ -1517,6 +1530,7 @@ static void RecoverAfterExpressionError();
 ///   ::= identifier '[' expression ']'
 std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   std::string IdName = IdentifierStr;
+  SourceLocation loc = currentParser().currentTokenLocation;
 
   getNextToken(); // eat identifier.
 
@@ -1526,12 +1540,13 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 
   if (CurTok == '[') {
     // Array indexing
-    auto ArrayVar = std::make_unique<VariableExprAST>(IdName);
+    auto ArrayVar = withLocation(std::make_unique<VariableExprAST>(IdName),
+                                 loc);
     return ParseArrayIndex(std::move(ArrayVar));
   }
 
   if (CurTok != '(') // Simple variable ref.
-    return std::make_unique<VariableExprAST>(IdName);
+    return withLocation(std::make_unique<VariableExprAST>(IdName), loc);
 
   std::vector<std::unique_ptr<ExprAST>> Args;
   std::vector<std::string> ArgNames;
@@ -1540,15 +1555,18 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
     return nullptr;
 
-  return std::make_unique<CallExprAST>(IdName, std::move(Args),
-                                       std::move(ArgNames),
-                                       std::move(ArgNameLocs),
-                                       std::move(ArgEqualLocs));
+  auto call = std::make_unique<CallExprAST>(IdName, std::move(Args),
+                                            std::move(ArgNames),
+                                            std::move(ArgNameLocs),
+                                            std::move(ArgEqualLocs));
+  call->setSourceLocation(loc);
+  return call;
 }
 
 /// unaryexpr ::= ('-' | '!') primary
 /// arrayexpr ::= '[' expression* ']'
 std::unique_ptr<ExprAST> ParseArrayExpr() {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat [
 
   std::vector<std::unique_ptr<ExprAST>> Elements;
@@ -1620,11 +1638,14 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
 
   // Leave ElementType empty when inference failed so codegen can use context or diagnose
 
-  return std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
+  auto expr = std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
+  expr->setSourceLocation(loc);
+  return expr;
 }
 
 /// arrayindex ::= expr '[' expression ']'
 std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat '['
 
   std::vector<std::unique_ptr<ExprAST>> Indices;
@@ -1648,6 +1669,7 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
   getNextToken(); // eat ']'
 
   auto Result = std::make_unique<ArrayIndexExprAST>(std::move(Array), std::move(Indices));
+  Result->setSourceLocation(loc);
 
   if (CurTok == '[') {
     return ParseArrayIndex(std::move(Result));
@@ -1657,6 +1679,7 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
 }
 
 std::unique_ptr<ExprAST> ParseNullSafeElementAccess(std::unique_ptr<ExprAST> Array) {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat '?['
 
   auto Index = ParseExpression();
@@ -1667,7 +1690,11 @@ std::unique_ptr<ExprAST> ParseNullSafeElementAccess(std::unique_ptr<ExprAST> Arr
     return LogError("Expected ']' after null-safe array index");
   getNextToken(); // eat ']'
 
-  return std::make_unique<NullSafeElementAccessExprAST>(std::move(Array), std::move(Index));
+  auto expr =
+      std::make_unique<NullSafeElementAccessExprAST>(std::move(Array),
+                                                    std::move(Index));
+  expr->setSourceLocation(loc);
+  return expr;
 }
 
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
@@ -1679,6 +1706,7 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
 
   int Opc = CurTok;
   bool parsedInUnsafe = false;
+  SourceLocation opLoc = currentParser().currentTokenLocation;
   std::string OpStr;
   if (Opc == '-') OpStr = "-";
   else if (Opc == tok_not) OpStr = "!";
@@ -1703,9 +1731,19 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
 
   if (OpStr == "-") {
       // Represent -x as 0 - x
-      return std::make_unique<BinaryExprAST>("-", std::make_unique<NumberExprAST>(NumericLiteral::fromSigned(0)), std::move(Operand));
+      auto zero = withLocation(
+          std::make_unique<NumberExprAST>(NumericLiteral::fromSigned(0)),
+          opLoc);
+      auto expr = std::make_unique<BinaryExprAST>("-", std::move(zero),
+                                                  std::move(Operand));
+      expr->setSourceLocation(opLoc);
+      return expr;
   }
-  return std::make_unique<UnaryExprAST>(OpStr, std::move(Operand), true /* isPrefix */, parsedInUnsafe);
+  auto expr =
+      std::make_unique<UnaryExprAST>(OpStr, std::move(Operand),
+                                     true /* isPrefix */, parsedInUnsafe);
+  expr->setSourceLocation(opLoc);
+  return expr;
 }
 
 /// primary
@@ -1720,6 +1758,7 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   // Check for type casting: type: expr
   if (IsBuiltInType()) {
     std::string TypeName = IdentifierStr;
+    SourceLocation typeLoc = currentParser().currentTokenLocation;
     int SavedTok = CurTok;
     getNextToken(); // consume type
     
@@ -1731,7 +1770,9 @@ std::unique_ptr<ExprAST> ParsePrimary() {
         RecoverAfterExpressionError();
         return nullptr;
       }
-      return std::make_unique<CastExprAST>(TypeName, std::move(Operand));
+      auto cast = std::make_unique<CastExprAST>(TypeName, std::move(Operand));
+      cast->setSourceLocation(typeLoc);
+      return cast;
     } else {
       // Not a cast, restore state and continue with default handling
       // This shouldn't happen in normal parsing flow, but handle it gracefully
@@ -1761,26 +1802,53 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case tok_identifier:
     return ParseIdentifierExpr();
   case tok_this:
-    getNextToken(); // consume 'this'
-    return std::make_unique<ThisExprAST>();
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'this'
+      auto expr = std::make_unique<ThisExprAST>();
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_base:
-    getNextToken(); // consume 'base'
-    return std::make_unique<BaseExprAST>();
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'base'
+      auto expr = std::make_unique<BaseExprAST>();
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_number:
     return ParseNumberExpr();
   case tok_true:
-    getNextToken(); // consume 'true'
-    return std::make_unique<BoolExprAST>(true);
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'true'
+      auto expr = std::make_unique<BoolExprAST>(true);
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_false:
-    getNextToken(); // consume 'false'
-    return std::make_unique<BoolExprAST>(false);
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'false'
+      auto expr = std::make_unique<BoolExprAST>(false);
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_null:
-    getNextToken(); // consume 'null'
-    return std::make_unique<NullExprAST>();
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'null'
+      auto expr = std::make_unique<NullExprAST>();
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_string_literal:
     {
       std::string literal = StringVal;
+      SourceLocation loc = currentParser().currentTokenLocation;
       auto Result = std::make_unique<StringExprAST>(literal);
+      Result->setSourceLocation(loc);
       getNextToken(); // consume the string literal
       if (CurTok == '(') {
         std::vector<std::unique_ptr<ExprAST>> Args;
@@ -1789,10 +1857,12 @@ std::unique_ptr<ExprAST> ParsePrimary() {
         std::vector<SourceLocation> ArgEqualLocs;
         if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
           return nullptr;
-        return std::make_unique<CallExprAST>(literal, std::move(Args),
-                                             std::move(ArgNames),
-                                             std::move(ArgNameLocs),
-                                             std::move(ArgEqualLocs));
+        auto call = std::make_unique<CallExprAST>(literal, std::move(Args),
+                                                  std::move(ArgNames),
+                                                  std::move(ArgNameLocs),
+                                                  std::move(ArgEqualLocs));
+        call->setSourceLocation(loc);
+        return call;
       }
       return std::move(Result);
     }
@@ -1802,17 +1872,22 @@ std::unique_ptr<ExprAST> ParsePrimary() {
     return ParseInterpolatedStringExpr();
   case tok_char_literal:
     {
+      SourceLocation loc = currentParser().currentTokenLocation;
       auto Result = std::make_unique<CharExprAST>(CharVal);
+      Result->setSourceLocation(loc);
       getNextToken(); // consume the character literal
       return std::move(Result);
     }
   case tok_ref: {
+    SourceLocation loc = currentParser().currentTokenLocation;
     getNextToken(); // consume 'ref'
     SkipNewlines();
     auto Operand = ParsePrimaryWithPostfix();
     if (!Operand)
       return nullptr;
-    return std::make_unique<RefExprAST>(std::move(Operand));
+    auto expr = std::make_unique<RefExprAST>(std::move(Operand));
+    expr->setSourceLocation(loc);
+    return expr;
   }
   case '(':
     return ParseParenExpr();
@@ -1864,6 +1939,7 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     }
 
     // Now know this is a binop
+    SourceLocation opLoc = currentParser().currentTokenLocation;
     std::string BinOp;
     
     // Convert token to operator string
@@ -1967,6 +2043,7 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     // Merge LHS/RHS.
     LHS =
         std::make_unique<BinaryExprAST>(BinOp, std::move(LHS), std::move(RHS));
+    LHS->setSourceLocation(opLoc);
   }
 }
 
@@ -2001,11 +2078,14 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       if (!sameLine || atBoundary)
         break;
       // Postfix increment/decrement
+      SourceLocation opLoc = currentParser().currentTokenLocation;
       std::string OpStr = (CurTok == tok_inc) ? "++" : "--";
       getNextToken(); // eat the operator
       LHS = std::make_unique<UnaryExprAST>(OpStr, std::move(LHS), false);
+      LHS->setSourceLocation(opLoc);
     } else if (CurTok == tok_dot) {
       // Member access
+      SourceLocation dotLoc = currentParser().currentTokenLocation;
       getNextToken(); // eat '.'
       std::string MemberName;
       std::string MemberGenericSuffix;
@@ -2030,6 +2110,7 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       if (isDestructor) {
         LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
                                                     std::string{}, true);
+        LHS->setSourceLocation(dotLoc);
       } else {
         std::string DecoratedName = MemberName;
         if (!ParseOptionalGenericArgumentList(DecoratedName, true))
@@ -2045,9 +2126,11 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         }
         LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
                                                     std::move(MemberGenericSuffix));
+        LHS->setSourceLocation(dotLoc);
       }
     } else if (CurTok == tok_null_safe_access) {
       // Null-safe member access
+      SourceLocation opLoc = currentParser().currentTokenLocation;
       getNextToken(); // eat '?.'
       if (CurTok == tok_tilde_identifier) {
         reportCompilerError("Null-safe destructor access is not supported");
@@ -2069,9 +2152,11 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         return nullptr;
       }
       LHS = std::make_unique<NullSafeAccessExprAST>(std::move(LHS), MemberName);
+      LHS->setSourceLocation(opLoc);
     } else if (CurTok == tok_arrow) {
       // Pointer member access (-> is syntactic sugar for (@ptr).member)
       const bool allowSafeArrow = !isInUnsafeContext();
+      SourceLocation arrowLoc = currentParser().currentTokenLocation;
       getNextToken(); // eat '->'
       bool isDestructor = false;
       if (CurTok == tok_tilde_identifier)
@@ -2103,19 +2188,23 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         LHS = std::make_unique<MemberAccessExprAST>(
             std::move(LHS), MemberName, std::move(MemberGenericSuffix),
             isDestructor, true);
+        LHS->setSourceLocation(arrowLoc);
       } else {
         // Create (@ptr).member
         auto Deref =
             std::make_unique<UnaryExprAST>("@", std::move(LHS), true, true);
+        Deref->setSourceLocation(arrowLoc);
         LHS = std::make_unique<MemberAccessExprAST>(
             std::move(Deref), MemberName, std::move(MemberGenericSuffix),
             isDestructor, false);
+        LHS->setSourceLocation(arrowLoc);
       }
     } else if (CurTok == '(') {
       std::vector<std::unique_ptr<ExprAST>> Args;
       std::vector<std::string> ArgNames;
       std::vector<SourceLocation> ArgNameLocs;
       std::vector<SourceLocation> ArgEqualLocs;
+      SourceLocation callLoc = currentParser().currentTokenLocation;
       if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
         return nullptr;
       std::unique_ptr<ExprAST> CalleeExpr = std::move(LHS);
@@ -2129,6 +2218,7 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         if (member->isDestructorAccess())
           Call->markDestructorCall(member->getMemberName());
       }
+      Call->setSourceLocation(callLoc);
       LHS = std::move(Call);
     } else {
       break;
@@ -4199,8 +4289,19 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   return Result;
 }
 // Evaluate constant expressions at compile time
-bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
+bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result,
+                                SourceLocation *firstErrorLocation) {
   if (!expr) return false;
+
+  auto noteFailure = [&](const ExprAST *node) {
+    if (!firstErrorLocation || !node)
+      return;
+    if (firstErrorLocation->isValid())
+      return;
+    SourceLocation loc = node->getSourceLocation();
+    if (loc.isValid())
+      *firstErrorLocation = loc;
+  };
 
   auto toDouble = [](const ConstantValue &cv) -> double {
     switch (cv.type) {
@@ -4238,15 +4339,19 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
   }
 
   if (auto parenExpr = dynamic_cast<const ParenExprAST*>(expr)) {
-    if (parenExpr->isTuple() || parenExpr->size() != 1)
+    if (parenExpr->isTuple() || parenExpr->size() != 1) {
+      noteFailure(parenExpr);
       return false;
-    return EvaluateConstantExpression(parenExpr->getElement(0), result);
+    }
+    return EvaluateConstantExpression(parenExpr->getElement(0), result,
+                                      firstErrorLocation);
   }
 
   if (auto binExpr = dynamic_cast<const BinaryExprAST*>(expr)) {
     ConstantValue lhs(0LL), rhs(0LL);
-    if (!EvaluateConstantExpression(binExpr->getLHS(), lhs) ||
-        !EvaluateConstantExpression(binExpr->getRHS(), rhs)) {
+    if (!EvaluateConstantExpression(binExpr->getLHS(), lhs, firstErrorLocation) ||
+        !EvaluateConstantExpression(binExpr->getRHS(), rhs, firstErrorLocation)) {
+      noteFailure(binExpr);
       return false;
     }
 
@@ -4273,6 +4378,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       } else if (op == "!=") {
         compResult = leftVal != rightVal;
       } else {
+        noteFailure(binExpr);
         return false;
       }
 
@@ -4282,6 +4388,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
 
     if (op == "&&" || op == "||") {
       if (lhs.type != ConstantValue::BOOLEAN || rhs.type != ConstantValue::BOOLEAN) {
+        noteFailure(binExpr);
         return false;
       }
 
@@ -4291,7 +4398,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       return true;
     }
 
-    if (op == "+" || op == "-" || op == "*" || op == "/") {
+    if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
       if (isSignedInt(lhs) && isSignedInt(rhs)) {
         long long arithResult = 0;
         if (op == "+") {
@@ -4301,8 +4408,17 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
         } else if (op == "*") {
           arithResult = lhs.intVal * rhs.intVal;
         } else if (op == "/") {
-          if (rhs.intVal == 0) return false;
+          if (rhs.intVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
           arithResult = lhs.intVal / rhs.intVal;
+        } else if (op == "%") {
+          if (rhs.intVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
+          arithResult = lhs.intVal % rhs.intVal;
         }
         result = ConstantValue(arithResult);
         return true;
@@ -4317,16 +4433,31 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
         } else if (op == "*") {
           arithResult = lhs.uintVal * rhs.uintVal;
         } else if (op == "/") {
-          if (rhs.uintVal == 0) return false;
+          if (rhs.uintVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
           arithResult = lhs.uintVal / rhs.uintVal;
+        } else if (op == "%") {
+          if (rhs.uintVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
+          arithResult = lhs.uintVal % rhs.uintVal;
         }
         result = ConstantValue(arithResult);
         return true;
       }
 
+      if (op == "%") {
+        noteFailure(binExpr);
+        return false;
+      }
+
       double leftVal = toDouble(lhs);
       double rightVal = toDouble(rhs);
       if (op == "/" && rightVal == 0.0) {
+        noteFailure(binExpr);
         return false;
       }
 
@@ -4344,11 +4475,64 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       result = ConstantValue(floatResult);
       return true;
     }
+
+    if (op == "<<" || op == ">>") {
+      if (lhs.type == ConstantValue::INTEGER && rhs.type == ConstantValue::INTEGER) {
+        if (op == "<<")
+          result = ConstantValue(lhs.intVal << rhs.intVal);
+        else
+          result = ConstantValue(lhs.intVal >> rhs.intVal);
+        return true;
+      }
+      if (lhs.type == ConstantValue::UNSIGNED_INTEGER &&
+          rhs.type == ConstantValue::UNSIGNED_INTEGER) {
+        if (op == "<<")
+          result = ConstantValue(lhs.uintVal << rhs.uintVal);
+        else
+          result = ConstantValue(lhs.uintVal >> rhs.uintVal);
+        return true;
+      }
+      noteFailure(binExpr);
+      return false;
+    }
+
+    if (op == "&" || op == "|" || op == "^") {
+      if (lhs.type == ConstantValue::INTEGER && rhs.type == ConstantValue::INTEGER) {
+        long long value = lhs.intVal;
+        if (op == "&")
+          value &= rhs.intVal;
+        else if (op == "|")
+          value |= rhs.intVal;
+        else
+          value ^= rhs.intVal;
+        result = ConstantValue(value);
+        return true;
+      }
+      if (lhs.type == ConstantValue::UNSIGNED_INTEGER &&
+          rhs.type == ConstantValue::UNSIGNED_INTEGER) {
+        unsigned long long value = lhs.uintVal;
+        if (op == "&")
+          value &= rhs.uintVal;
+        else if (op == "|")
+          value |= rhs.uintVal;
+        else
+          value ^= rhs.uintVal;
+        result = ConstantValue(value);
+        return true;
+      }
+      noteFailure(binExpr);
+      return false;
+    }
+
+    noteFailure(binExpr);
+    return false;
   }
 
   if (auto unaryExpr = dynamic_cast<const UnaryExprAST*>(expr)) {
     ConstantValue operand(0LL);
-    if (!EvaluateConstantExpression(unaryExpr->getOperand(), operand)) {
+    if (!EvaluateConstantExpression(unaryExpr->getOperand(), operand,
+                                    firstErrorLocation)) {
+      noteFailure(unaryExpr);
       return false;
     }
 
@@ -4381,6 +4565,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
     }
   }
 
+  noteFailure(expr);
   return false;
 }
 

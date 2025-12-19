@@ -10,6 +10,16 @@ string MaybeDefault(string value = null)
     return value
 }
 
+int MixedDefaults(int value = ((1 << 4) | 3) + 2 * (5 % 3))
+{
+    return value
+}
+
+string? MaybeName(string? name = null)
+{
+    return name
+}
+
 class BaseCounter
 {
     protected int start
@@ -47,6 +57,15 @@ int main()
     string fromDefault = MaybeDefault()
     assert fromDefault == null
     assert __hybrid_string_equals(MaybeDefault("set"), "set") == 1
+
+    assert MixedDefaults() == 23
+    assert MixedDefaults(7) == 7
+
+    string? none = MaybeName()
+    assert none == null
+    string? provided = MaybeName("Hybrid")
+    assert provided != null
+    assert __hybrid_string_equals(provided, "Hybrid") == 1
 
     DerivedCounter counter = DerivedCounter()
     assert counter.Bump() == 16
