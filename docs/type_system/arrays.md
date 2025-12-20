@@ -134,6 +134,26 @@ triangle[2][0] = 42
 
 Hybrid lets you mix shapes when you nest arrays more deeply. For example, `int[][,,]` describes an array whose elements are rectangular 3D arrays, while `int[,][]` would be a rectangular 2D shell whose elements are jagged arrays.
 
+## Array Size (.size)
+
+All array values have a `.size` property that returns an `int` count:
+
+- 1D arrays return their element count.
+- Rectangular arrays return the total number of elements across all dimensions.
+- Jagged arrays return the number of rows in the outer array; use `.size` on each inner array to get per-row lengths.
+
+```c
+int[] values = [10, 20, 30]
+int count = values.size          // 3
+
+int[,] grid = [[1, 2, 3], [4, 5, 6]]
+int total = grid.size            // 6
+
+int[][] triangle = [[1], [2, 3], [4, 5, 6]]
+int rows = triangle.size         // 3
+int secondRow = triangle[1].size // 2
+```
+
 ## Array Indexing
 
 ### Element Access
@@ -371,8 +391,7 @@ Array indexing uses `getelementptr` instruction:
 
 ### Current Limitations
 
-1. **Fixed Size**: Arrays must be initialized with literals; dynamic sizing not supported
-2. **Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
+**Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
 
 ### Future Enhancements
 
