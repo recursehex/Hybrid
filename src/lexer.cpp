@@ -476,6 +476,8 @@ int gettok() {
       return tok_unsafe;
     if (lex.identifierStr == "ref")
       return tok_ref;
+    if (lex.identifierStr == "params")
+      return tok_params;
     if (lex.identifierStr == "weak")
       return tok_weak;
     if (lex.identifierStr == "unique")

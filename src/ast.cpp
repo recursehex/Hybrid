@@ -268,6 +268,14 @@ static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
                                   std::string_view label);
 static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
                            std::string_view label);
+static llvm::Value *emitPackedParamsArray(const std::vector<int> &paramIndices,
+                                          const std::vector<ProvidedArgument> &provided,
+                                          const TypeInfo &arrayInfo,
+                                          std::string_view label);
+static bool validateParamsParameterList(const std::vector<Parameter> &params,
+                                        const std::string &functionName);
+static const ExprAST *unwrapRefExpr(const ExprAST *expr);
+static bool typeInfoEquals(const TypeInfo &lhs, const TypeInfo &rhs);
 static llvm::Value *emitManagedStore(llvm::Value *storagePtr,
                                      llvm::Value *incoming,
                                      const TypeInfo &info,
@@ -594,6 +602,8 @@ void RegisterGenericFunctionTemplate(std::unique_ptr<FunctionAST> templ) {
     return;
   PrototypeAST *proto = templ->getProto();
   if (!proto)
+    return;
+  if (!validateParamsParameterList(proto->getArgs(), proto->getName()))
     return;
   genericFunctionTemplateRegistry()[proto->getName()].push_back(
       GenericFunctionTemplate{std::move(templ)});
@@ -2068,15 +2078,43 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
     provided.push_back(std::move(arg));
   }
 
+  auto findParamsIndex = [](const std::vector<bool> &flags) -> int {
+    for (size_t i = 0; i < flags.size(); ++i) {
+      if (flags[i])
+        return static_cast<int>(i);
+    }
+    return -1;
+  };
+
+  const int paramsIndex = findParamsIndex(memberInfo.parameterIsParams);
   std::vector<int> binding(paramCount, -1);
+  std::vector<int> paramsBinding;
   size_t nextPositional = 0;
   std::set<std::string> seenNames;
+  bool paramsNamed = false;
 
   for (std::size_t i = 0; i < provided.size(); ++i) {
     const ProvidedArgument &arg = provided[i];
     if (arg.name.empty()) {
       while (nextPositional < paramCount && binding[nextPositional] != -1)
         ++nextPositional;
+      if (paramsIndex >= 0 &&
+          nextPositional == static_cast<size_t>(paramsIndex)) {
+        if (paramsNamed) {
+          reportCompilerError("Too many arguments provided to call '" +
+                              memberInfo.signature + "'");
+          return nullptr;
+        }
+        for (size_t j = i; j < provided.size(); ++j) {
+          if (!provided[j].name.empty()) {
+            reportCompilerError("Positional argument cannot follow a named argument");
+            return nullptr;
+          }
+          paramsBinding.push_back(static_cast<int>(j));
+        }
+        nextPositional = paramCount;
+        break;
+      }
       if (nextPositional >= paramCount) {
         reportCompilerError("Too many arguments provided to call '" +
                             memberInfo.signature + "'");
@@ -2104,6 +2142,18 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
     }
     size_t paramIndex =
         static_cast<size_t>(nameIt - memberInfo.parameterNames.begin());
+    if (paramsIndex >= 0 &&
+        paramIndex == static_cast<size_t>(paramsIndex)) {
+      if (paramsNamed || !paramsBinding.empty()) {
+        ScopedErrorLocation scoped(arg.nameLoc);
+        reportCompilerError("Duplicate argument for parameter '" + arg.name +
+                            "'");
+        return nullptr;
+      }
+      paramsNamed = true;
+      paramsBinding.push_back(static_cast<int>(i));
+      continue;
+    }
     if (binding[paramIndex] != -1) {
       ScopedErrorLocation scoped(arg.nameLoc);
       reportCompilerError("Duplicate argument for parameter '" + arg.name +
@@ -2120,6 +2170,46 @@ static llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
   resolvedIsRef.reserve(paramCount);
 
   for (std::size_t idx = 0; idx < paramCount; ++idx) {
+    if (paramsIndex >= 0 &&
+        idx == static_cast<size_t>(paramsIndex)) {
+      bool directAllowed = paramsBinding.size() == 1;
+      if (directAllowed) {
+        const auto &arg =
+            provided[static_cast<size_t>(paramsBinding.front())];
+        if (arg.isRef)
+          directAllowed = false;
+
+        const ExprAST *coreArg = unwrapRefExpr(arg.expr);
+        if (directAllowed && coreArg && !coreArg->getTypeName().empty()) {
+          TypeInfo actualInfo =
+              applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+          if (!typeInfoEquals(memberInfo.parameterTypes[idx], actualInfo))
+            directAllowed = false;
+        }
+
+        llvm::Type *expectedArrayType = fnType->getParamType(idx);
+        llvm::Type *actualType = arg.value ? arg.value->getType() : nullptr;
+        if (!actualType || actualType != expectedArrayType)
+          directAllowed = false;
+      }
+
+      if (directAllowed) {
+        const auto &arg =
+            provided[static_cast<size_t>(paramsBinding.front())];
+        resolvedArgs.push_back(arg.value);
+        resolvedIsRef.push_back(arg.isRef);
+      } else {
+        llvm::Value *packed = emitPackedParamsArray(
+            paramsBinding, provided, memberInfo.parameterTypes[idx],
+            memberInfo.signature);
+        if (!packed)
+          return nullptr;
+        resolvedArgs.push_back(packed);
+        resolvedIsRef.push_back(false);
+      }
+      continue;
+    }
+
     if (binding[idx] >= 0) {
       const ProvidedArgument &arg = provided[static_cast<size_t>(binding[idx])];
       resolvedArgs.push_back(arg.value);
@@ -3310,8 +3400,68 @@ static bool resolveDefaultArgument(Parameter &param,
   return true;
 }
 
+static bool validateParamsParameterList(const std::vector<Parameter> &params,
+                                        const std::string &functionName) {
+  int paramsIndex = -1;
+  for (size_t i = 0; i < params.size(); ++i) {
+    const auto &param = params[i];
+    if (!param.IsParams)
+      continue;
+
+    if (paramsIndex != -1) {
+      ScopedErrorLocation scoped(
+          param.ParamsLocation.isValid() ? param.ParamsLocation
+                                         : param.NameLocation);
+      reportCompilerError("Only one params parameter is allowed");
+      return false;
+    }
+
+    paramsIndex = static_cast<int>(i);
+
+    auto scoped = ScopedErrorLocation(
+        param.ParamsLocation.isValid() ? param.ParamsLocation
+                                       : param.NameLocation);
+
+    if (param.IsRef) {
+      reportCompilerError("params parameter '" + param.Name +
+                          "' cannot be declared as ref");
+      return false;
+    }
+
+    if (param.HasDefault) {
+      reportCompilerError("params parameter '" + param.Name +
+                          "' cannot declare a default value");
+      return false;
+    }
+
+    TypeInfo declared = param.DeclaredType;
+    finalizeTypeInfoMetadata(declared);
+    if (!declared.isArray || declared.arrayDepth != 1 ||
+        declared.isMultidimensional) {
+      reportCompilerError("params parameter '" + param.Name +
+                          "' must be a single-dimensional array type");
+      return false;
+    }
+  }
+
+  if (paramsIndex != -1 &&
+      paramsIndex != static_cast<int>(params.size()) - 1) {
+    const auto &param = params[static_cast<size_t>(paramsIndex)];
+    ScopedErrorLocation scoped(
+        param.ParamsLocation.isValid() ? param.ParamsLocation
+                                       : param.NameLocation);
+    reportCompilerError("params parameter must be the final parameter in the list");
+    return false;
+  }
+
+  (void)functionName;
+  return true;
+}
+
 static bool resolveParameterDefaults(std::vector<Parameter> &params,
                                      const std::string &functionName) {
+  if (!validateParamsParameterList(params, functionName))
+    return false;
   for (auto &param : params) {
     if (!resolveDefaultArgument(param, functionName))
       return false;
@@ -3346,6 +3496,7 @@ static std::unique_ptr<ExprAST> instantiateDefaultExpr(
 
 static std::vector<TypeInfo> gatherParamTypes(const std::vector<Parameter> &params);
 static std::vector<bool> gatherParamRefFlags(const std::vector<Parameter> &params);
+static std::vector<bool> gatherParamParamsFlags(const std::vector<Parameter> &params);
 static std::string makeMethodSignatureKey(const std::string &methodName,
                                           const std::vector<TypeInfo> &paramTypes,
                                           const std::vector<bool> &paramIsRef,
@@ -3533,6 +3684,14 @@ static std::vector<bool> gatherParamRefFlags(const std::vector<Parameter> &param
   return flags;
 }
 
+static std::vector<bool> gatherParamParamsFlags(const std::vector<Parameter> &params) {
+  std::vector<bool> flags;
+  flags.reserve(params.size());
+  for (const auto &param : params)
+    flags.push_back(param.IsParams);
+  return flags;
+}
+
 static std::string formatSpecializationSignature(
     const std::string &name, const TypeInfo &returnType, bool returnsByRef,
     const std::vector<TypeInfo> &paramTypes,
@@ -3630,6 +3789,7 @@ static FunctionOverload *registerFunctionOverload(const PrototypeAST &proto,
                                                   const std::string &mangledName) {
   std::vector<TypeInfo> paramTypes = gatherParamTypes(proto.getArgs());
   std::vector<bool> paramIsRef = gatherParamRefFlags(proto.getArgs());
+  std::vector<bool> paramIsParams = gatherParamParamsFlags(proto.getArgs());
   std::vector<std::string> paramNames;
   std::vector<DefaultArgInfo> paramDefaults;
   std::vector<SourceLocation> paramDefaultLocs;
@@ -3661,6 +3821,7 @@ static FunctionOverload *registerFunctionOverload(const PrototypeAST &proto,
     existing->parameterNames = paramNames;
     existing->parameterDefaults = paramDefaults;
     existing->parameterDefaultLocations = paramDefaultLocs;
+    existing->parameterIsParams = paramIsParams;
     if (!proto.getGenericParameters().empty())
       existing->isGenericInstantiation = true;
     return existing;
@@ -3672,6 +3833,7 @@ static FunctionOverload *registerFunctionOverload(const PrototypeAST &proto,
   entry.returnsByRef = proto.returnsByRef();
   entry.parameterTypes = std::move(paramTypes);
   entry.parameterIsRef = std::move(paramIsRef);
+  entry.parameterIsParams = std::move(paramIsParams);
   entry.parameterNames = std::move(paramNames);
   entry.parameterDefaults = std::move(paramDefaults);
   entry.parameterDefaultLocations = std::move(paramDefaultLocs);
@@ -5113,6 +5275,79 @@ static bool expressionIsNullable(const ExprAST *expr) {
   return typeAllowsNull(desc);
 }
 
+class InjectedValueExprAST : public ExprAST {
+public:
+  InjectedValueExprAST(llvm::Value *value, std::string typeName,
+                       bool isTemporary)
+      : Value(value) {
+    setTypeName(typeName);
+    markTemporary(isTemporary);
+  }
+
+  llvm::Value *codegen() override { return Value; }
+
+private:
+  llvm::Value *Value = nullptr;
+};
+
+static llvm::Value *emitPackedParamsArray(
+    const std::vector<int> &paramIndices,
+    const std::vector<ProvidedArgument> &provided,
+    const TypeInfo &arrayInfo,
+    std::string_view label) {
+  TypeInfo arrayInfoCopy = arrayInfo;
+  finalizeTypeInfoMetadata(arrayInfoCopy);
+
+  auto elementInfoOpt = extractElementTypeInfo(arrayInfoCopy);
+  if (!elementInfoOpt)
+    return LogErrorV("Unknown element type in array");
+
+  TypeInfo elementInfo = *elementInfoOpt;
+  std::string elementTypeName = typeNameFromInfo(elementInfo);
+  llvm::Type *elementLLVMType = getTypeFromString(elementTypeName);
+  if (!elementLLVMType) {
+    reportCompilerError("Unknown array element type '" + elementTypeName + "'");
+    return nullptr;
+  }
+
+  const bool elementAllowsNull =
+      typeAllowsNull(elementInfo) || elementInfo.elementNullable ||
+      arrayInfoCopy.elementNullable;
+  if (!elementAllowsNull) {
+    for (int idx : paramIndices) {
+      if (idx < 0 || static_cast<size_t>(idx) >= provided.size())
+        continue;
+      const ExprAST *expr = provided[static_cast<size_t>(idx)].expr;
+      if (expressionIsNullable(unwrapRefExpr(expr))) {
+        reportCompilerError(
+            "Array elements of type '" + elementTypeName + "' cannot be null",
+            "Remove null entries or mark the element type nullable with '?'.");
+        return nullptr;
+      }
+    }
+  }
+
+  std::vector<std::unique_ptr<ExprAST>> elements;
+  elements.reserve(paramIndices.size());
+  for (int idx : paramIndices) {
+    if (idx < 0 || static_cast<size_t>(idx) >= provided.size())
+      return LogErrorV("Unknown element type in array");
+    const auto &arg = provided[static_cast<size_t>(idx)];
+    if (!arg.value)
+      return LogErrorV("Unknown element type in array");
+    std::string typeName = arg.expr ? arg.expr->getTypeName() : "";
+    bool isTemporary = arg.expr ? arg.expr->isTemporary() : false;
+    elements.push_back(std::make_unique<InjectedValueExprAST>(
+        arg.value, std::move(typeName), isTemporary));
+  }
+
+  ArrayExprAST arrayExpr(elementTypeName, std::move(elements));
+  (void)label;
+  return arrayExpr.codegen_with_element_target(elementLLVMType,
+                                               elementTypeName,
+                                               &arrayInfoCopy);
+}
+
 static llvm::Value *materializeAliasPointer(llvm::Value *storage,
                                             const TypeInfo &info,
                                             const std::string &name) {
@@ -5464,6 +5699,7 @@ static bool registerSmartPointerOverload(const std::string &baseName,
   entry.returnsByRef = false;
   entry.parameterTypes = params;
   entry.parameterIsRef.assign(params.size(), false);
+  entry.parameterIsParams.assign(params.size(), false);
   entry.function = fn;
   entry.isGenericInstantiation = true;
   auto &overloads = currentCodegen().functionOverloads;
@@ -6137,6 +6373,7 @@ static bool emitSmartPointerHelpers(const std::string &constructedName,
     member.returnType = returnType;
     member.parameterTypes = {selfType};
     member.parameterIsRef = {true};
+    member.parameterIsParams = {false};
     member.returnsByRef = returnsByRef;
     member.directFunction = fn;
     metadata.methodInfo[name] = std::move(member);
@@ -7345,6 +7582,7 @@ void InitializeModule() {
   printOverload.returnsByRef = false;
   printOverload.parameterTypes.push_back(makeTypeInfo("int"));
   printOverload.parameterIsRef.push_back(false);
+  printOverload.parameterIsParams.push_back(false);
   printOverload.isExtern = true;
   printOverload.function = PrintFunc;
   CG.functionOverloads["print"].push_back(std::move(printOverload));
@@ -7363,6 +7601,7 @@ void InitializeModule() {
   printStringOverload.returnsByRef = false;
   printStringOverload.parameterTypes.push_back(makeTypeInfo("string"));
   printStringOverload.parameterIsRef.push_back(false);
+  printStringOverload.parameterIsParams.push_back(false);
   printStringOverload.isExtern = true;
   printStringOverload.function = PrintStringFunc;
   CG.functionOverloads["print"].push_back(std::move(printStringOverload));
@@ -13481,7 +13720,17 @@ static llvm::Value *emitResolvedCallInternal(
     FunctionOverload *overload = nullptr;
     llvm::Function *function = nullptr;
     std::vector<int> binding;
+    std::vector<int> paramsBinding;
+    bool paramsDirect = false;
     unsigned conversions = 0;
+  };
+
+  auto findParamsIndex = [](const std::vector<bool> &flags) -> int {
+    for (size_t i = 0; i < flags.size(); ++i) {
+      if (flags[i])
+        return static_cast<int>(i);
+    }
+    return -1;
   };
 
   std::vector<FunctionOverload *> overloadList;
@@ -13575,14 +13824,34 @@ static llvm::Value *emitResolvedCallInternal(
 
     const size_t paramCount = overload->parameterTypes.size();
     std::vector<int> binding(paramCount, -1);
+    std::vector<int> paramsBinding;
+    const int paramsIndex = findParamsIndex(overload->parameterIsParams);
     size_t nextPositional = 0;
     bool failed = false;
+    bool paramsNamed = false;
 
     for (size_t i = 0; i < provided->size(); ++i) {
       const auto &arg = (*provided)[i];
       if (arg.name.empty()) {
         while (nextPositional < paramCount && binding[nextPositional] != -1)
           ++nextPositional;
+        if (paramsIndex >= 0 &&
+            nextPositional == static_cast<size_t>(paramsIndex)) {
+          if (paramsNamed) {
+            failed = true;
+            sawTooManyArgs = true;
+            break;
+          }
+          for (size_t j = i; j < provided->size(); ++j) {
+            if (!(*provided)[j].name.empty()) {
+              failed = true;
+              break;
+            }
+            paramsBinding.push_back(static_cast<int>(j));
+          }
+          nextPositional = paramCount;
+          break;
+        }
         if (nextPositional >= paramCount) {
           failed = true;
           sawTooManyArgs = true;
@@ -13601,6 +13870,16 @@ static llvm::Value *emitResolvedCallInternal(
       }
       size_t paramIndex =
           static_cast<size_t>(nameIt - overload->parameterNames.begin());
+      if (paramsIndex >= 0 &&
+          paramIndex == static_cast<size_t>(paramsIndex)) {
+        if (paramsNamed || !paramsBinding.empty()) {
+          failed = true;
+          break;
+        }
+        paramsNamed = true;
+        paramsBinding.push_back(static_cast<int>(i));
+        continue;
+      }
       if (binding[paramIndex] != -1) {
         failed = true;
         break;
@@ -13612,6 +13891,10 @@ static llvm::Value *emitResolvedCallInternal(
       continue;
 
     for (size_t idx = 0; idx < paramCount; ++idx) {
+      if (paramsIndex >= 0 &&
+          idx == static_cast<size_t>(paramsIndex)) {
+        continue;
+      }
       if (binding[idx] != -1)
         continue;
       const bool hasDefault =
@@ -13631,7 +13914,58 @@ static llvm::Value *emitResolvedCallInternal(
     bool compatible = true;
     unsigned conversions = 0;
 
+    auto checkCompatibility = [&](const ExprAST *argExpr,
+                                  llvm::Value *argValue,
+                                  const TypeInfo &expectedInfo,
+                                  llvm::Type *expectedType,
+                                  unsigned &conversionCount) -> bool {
+      const ExprAST *coreArg = unwrapRefExpr(argExpr);
+      if (coreArg && !coreArg->getTypeName().empty()) {
+        TypeInfo actualInfo =
+            applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+        const bool expectedIsArray =
+            expectedInfo.isArray || expectedInfo.arrayDepth > 0;
+        const bool actualIsArray =
+            actualInfo.isArray || actualInfo.arrayDepth > 0;
+        if ((expectedIsArray || actualIsArray) &&
+            !typeInfoEquals(expectedInfo, actualInfo)) {
+          return false;
+        }
+        const bool expectedHasGenerics = !expectedInfo.typeArguments.empty();
+        const bool actualHasGenerics = !actualInfo.typeArguments.empty();
+        if ((expectedHasGenerics || actualHasGenerics) &&
+            !typeInfoEquals(expectedInfo, actualInfo)) {
+          return false;
+        }
+      }
+
+      llvm::Type *ActualType = expectedType;
+      if (argValue)
+        ActualType = argValue->getType();
+
+      if (ActualType == expectedType)
+        return true;
+
+      if (ActualType && expectedType && ActualType->isPointerTy() &&
+          expectedType->isPointerTy()) {
+        ++conversionCount;
+        return true;
+      }
+
+      if (ActualType && expectedType &&
+          areTypesCompatible(ActualType, expectedType)) {
+        ++conversionCount;
+        return true;
+      }
+
+      return false;
+    };
+
     for (size_t idx = 0; idx < paramCount; ++idx) {
+      if (paramsIndex >= 0 &&
+          idx == static_cast<size_t>(paramsIndex))
+        continue;
+
       bool argIsRef = binding[idx] >= 0
                           ? (*provided)[static_cast<size_t>(binding[idx])].isRef
                           : overload->parameterIsRef[idx];
@@ -13641,64 +13975,89 @@ static llvm::Value *emitResolvedCallInternal(
       }
 
       const ExprAST *argExpr = nullptr;
+      llvm::Value *argValue = nullptr;
       if (binding[idx] >= 0) {
-        argExpr = (*provided)[static_cast<size_t>(binding[idx])].expr;
-      }
-      const ExprAST *coreArg = unwrapRefExpr(argExpr);
-      if (coreArg && !coreArg->getTypeName().empty()) {
-        TypeInfo expectedInfo = overload->parameterTypes[idx];
-        TypeInfo actualInfo =
-            applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
-        const bool expectedIsArray =
-            expectedInfo.isArray || expectedInfo.arrayDepth > 0;
-        const bool actualIsArray =
-            actualInfo.isArray || actualInfo.arrayDepth > 0;
-        if ((expectedIsArray || actualIsArray) &&
-            !typeInfoEquals(expectedInfo, actualInfo)) {
-          compatible = false;
-          break;
-        }
-        const bool expectedHasGenerics = !expectedInfo.typeArguments.empty();
-        const bool actualHasGenerics = !actualInfo.typeArguments.empty();
-        if ((expectedHasGenerics || actualHasGenerics) &&
-            !typeInfoEquals(expectedInfo, actualInfo)) {
-          compatible = false;
-          break;
-        }
+        const auto &boundArg = (*provided)[static_cast<size_t>(binding[idx])];
+        argExpr = boundArg.expr;
+        argValue = boundArg.value;
       }
 
-      llvm::Type *ExpectedType =
+      llvm::Type *expectedType =
           CandidateFunc->getFunctionType()->getParamType(idx);
-      llvm::Type *ActualType = ExpectedType;
-      if (binding[idx] >= 0 &&
-          (*provided)[static_cast<size_t>(binding[idx])].value) {
-        ActualType =
-            (*provided)[static_cast<size_t>(binding[idx])].value->getType();
+      if (!checkCompatibility(argExpr, argValue,
+                              overload->parameterTypes[idx], expectedType,
+                              conversions)) {
+        compatible = false;
+        break;
       }
+    }
 
-      if (ActualType == ExpectedType)
-        continue;
+    if (compatible && paramsIndex >= 0) {
+      if (paramsIndex >= static_cast<int>(overload->parameterIsRef.size()) ||
+          overload->parameterIsRef[static_cast<size_t>(paramsIndex)]) {
+        compatible = false;
+      } else if (!paramsBinding.empty()) {
+        TypeInfo arrayInfo = overload->parameterTypes[static_cast<size_t>(paramsIndex)];
+        llvm::Type *expectedArrayType =
+            CandidateFunc->getFunctionType()->getParamType(
+                static_cast<size_t>(paramsIndex));
 
-      if (ActualType && ExpectedType && ActualType->isPointerTy() &&
-          ExpectedType->isPointerTy()) {
-        ++conversions;
-        continue;
+        bool directAllowed = paramsBinding.size() == 1;
+        if (directAllowed) {
+          const auto &arg = (*provided)[static_cast<size_t>(paramsBinding.front())];
+          if (arg.isRef)
+            directAllowed = false;
+
+          const ExprAST *coreArg = unwrapRefExpr(arg.expr);
+          if (directAllowed && coreArg && !coreArg->getTypeName().empty()) {
+            TypeInfo actualInfo =
+                applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+            if (!typeInfoEquals(arrayInfo, actualInfo))
+              directAllowed = false;
+          }
+
+          llvm::Type *actualType =
+              arg.value ? arg.value->getType() : nullptr;
+          if (!actualType || actualType != expectedArrayType)
+            directAllowed = false;
+        }
+
+        if (directAllowed) {
+          cand.paramsDirect = true;
+        } else {
+          auto elementInfo = extractElementTypeInfo(arrayInfo);
+          if (!elementInfo) {
+            compatible = false;
+          } else {
+            std::string elementTypeName = typeNameFromInfo(*elementInfo);
+            llvm::Type *expectedElementType =
+                getTypeFromString(elementTypeName);
+            if (!expectedElementType) {
+              compatible = false;
+            } else {
+              for (int argIndex : paramsBinding) {
+                const auto &arg = (*provided)[static_cast<size_t>(argIndex)];
+                if (arg.isRef) {
+                  compatible = false;
+                  break;
+                }
+                if (!checkCompatibility(arg.expr, arg.value, *elementInfo,
+                                        expectedElementType, conversions)) {
+                  compatible = false;
+                  break;
+                }
+              }
+            }
+          }
+        }
       }
-
-      if (ActualType && ExpectedType &&
-          areTypesCompatible(ActualType, ExpectedType)) {
-        ++conversions;
-        continue;
-      }
-
-      compatible = false;
-      break;
     }
 
     if (!compatible)
       continue;
 
     cand.binding = std::move(binding);
+    cand.paramsBinding = std::move(paramsBinding);
     cand.conversions = conversions;
     cand.function = CandidateFunc;
     viable.push_back(std::move(cand));
@@ -13765,8 +14124,27 @@ static llvm::Value *emitResolvedCallInternal(
   std::vector<bool> CallArgIsRef;
   CallArgIsRef.reserve(selected->binding.size());
   std::vector<std::unique_ptr<ExprAST>> ownedDefaultExprs;
+  const int paramsIndex = findParamsIndex(chosen->parameterIsParams);
 
   for (size_t idx = 0; idx < selected->binding.size(); ++idx) {
+    if (paramsIndex >= 0 &&
+        idx == static_cast<size_t>(paramsIndex)) {
+      if (selected->paramsDirect) {
+        const auto &arg =
+            (*provided)[static_cast<size_t>(selected->paramsBinding.front())];
+        CallArgs.push_back(arg.value);
+        CallArgIsRef.push_back(arg.isRef);
+      } else {
+        llvm::Value *packed =
+            emitPackedParamsArray(selected->paramsBinding, *provided,
+                                  chosen->parameterTypes[idx], calleeBase);
+        if (!packed)
+          return nullptr;
+        CallArgs.push_back(packed);
+        CallArgIsRef.push_back(false);
+      }
+      continue;
+    }
     int bindingIndex = selected->binding[idx];
     if (bindingIndex >= 0) {
       const auto &arg = (*provided)[static_cast<size_t>(bindingIndex)];
@@ -14393,8 +14771,12 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   FunctionOverload *forcedOverload = nullptr;
+  const bool hasParamsParam = std::ranges::any_of(
+      memberInfo.parameterIsParams,
+      [](bool isParams) { return isParams; });
   if (memberInfo.directFunction &&
-      ArgValues.size() == memberInfo.parameterTypes.size()) {
+      ArgValues.size() == memberInfo.parameterTypes.size() &&
+      !hasParamsParam) {
     llvm::Function *DirectFunc = memberInfo.directFunction;
     for (size_t idx = 0; idx < ArgValues.size(); ++idx) {
       llvm::Value *argVal = ArgValues[idx];
@@ -17537,6 +17919,7 @@ llvm::Type *StructAST::codegen() {
     memberInfo.returnType = applyActiveTypeBindings(Proto->getReturnTypeInfo());
     memberInfo.parameterTypes = gatherParamTypes(Proto->getArgs());
     memberInfo.parameterIsRef = gatherParamRefFlags(Proto->getArgs());
+    memberInfo.parameterIsParams = gatherParamParamsFlags(Proto->getArgs());
     memberInfo.parameterNames.reserve(Proto->getArgs().size());
     memberInfo.parameterDefaults.reserve(Proto->getArgs().size());
     memberInfo.parameterDefaultLocations.reserve(Proto->getArgs().size());

@@ -141,6 +141,9 @@ enum Token {
   // reference type
   tok_ref = -89,              // ref
 
+  // variadic parameter keyword
+  tok_params = -108,          // params
+
   // interpolated string tokens
   tok_interpolated_string_start = -90,    // $"
   tok_interpolated_string_segment = -91,

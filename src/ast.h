@@ -1035,12 +1035,14 @@ struct Parameter {
   std::string Type;
   std::string Name;
   bool IsRef = false;
+  bool IsParams = false;
   TypeInfo DeclaredType;
   bool HasDefault = false;
   std::unique_ptr<ExprAST> DefaultValue;
   DefaultArgInfo ResolvedDefault;
   SourceLocation NameLocation{};
   SourceLocation DefaultEqualsLocation{};
+  SourceLocation ParamsLocation{};
 };
 
 /// PrototypeAST - Represents the "prototype" for a function,

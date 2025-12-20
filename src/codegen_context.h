@@ -46,6 +46,7 @@ struct FunctionOverload {
   bool returnsByRef = false;
   std::vector<TypeInfo> parameterTypes;
   std::vector<bool> parameterIsRef;
+  std::vector<bool> parameterIsParams;
   std::vector<std::string> parameterNames;
   std::vector<DefaultArgInfo> parameterDefaults;
   std::vector<SourceLocation> parameterDefaultLocations;
@@ -64,6 +65,7 @@ struct CompositeMemberInfo {
   TypeInfo returnType;
   std::vector<TypeInfo> parameterTypes;
   std::vector<bool> parameterIsRef;
+  std::vector<bool> parameterIsParams;
   std::vector<std::string> parameterNames;
   std::vector<DefaultArgInfo> parameterDefaults;
   std::vector<SourceLocation> parameterDefaultLocations;

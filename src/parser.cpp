@@ -1333,6 +1333,8 @@ static void setDiagnosticLocation(SourceLocation loc) {
 static bool ValidateParameterDefaults(const std::vector<Parameter> &Args) {
   bool sawDefault = false;
   for (const auto &param : Args) {
+    if (param.IsParams)
+      return true;
     if (param.HasDefault) {
       sawDefault = true;
       continue;
@@ -2306,6 +2308,15 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
     // Parse parameters
     while (true) {
       SkipNewlines();
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
       // Check for ref parameter
       bool paramIsRef = false;
       if (CurTok == tok_ref) {
@@ -2332,8 +2343,10 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
       param.Type = ParamType;
       param.Name = ParamName;
       param.IsRef = paramIsRef;
+      param.IsParams = paramIsParams;
       param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
       param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
 
       SkipNewlines();
       if (CurTok == '=') {
@@ -3484,6 +3497,15 @@ bool ParseTypeIdentifier(bool isRef) {
     if (CurTok != ')') {
       while (true) {
         SkipNewlines();
+        bool paramIsParams = false;
+        SourceLocation paramsLoc{};
+        if (CurTok == tok_params) {
+          paramIsParams = true;
+          paramsLoc = currentParser().currentTokenLocation;
+          getNextToken(); // eat 'params'
+          SkipNewlines();
+        }
+
         // Check for ref parameter
         bool paramIsRef = false;
         if (CurTok == tok_ref) {
@@ -3516,8 +3538,10 @@ bool ParseTypeIdentifier(bool isRef) {
         param.Type = ParamType;
         param.Name = ParamName;
         param.IsRef = paramIsRef;
+        param.IsParams = paramIsParams;
         param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
         param.NameLocation = nameLoc;
+        param.ParamsLocation = paramsLoc;
         SkipNewlines();
         if (CurTok == '=') {
           param.HasDefault = true;
@@ -3791,6 +3815,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     std::vector<Parameter> Args;
     while (CurTok != ')' && CurTok != tok_eof) {
       SkipNewlines();
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
       if (!IsValidType()) {
         LogError("Expected parameter type");
         return false;
@@ -3815,8 +3848,10 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       param.Type = ParamType;
       param.Name = ParamName;
       param.IsRef = false;
+      param.IsParams = paramIsParams;
       param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
       param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
       SkipNewlines();
       if (CurTok == '=') {
         param.HasDefault = true;
@@ -3902,6 +3937,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
     std::vector<Parameter> Args;
     while (CurTok != ')' && CurTok != tok_eof) {
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
       bool paramIsRef = false;
       if (CurTok == tok_ref) {
         paramIsRef = true;
@@ -3929,8 +3973,10 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       param.Type = ParamType;
       param.Name = ParamName;
       param.IsRef = paramIsRef;
+      param.IsParams = paramIsParams;
       param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
       param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
       SkipNewlines();
       if (CurTok == '=') {
         param.HasDefault = true;

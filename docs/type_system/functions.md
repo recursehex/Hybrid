@@ -114,6 +114,27 @@ int log(string message, bool writeToFile = true, bool append = true)
 - Variadic parameters cannot have defaults. `ref` parameters may when the expression is const-evaluable; null defaults are only valid when the ref target type itself permits null.
 - Defaults are injected at call sites; function signatures and mangling do not change.
 
+### Variadic Parameters (`params`)
+
+Use `params` on the final parameter to accept a variable number of trailing arguments:
+
+```cs
+int sum(params int[] values)
+{
+    int total = 0
+    for int v in values
+    {
+        total += v
+    }
+    return total
+}
+```
+
+- Exactly one `params` parameter is allowed and it must be the final parameter.
+- The parameter type must be a single-dimensional array (e.g. `int[]`), and `params` cannot be combined with `ref` or default values.
+- Calls may supply zero or more trailing arguments; they are packed into an array of the element type.
+- Supplying a single argument of the exact array type forwards it directly without repacking.
+
 ### Named Arguments
 
 Calls may supply arguments by name, which is required when skipping earlier defaults:
