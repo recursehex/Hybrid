@@ -94,6 +94,62 @@ void hybrid_array_release_array_slot(void *slot) {
   hybrid_release((void *)bytePtr);
 }
 
+void hybrid_array_retain_ref_slot(void *slot) {
+  if (!slot)
+    return;
+  void *value = *(void **)slot;
+  if (value)
+    hybrid_retain(value);
+}
+
+void hybrid_array_retain_array_slot(void *slot) {
+  if (!slot)
+    return;
+  void *payloadPtr = *(void **)slot;
+  if (!payloadPtr)
+    return;
+  unsigned char *bytePtr = (unsigned char *)payloadPtr;
+  bytePtr -= hybrid_array_payload_offset();
+  hybrid_retain((void *)bytePtr);
+}
+
+void *hybrid_array_resize(void *obj, size_t elementSize, size_t elementCount,
+                          hybrid_array_release_fn releaseFn,
+                          hybrid_array_retain_fn retainFn) {
+  if (elementSize == 0)
+    return NULL;
+
+  void *newObj = hybrid_alloc_array(elementSize, elementCount, NULL);
+  if (!newObj)
+    return NULL;
+
+  if (releaseFn)
+    hybrid_array_set_release(newObj, releaseFn);
+
+  if (!obj || elementCount == 0)
+    return newObj;
+
+  hybrid_array_header_t *oldHeader = (hybrid_array_header_t *)obj;
+  size_t copyCount = oldHeader->length < elementCount
+                         ? oldHeader->length
+                         : elementCount;
+  if (copyCount == 0)
+    return newObj;
+
+  unsigned char *oldPayload =
+      (unsigned char *)obj + hybrid_array_payload_offset();
+  unsigned char *newPayload =
+      (unsigned char *)newObj + hybrid_array_payload_offset();
+  memcpy(newPayload, oldPayload, copyCount * elementSize);
+
+  if (retainFn) {
+    for (size_t idx = 0; idx < copyCount; ++idx)
+      retainFn(newPayload + idx * elementSize);
+  }
+
+  return newObj;
+}
+
 // Interface lookup
 const void **hybrid_lookup_interface_table(const HybridTypeDescriptor *typeDesc,
                                            const HybridTypeDescriptor *interfaceDesc) {

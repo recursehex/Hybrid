@@ -227,6 +227,7 @@ Hybrid exposes `new` and `free` for explicit heap management on top of ARC:
 
 - `new Type(args)` or `new(args)` allocate ARC-managed objects and run constructors. The type can be inferred from the assignment target.
 - `new Type[len]` or `new[len]` allocate a 1-D array, zero-initialized with the length stored alongside the data for bounds checks.
+- `new Type[len1, len2]` or `new[len1, len2]` allocate a rectangular array with one bound per dimension.
 - `free expr` schedules an explicit ARC release. Its use is rare, as ARC still releases automatically, and is only valid for ARC-managed references (classes, arrays, and pointers to those). Smart pointers and stack values reject `free`.
 
 See `docs/memory/heap_allocation.md` for full semantics and diagnostics.

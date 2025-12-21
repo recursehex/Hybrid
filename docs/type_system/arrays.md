@@ -338,14 +338,32 @@ int getGlobalScore(int index)
 ## Heap Allocation
 
 - `new T[len]` allocates a 1-D array of length `len`, zero-initialized, and returns the `{ ptr, len, dims }` array value Hybrid uses in codegen.
-- `new[len]` is target-typed: the element type is inferred from the assignment target.
+- `new T[len1, len2]` (or more comma-separated bounds) allocates a rectangular array and records each dimension length.
+- `new[len]` or `new[len1, len2]` is target-typed: the element type and rank are inferred from the assignment target.
+- Jagged arrays allocate one dimension at a time (`new[rows]` for the outer array, then `new[cols]` for each row).
 - Arrays allocated with `new` are ARC-managed references. They participate in the same retain/release flow as class instances, but explicit `free` is optional, as ARC releases automatically when the last strong reference goes out of scope. `free` is only valid on ARC-managed references; stack arrays and smart pointers reject it.
 
 ```cs
-int[] numbers = new int[5]  // Allocates an int array of length 5
-int[] inferred = new[10]    // Type inferred from target
+int[] numbers = new int[5]     // Allocates an int array of length 5
+int[] inferred = new[10]       // Type inferred from target
+int[,] grid = new[2, 3]        // 2x3 rectangular array
+int[][] rows = new[4]          // Jagged outer array
+rows[0] = new[2]               // Allocate a row
 
-free numbers                // Optional explicit release
+free numbers                   // Optional explicit release
+```
+
+## Resizing with `new`
+
+Arrays are fixed-size once allocated. To resize an existing array, assign a `new` array expression to it. The runtime allocates a new array, copies existing elements up to the new length, and zero-initializes any new slots. Assigning an array literal of a different length is an error.
+
+```cs
+int[] values = [1, 2, 3]
+values = new[5]        // values == [1, 2, 3, 0, 0]
+values = new int[2]    // values == [1, 2]
+
+int[,] grid = new[2, 2]
+grid = new[3, 2]       // Keeps the first 4 elements in row-major order
 ```
 
 ## Implementation Details

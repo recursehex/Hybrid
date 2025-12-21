@@ -1001,24 +1001,44 @@ static std::unique_ptr<ExprAST> ParseNewExpression() {
                       "Provide a length expression like 'new int[5]'.");
     }
 
-    auto Length = ParseExpression();
-    if (!Length)
-      return nullptr;
+    std::vector<std::unique_ptr<ExprAST>> bounds;
+    while (true) {
+      auto Length = ParseExpression();
+      if (!Length)
+        return nullptr;
+      bounds.push_back(std::move(Length));
 
-    SkipNewlines();
+      SkipNewlines();
+      if (CurTok != ',')
+        break;
+      getNextToken(); // eat ','
+      SkipNewlines();
+      if (CurTok == tok_eof || CurTok == tok_newline || CurTok == ']') {
+        return LogError("Expected array size expression after ',' in 'new' expression");
+      }
+    }
+
     if (CurTok != ']') {
-      return LogError("Expected ']' after array size in 'new' expression");
+      return LogError("Expected ']' after array bounds in 'new' expression");
     }
     getNextToken(); // eat ']'
 
     auto NewExpr = std::make_unique<NewExprAST>(
         typeName, std::vector<std::unique_ptr<ExprAST>>{},
         std::vector<std::string>{}, std::vector<SourceLocation>{},
-        std::vector<SourceLocation>{}, std::move(Length), true, !sawType);
+        std::vector<SourceLocation>{}, std::move(bounds), true, !sawType);
     if (!typeName.empty()) {
       std::string resultType = typeName;
-      if (resultType.size() < 2 || resultType.substr(resultType.size() - 2) != "[]")
-        resultType += "[]";
+      if (resultType.find('[') == std::string::npos) {
+        size_t boundCount = NewExpr->getArraySizes().size();
+        if (boundCount > 1) {
+          resultType += "[";
+          resultType.append(boundCount - 1, ',');
+          resultType += "]";
+        } else {
+          resultType += "[]";
+        }
+      }
       NewExpr->setTypeName(resultType);
     }
     NewExpr->markTemporary();
@@ -1044,7 +1064,8 @@ static std::unique_ptr<ExprAST> ParseNewExpression() {
 
   auto NewExpr = std::make_unique<NewExprAST>(
       typeName, std::move(Args), std::move(ArgNames),
-      std::move(ArgNameLocs), std::move(ArgEqualLocs), nullptr, false,
+      std::move(ArgNameLocs), std::move(ArgEqualLocs),
+      std::vector<std::unique_ptr<ExprAST>>{}, false,
       !sawType);
   if (!typeName.empty())
     NewExpr->setTypeName(typeName);

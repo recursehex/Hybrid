@@ -3,11 +3,13 @@
 #include "hybrid_runtime.h"
 #include "memory/ref_count.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -424,6 +426,64 @@ void hybrid_array_release_array_slot(void *slot) {
   auto *bytePtr = static_cast<std::byte *>(payloadPtr);
   bytePtr -= static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
   hybrid_release(static_cast<void *>(bytePtr));
+}
+
+void hybrid_array_retain_ref_slot(void *slot) {
+  if (!slot)
+    return;
+  void *value = *static_cast<void **>(slot);
+  if (value)
+    hybrid_retain(value);
+}
+
+void hybrid_array_retain_array_slot(void *slot) {
+  if (!slot)
+    return;
+  void *payloadPtr = *static_cast<void **>(slot);
+  if (!payloadPtr)
+    return;
+  auto *bytePtr = static_cast<std::byte *>(payloadPtr);
+  bytePtr -= static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
+  hybrid_retain(static_cast<void *>(bytePtr));
+}
+
+void *hybrid_array_resize(void *obj, std::size_t elementSize,
+                          std::size_t elementCount,
+                          hybrid_array_release_fn releaseFn,
+                          hybrid_array_retain_fn retainFn) {
+  if (elementSize == 0)
+    return nullptr;
+
+  void *newObj = hybrid_alloc_array(elementSize, elementCount, nullptr);
+  if (!newObj)
+    return nullptr;
+
+  if (releaseFn)
+    hybrid_array_set_release(newObj, releaseFn);
+
+  if (!obj || elementCount == 0)
+    return newObj;
+
+  auto *oldHeader = static_cast<ArrayHeader *>(obj);
+  const std::size_t copyCount =
+      std::min(oldHeader->length, elementCount);
+  if (copyCount == 0)
+    return newObj;
+
+  auto *oldPayload = static_cast<std::byte *>(obj) +
+                     static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
+  auto *newPayload =
+      static_cast<std::byte *>(newObj) +
+      static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
+  std::memcpy(newPayload, oldPayload, copyCount * elementSize);
+
+  if (retainFn) {
+    for (std::size_t idx = 0; idx < copyCount; ++idx) {
+      retainFn(newPayload + idx * elementSize);
+    }
+  }
+
+  return newObj;
 }
 
 void *hybrid_retain(void *obj) {

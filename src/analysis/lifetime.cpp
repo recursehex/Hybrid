@@ -303,8 +303,10 @@ void LifetimeAnalyzer::walkExpression(ExprAST &expr, LifetimePlan &plan) {
       if (arg)
         walkExpression(*arg, plan);
     }
-    if (auto *length = newExpr->getArraySize())
-      walkExpression(*length, plan);
+    for (const auto &length : newExpr->getArraySizes()) {
+      if (length)
+        walkExpression(*length, plan);
+    }
     return;
   }
   if (auto *unary = dynamic_cast<UnaryExprAST *>(&expr)) {

@@ -27,6 +27,7 @@ typedef _Atomic(uint32_t) hybrid_atomic_u32;
 typedef struct HybridTypeDescriptor HybridTypeDescriptor;
 typedef struct HybridSharedControlBlock HybridSharedControlBlock;
 typedef void (*hybrid_array_release_fn)(void *elementSlot);
+typedef void (*hybrid_array_retain_fn)(void *elementSlot);
 
 typedef struct HybridInterfaceEntry {
   const HybridTypeDescriptor *interfaceType;
@@ -224,6 +225,11 @@ void hybrid_array_set_release(void *obj, hybrid_array_release_fn releaseFn);
 void hybrid_array_dealloc(void *obj);
 void hybrid_array_release_ref_slot(void *slot);
 void hybrid_array_release_array_slot(void *slot);
+void hybrid_array_retain_ref_slot(void *slot);
+void hybrid_array_retain_array_slot(void *slot);
+void *hybrid_array_resize(void *obj, size_t elementSize, size_t elementCount,
+                          hybrid_array_release_fn releaseFn,
+                          hybrid_array_retain_fn retainFn);
 void hybrid_free(void *obj);
 void *hybrid_retain(void *obj);
 void hybrid_release(void *obj);

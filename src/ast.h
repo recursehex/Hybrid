@@ -896,7 +896,7 @@ class NewExprAST : public ExprAST {
   std::vector<std::string> ArgNames;
   std::vector<SourceLocation> ArgNameLocations;
   std::vector<SourceLocation> ArgEqualsLocations;
-  std::unique_ptr<ExprAST> ArraySizeExpr;
+  std::vector<std::unique_ptr<ExprAST>> ArraySizeExprs;
   bool ArrayForm = false;
   bool TypeElided = false;
 
@@ -906,14 +906,14 @@ public:
              std::vector<std::string> ArgNames = {},
              std::vector<SourceLocation> ArgNameLocations = {},
              std::vector<SourceLocation> ArgEqualsLocations = {},
-             std::unique_ptr<ExprAST> ArraySizeExpr = nullptr,
+             std::vector<std::unique_ptr<ExprAST>> ArraySizeExprs = {},
              bool IsArray = false,
              bool WasTypeElided = false)
       : RequestedTypeName(std::move(TypeName)), Args(std::move(Args)),
         ArgNames(std::move(ArgNames)),
         ArgNameLocations(std::move(ArgNameLocations)),
         ArgEqualsLocations(std::move(ArgEqualsLocations)),
-        ArraySizeExpr(std::move(ArraySizeExpr)), ArrayForm(IsArray),
+        ArraySizeExprs(std::move(ArraySizeExprs)), ArrayForm(IsArray),
         TypeElided(WasTypeElided) {
     normalizeArgMetadata();
   }
@@ -933,7 +933,12 @@ public:
   [[nodiscard]] const std::vector<SourceLocation> &getArgEqualsLocations() const {
     return ArgEqualsLocations;
   }
-  [[nodiscard]] ExprAST *getArraySize() const { return ArraySizeExpr.get(); }
+  [[nodiscard]] ExprAST *getArraySize() const {
+    return ArraySizeExprs.empty() ? nullptr : ArraySizeExprs.front().get();
+  }
+  [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArraySizes() const {
+    return ArraySizeExprs;
+  }
   void setInferredType(std::string TypeName) {
     if (RequestedTypeName.empty())
       RequestedTypeName = std::move(TypeName);

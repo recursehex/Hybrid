@@ -29,6 +29,18 @@ matrix[1, 0] = 9
 - The compiler enforces rectangular literals. Mismatched row lengths produce `Multidimensional array initializer must be rectangular`.
 - Every dimension length is recorded so both compile-time and runtime bounds checks understand each axis.
 
+### Allocating with `new`
+
+Rectangular arrays can also be allocated with runtime bounds. Provide one bound per dimension:
+
+```c
+int rows = 2
+int cols = 3
+int[,] grid = new[rows, cols]
+```
+
+The resulting `.size` is the total element count (`rows * cols`).
+
 ## Jagged Arrays
 
 ```c

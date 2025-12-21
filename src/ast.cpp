@@ -19,6 +19,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
@@ -1198,6 +1199,138 @@ parseExplicitArrayDimensions(const TypeInfo &info) {
     return {};
 
   return dims;
+}
+
+static std::string formatArrayDims(const std::vector<int64_t> &dims) {
+  if (dims.empty())
+    return "unknown";
+  std::string formatted;
+  for (size_t i = 0; i < dims.size(); ++i) {
+    if (i != 0)
+      formatted += "x";
+    formatted += std::to_string(dims[i]);
+  }
+  return formatted;
+}
+
+static std::vector<int64_t>
+computeArrayLiteralDimensions(const ArrayExprAST *arrayLiteral,
+                              const TypeInfo &declaredInfo) {
+  std::vector<int64_t> dims;
+  if (!arrayLiteral || !declaredInfo.isArray)
+    return dims;
+
+  if (declaredInfo.isMultidimensional && declaredInfo.arrayDepth == 1 &&
+      !declaredInfo.arrayRanks.empty()) {
+    unsigned rank = declaredInfo.arrayRanks.back();
+    if (rank == 0)
+      rank = 1;
+
+    std::vector<size_t> collected;
+    auto ensureDimension = [&](unsigned depth, size_t size) -> bool {
+      if (collected.size() <= depth)
+        collected.push_back(size);
+      else if (collected[depth] != size)
+        return false;
+      return true;
+    };
+
+    std::function<bool(const ArrayExprAST*, unsigned)> collect =
+        [&](const ArrayExprAST *node, unsigned depth) -> bool {
+          size_t count = node->getElements().size();
+          if (!ensureDimension(depth, count))
+            return false;
+
+          if (depth + 1 == rank) {
+            for (const auto &Elem : node->getElements()) {
+              if (dynamic_cast<ArrayExprAST*>(Elem.get()))
+                return false;
+            }
+            return true;
+          }
+
+          for (const auto &Elem : node->getElements()) {
+            auto *SubArray = dynamic_cast<ArrayExprAST*>(Elem.get());
+            if (!SubArray)
+              return false;
+            if (!collect(SubArray, depth + 1))
+              return false;
+          }
+          return true;
+        };
+
+    if (!collect(arrayLiteral, 0))
+      return {};
+
+    if (collected.size() < rank)
+      collected.resize(rank, 0);
+
+    dims.reserve(collected.size());
+    for (size_t sz : collected)
+      dims.push_back(static_cast<int64_t>(sz));
+  } else {
+    dims.push_back(static_cast<int64_t>(arrayLiteral->getElements().size()));
+  }
+
+  return dims;
+}
+
+static std::vector<int64_t>
+resolveKnownArrayDimensions(const std::string &name,
+                            const TypeInfo &arrayInfo) {
+  auto dims = parseExplicitArrayDimensions(arrayInfo);
+  if (!dims.empty())
+    return dims;
+  auto it = ArraySizes.find(name);
+  if (it != ArraySizes.end())
+    return it->second;
+  return {};
+}
+
+static bool validateArrayLiteralAssignmentSize(const std::string &name,
+                                               const TypeInfo &arrayInfo,
+                                               const ArrayExprAST *literal) {
+  if (!literal)
+    return true;
+  auto knownDims = resolveKnownArrayDimensions(name, arrayInfo);
+  auto literalDims = computeArrayLiteralDimensions(literal, arrayInfo);
+  if (!knownDims.empty() && !literalDims.empty() &&
+      literalDims != knownDims) {
+    reportCompilerError(
+        "Array assignment does not match declared size for '" + name + "'",
+        "Declared dimensions: " + formatArrayDims(knownDims) +
+            ", assigned dimensions: " + formatArrayDims(literalDims));
+    return false;
+  }
+  return true;
+}
+
+static bool validateArrayNewBoundsForDeclaration(const TypeInfo &declaredInfo,
+                                                 const ExprAST *initializer,
+                                                 const std::string &name) {
+  if (!initializer || !declaredInfo.isArray)
+    return true;
+
+  const ExprAST *core = unwrapRefExpr(initializer);
+  auto *newExpr = dynamic_cast<const NewExprAST *>(core);
+  if (!newExpr || !newExpr->isArray())
+    return true;
+
+  const auto &bounds = newExpr->getArraySizes();
+  if (bounds.empty())
+    return true;
+
+  unsigned rank =
+      declaredInfo.arrayRanks.empty() ? 1 : std::max(1u, declaredInfo.arrayRanks.back());
+  if (bounds.size() != rank) {
+    reportCompilerError(
+        "Array bounds do not match declared rank for '" +
+            typeNameFromInfo(declaredInfo) + "'",
+        "Expected " + std::to_string(rank) + " bound(s) in 'new'.");
+    return false;
+  }
+
+  return true;
 }
 
 static bool typeHasDestructor(const TypeInfo &info) {
@@ -2422,6 +2555,32 @@ getHybridArrayReleaseArraySlotFunction() {
 }
 
 [[maybe_unused]] static llvm::FunctionCallee
+getHybridArrayRetainRefSlotFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_array_retain_ref_slot", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee
+getHybridArrayRetainArraySlotFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *fnType = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(*TheContext), {voidPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_array_retain_array_slot",
+                                        fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getHybridArrayResizeFunction() {
+  auto *voidPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  auto *sizeTy = getSizeType();
+  auto *cbPtrTy = getArrayReleaseCallbackPointerType();
+  auto *fnType = llvm::FunctionType::get(
+      voidPtrTy, {voidPtrTy, sizeTy, sizeTy, cbPtrTy, cbPtrTy}, false);
+  return TheModule->getOrInsertFunction("hybrid_array_resize", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee
 getHybridArcDebugConfigFunction() {
   auto *intTy = llvm::Type::getInt32Ty(*TheContext);
   auto *fnType = llvm::FunctionType::get(
@@ -2561,6 +2720,23 @@ selectArrayElementReleaseFunction(const TypeInfo &elementInfo,
     fnPtr = Builder->CreateBitCast(
         fnPtr, cbPtrTy,
         buildArcOpLabel(label, "array.releasefn.cast"));
+  }
+  return fnPtr;
+}
+
+static llvm::Value *
+selectArrayElementRetainFunction(const TypeInfo &elementInfo,
+                                 std::string_view label) {
+  llvm::PointerType *cbPtrTy = getArrayReleaseCallbackPointerType();
+  if (!elementInfo.requiresARC() || elementInfo.isSmartPointer())
+    return llvm::ConstantPointerNull::get(cbPtrTy);
+  llvm::FunctionCallee callee = elementInfo.isArray
+                                    ? getHybridArrayRetainArraySlotFunction()
+                                    : getHybridArrayRetainRefSlotFunction();
+  llvm::Value *fnPtr = callee.getCallee();
+  if (fnPtr->getType() != cbPtrTy) {
+    fnPtr = Builder->CreateBitCast(
+        fnPtr, cbPtrTy, buildArcOpLabel(label, "array.retainfn.cast"));
   }
   return fnPtr;
 }
@@ -2785,6 +2961,142 @@ static void emitArrayReleaseValue(llvm::Value *arrayValue,
     Builder->CreateCall(getHybridArcVerifyRuntimeFunction(), {headerPtr});
   }
   Builder->CreateCall(getHybridReleaseFunction(), {headerPtr});
+}
+
+static void emitAbortIf(llvm::Value *condition, std::string_view label) {
+  if (!condition)
+    return;
+  llvm::Function *func = Builder->GetInsertBlock()
+                             ? Builder->GetInsertBlock()->getParent()
+                             : nullptr;
+  if (!func)
+    return;
+
+  std::string base(label);
+  llvm::BasicBlock *abortBB =
+      llvm::BasicBlock::Create(*TheContext, base + ".abort", func);
+  llvm::BasicBlock *okBB =
+      llvm::BasicBlock::Create(*TheContext, base + ".ok", func);
+
+  Builder->CreateCondBr(condition, abortBB, okBB);
+  Builder->SetInsertPoint(abortBB);
+  llvm::Function *AbortFunc = TheModule->getFunction("abort");
+  if (!AbortFunc) {
+    auto *abortTy =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), false);
+    AbortFunc = llvm::Function::Create(abortTy, llvm::Function::ExternalLinkage,
+                                       "abort", TheModule.get());
+  }
+  Builder->CreateCall(AbortFunc);
+  Builder->CreateUnreachable();
+  Builder->SetInsertPoint(okBB);
+}
+
+struct ArrayBoundsInfo {
+  std::vector<llvm::Value *> dims32;
+  llvm::Value *totalSize = nullptr;
+  llvm::Value *totalSize32 = nullptr;
+  std::vector<int64_t> constantDims;
+};
+
+static std::optional<ArrayBoundsInfo>
+emitArrayBoundsInfo(const std::vector<std::unique_ptr<ExprAST>> &bounds,
+                    std::string_view label) {
+  if (bounds.empty())
+    return std::nullopt;
+
+  ArrayBoundsInfo info;
+  info.dims32.reserve(bounds.size());
+  info.constantDims.reserve(bounds.size());
+  bool allConstant = true;
+
+  llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::Value *zero32 = llvm::ConstantInt::get(int32Ty, 0);
+  llvm::Value *negativeFlag = nullptr;
+
+  for (const auto &expr : bounds) {
+    if (!expr)
+      return std::nullopt;
+
+    llvm::Value *value = expr->codegen();
+    if (!value)
+      return std::nullopt;
+
+    if (!value->getType()->isIntegerTy()) {
+      value = castToType(value, int32Ty, "int");
+      if (!value)
+        return std::nullopt;
+    }
+
+    if (!value->getType()->isIntegerTy(32))
+      value = Builder->CreateTruncOrBitCast(value, int32Ty, "array.dim32");
+
+    if (auto *constVal = llvm::dyn_cast<llvm::ConstantInt>(value)) {
+      if (constVal->isNegative()) {
+        reportCompilerError("Array size cannot be negative");
+        return std::nullopt;
+      }
+      info.constantDims.push_back(constVal->getSExtValue());
+    } else {
+      allConstant = false;
+    }
+
+    llvm::Value *isNegative =
+        Builder->CreateICmpSLT(value, zero32, "array.dim.neg");
+    negativeFlag =
+        negativeFlag ? Builder->CreateOr(negativeFlag, isNegative,
+                                         "array.dim.neg.any")
+                     : isNegative;
+    info.dims32.push_back(value);
+  }
+
+  if (negativeFlag) {
+    emitAbortIf(negativeFlag, buildArcOpLabel(label, "array.dim.neg"));
+  }
+
+  llvm::Type *sizeTy = getSizeType();
+  llvm::Value *total = llvm::ConstantInt::get(sizeTy, 1);
+  llvm::Value *overflowFlag = nullptr;
+  llvm::FunctionCallee mulWithOverflow =
+      llvm::Intrinsic::getOrInsertDeclaration(TheModule.get(),
+                                              llvm::Intrinsic::umul_with_overflow,
+                                              {sizeTy});
+
+  for (llvm::Value *dim32 : info.dims32) {
+    llvm::Value *dimSize =
+        Builder->CreateZExt(dim32, sizeTy, "array.dim.size");
+    llvm::Value *result =
+        Builder->CreateCall(mulWithOverflow, {total, dimSize},
+                            "array.size.mul");
+    llvm::Value *nextTotal =
+        Builder->CreateExtractValue(result, 0, "array.size.next");
+    llvm::Value *overflow =
+        Builder->CreateExtractValue(result, 1, "array.size.overflow");
+    overflowFlag =
+        overflowFlag ? Builder->CreateOr(overflowFlag, overflow,
+                                         "array.size.overflow.any")
+                     : overflow;
+    total = nextTotal;
+  }
+
+  if (overflowFlag) {
+    emitAbortIf(overflowFlag, buildArcOpLabel(label, "array.size.overflow"));
+  }
+
+  llvm::Value *maxInt32 =
+      llvm::ConstantInt::get(sizeTy, static_cast<uint64_t>(INT32_MAX));
+  llvm::Value *tooLarge =
+      Builder->CreateICmpUGT(total, maxInt32, "array.size.too.large");
+  emitAbortIf(tooLarge, buildArcOpLabel(label, "array.size.limit"));
+
+  info.totalSize = total;
+  info.totalSize32 =
+      Builder->CreateTruncOrBitCast(total, int32Ty, "array.size32");
+
+  if (!allConstant)
+    info.constantDims.clear();
+
+  return info;
 }
 
 static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
@@ -7833,7 +8145,160 @@ static uint64_t getTypeSizeInBytes(llvm::Type *type) {
     return indexTy->getBitWidth() / 8;
   }
 
+  if (auto *arrayTy = llvm::dyn_cast<llvm::ArrayType>(type)) {
+    uint64_t elemSize = getTypeSizeInBytes(arrayTy->getElementType());
+    if (elemSize == 0)
+      return 0;
+    return elemSize * arrayTy->getNumElements();
+  }
+
+  if (auto *structTy = llvm::dyn_cast<llvm::StructType>(type)) {
+    if (structTy->isOpaque())
+      return 0;
+    uint64_t size = 0;
+    uint64_t maxAlign = 1;
+    auto alignTo = [](uint64_t value, uint64_t align) {
+      if (align == 0)
+        return value;
+      uint64_t rem = value % align;
+      if (rem == 0)
+        return value;
+      return value + (align - rem);
+    };
+    for (llvm::Type *elemTy : structTy->elements()) {
+      uint64_t elemSize = getTypeSizeInBytes(elemTy);
+      if (elemSize == 0)
+        return 0;
+      uint64_t elemAlign = elemSize;
+      size = alignTo(size, elemAlign);
+      size += elemSize;
+      if (elemAlign > maxAlign)
+        maxAlign = elemAlign;
+    }
+    size = alignTo(size, maxAlign);
+    return size;
+  }
+
   return 0;
+}
+
+static bool emitArrayResizeAssignment(llvm::Value *storagePtr,
+                                      const TypeInfo &arrayInfo,
+                                      NewExprAST &newExpr,
+                                      std::string_view label,
+                                      std::vector<int64_t> *constantDimsOut) {
+  if (!storagePtr || !arrayInfo.isArray)
+    return false;
+
+  ParsedTypeDescriptor desc = parseTypeString(arrayInfo.typeName);
+  if (!desc.isArray)
+    return false;
+
+  const auto &bounds = newExpr.getArraySizes();
+  if (bounds.empty())
+    return false;
+
+  unsigned rank =
+      desc.arrayRanks.empty() ? 1 : std::max(1u, desc.arrayRanks.back());
+  if (bounds.size() != rank) {
+    reportCompilerError(
+        "Array bounds do not match declared rank for '" +
+            typeNameFromInfo(arrayInfo) + "'",
+        "Expected " + std::to_string(rank) + " bound(s) in 'new'.");
+    return false;
+  }
+
+  auto boundsInfoOpt =
+      emitArrayBoundsInfo(bounds, buildArcOpLabel(label, "array.resize.bounds"));
+  if (!boundsInfoOpt)
+    return false;
+  const ArrayBoundsInfo &boundsInfo = *boundsInfoOpt;
+  if (constantDimsOut)
+    *constantDimsOut = boundsInfo.constantDims;
+
+  std::string elementTypeName = removeLastArrayGroup(desc.sanitized);
+  if (elementTypeName.empty())
+    elementTypeName = arrayInfo.baseTypeName;
+  llvm::Type *elemType = getTypeFromString(elementTypeName);
+  if (!elemType) {
+    reportCompilerError("Unknown array element type '" + elementTypeName + "'");
+    return false;
+  }
+  TypeInfo elementInfo = makeTypeInfo(elementTypeName);
+  finalizeTypeInfoMetadata(elementInfo);
+
+  uint64_t elemSize = getTypeSizeInBytes(elemType);
+  if (elemSize == 0) {
+    reportCompilerError(
+        "Unable to determine element size for array allocation of '" +
+        elementTypeName + "'");
+    return false;
+  }
+
+  llvm::StructType *arrayStructTy = getArrayStructType(elemType, rank);
+  llvm::Value *oldArrayValue = Builder->CreateLoad(
+      arrayStructTy, storagePtr, buildArcOpLabel(label, "array.resize.old"));
+  llvm::Value *oldHeader = computeArrayHeaderPointer(
+      oldArrayValue, buildArcOpLabel(label, "array.resize.header"));
+
+  llvm::Value *elemSizeVal =
+      llvm::ConstantInt::get(getSizeType(), elemSize);
+  llvm::Value *releaseFn = selectArrayElementReleaseFunction(
+      elementInfo, buildArcOpLabel(label, "array.resize.releasefn"));
+  llvm::Value *retainFn = selectArrayElementRetainFunction(
+      elementInfo, buildArcOpLabel(label, "array.resize.retainfn"));
+  llvm::Value *rawPtr = Builder->CreateCall(
+      getHybridArrayResizeFunction(),
+      {oldHeader, elemSizeVal, boundsInfo.totalSize, releaseFn, retainFn},
+      buildArcOpLabel(label, "array.resize.raw"));
+
+  llvm::Value *rawBytePtr = Builder->CreateBitCast(
+      rawPtr, pointerType(llvm::Type::getInt8Ty(*TheContext)),
+      buildArcOpLabel(label, "array.resize.byteptr"));
+  llvm::Value *payloadBytePtr = Builder->CreateInBoundsGEP(
+      llvm::Type::getInt8Ty(*TheContext), rawBytePtr,
+      llvm::ConstantInt::get(getSizeType(), getArrayPayloadOffsetBytes()),
+      buildArcOpLabel(label, "array.resize.payload.byte"));
+  llvm::Value *dataPtr = Builder->CreateBitCast(
+      payloadBytePtr, pointerType(elemType),
+      buildArcOpLabel(label, "array.resize.payload"));
+
+  llvm::Value *arrayValue = llvm::UndefValue::get(arrayStructTy);
+  llvm::Value *opaqueDataPtr = Builder->CreateBitCast(
+      dataPtr, pointerType(), buildArcOpLabel(label, "array.resize.ptr"));
+  arrayValue = Builder->CreateInsertValue(arrayValue, opaqueDataPtr, {0});
+  arrayValue =
+      Builder->CreateInsertValue(arrayValue, boundsInfo.totalSize32, {1});
+  for (unsigned i = 0; i < rank; ++i) {
+    llvm::Value *dimVal = boundsInfo.dims32[i];
+    arrayValue = Builder->CreateInsertValue(arrayValue, dimVal, {2u, i});
+  }
+
+  emitManagedStore(storagePtr, arrayValue, arrayInfo, label, true);
+  return true;
+}
+
+static ExprAST *unwrapSingleParenExpr(ExprAST *expr) {
+  while (auto *paren = dynamic_cast<ParenExprAST *>(expr)) {
+    if (paren->isTuple() || paren->size() != 1)
+      break;
+    expr = paren->getElement(0);
+  }
+  return expr;
+}
+
+static NewExprAST *extractNewArrayExpr(ExprAST *expr) {
+  expr = unwrapSingleParenExpr(expr);
+  auto *newExpr = dynamic_cast<NewExprAST *>(expr);
+  if (newExpr && newExpr->isArray())
+    return newExpr;
+  return nullptr;
+}
+
+static const ArrayExprAST *extractArrayLiteralExpr(const ExprAST *expr) {
+  auto *mutableExpr = const_cast<ExprAST *>(expr);
+  mutableExpr = unwrapSingleParenExpr(mutableExpr);
+  return dynamic_cast<const ArrayExprAST *>(mutableExpr);
 }
 
 static llvm::Value *convertOffsetToPointerIndex(llvm::Value *offsetValue,
@@ -11477,6 +11942,29 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
+            if (info->isArray) {
+              if (auto *newExpr = extractNewArrayExpr(getRHS())) {
+                std::vector<int64_t> constantDims;
+                if (!emitArrayResizeAssignment(Ptr, *info, *newExpr,
+                                               LHSE->getName(),
+                                               &constantDims))
+                  return nullptr;
+                if (!constantDims.empty())
+                  ArraySizes[LHSE->getName()] = constantDims;
+                else
+                  ArraySizes.erase(LHSE->getName());
+                updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+                setTypeName("void");
+                return llvm::UndefValue::get(
+                    llvm::Type::getVoidTy(*TheContext));
+              }
+
+              if (!validateArrayLiteralAssignmentSize(
+                      LHSE->getName(), *info,
+                      extractArrayLiteralExpr(getRHS()))) {
+                return nullptr;
+              }
+            }
             llvm::Value *rhsValue = emitAssignmentRHS(info);
             if (!rhsValue)
               return nullptr;
@@ -11496,6 +11984,29 @@ llvm::Value *BinaryExprAST::codegen() {
           if (const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName())) {
             if (rhsIsNullable && !typeAllowsNull(*info)) {
               return LogErrorV(("Cannot assign nullable value to non-nullable variable '" + LHSE->getName() + "'").c_str());
+            }
+            if (info->isArray) {
+              if (auto *newExpr = extractNewArrayExpr(getRHS())) {
+                std::vector<int64_t> constantDims;
+                if (!emitArrayResizeAssignment(Variable, *info, *newExpr,
+                                               LHSE->getName(),
+                                               &constantDims))
+                  return nullptr;
+                if (!constantDims.empty())
+                  ArraySizes[LHSE->getName()] = constantDims;
+                else
+                  ArraySizes.erase(LHSE->getName());
+                updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+                setTypeName("void");
+                return llvm::UndefValue::get(
+                    llvm::Type::getVoidTy(*TheContext));
+              }
+
+              if (!validateArrayLiteralAssignmentSize(
+                      LHSE->getName(), *info,
+                      extractArrayLiteralExpr(getRHS()))) {
+                return nullptr;
+              }
             }
           }
 
@@ -11622,6 +12133,29 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Type *ActualLLVMType = getTypeFromString(info->typeName);
             if (!ActualLLVMType)
               return LogErrorV("Invalid type for ref variable");
+            if (info->isArray) {
+              if (auto *newExpr = extractNewArrayExpr(getRHS())) {
+                std::vector<int64_t> constantDims;
+                if (!emitArrayResizeAssignment(Ptr, *info, *newExpr,
+                                               LHSE->getName(),
+                                               &constantDims))
+                  return nullptr;
+                if (!constantDims.empty())
+                  ArraySizes[LHSE->getName()] = constantDims;
+                else
+                  ArraySizes.erase(LHSE->getName());
+                updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+                setTypeName("void");
+                return llvm::UndefValue::get(
+                    llvm::Type::getVoidTy(*TheContext));
+              }
+
+              if (!validateArrayLiteralAssignmentSize(
+                      LHSE->getName(), *info,
+                      extractArrayLiteralExpr(getRHS()))) {
+                return nullptr;
+              }
+            }
             llvm::Value *rhsValue = emitAssignmentRHS(info);
             if (!rhsValue)
               return nullptr;
@@ -11639,6 +12173,29 @@ llvm::Value *BinaryExprAST::codegen() {
           if (const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName())) {
             if (!info->isAlias() && rhsIsNullable && !typeAllowsNull(*info)) {
               return LogErrorV(("Cannot assign nullable value to non-nullable variable '" + LHSE->getName() + "'").c_str());
+            }
+            if (info->isArray) {
+              if (auto *newExpr = extractNewArrayExpr(getRHS())) {
+                std::vector<int64_t> constantDims;
+                if (!emitArrayResizeAssignment(GV, *info, *newExpr,
+                                               LHSE->getName(),
+                                               &constantDims))
+                  return nullptr;
+                if (!constantDims.empty())
+                  ArraySizes[LHSE->getName()] = constantDims;
+                else
+                  ArraySizes.erase(LHSE->getName());
+                updateKnownNonNullOnAssignment(LHSE->getName(), rhsIsNullable);
+                setTypeName("void");
+                return llvm::UndefValue::get(
+                    llvm::Type::getVoidTy(*TheContext));
+              }
+
+              if (!validateArrayLiteralAssignmentSize(
+                      LHSE->getName(), *info,
+                      extractArrayLiteralExpr(getRHS()))) {
+                return nullptr;
+              }
             }
           }
 
@@ -11746,6 +12303,17 @@ llvm::Value *BinaryExprAST::codegen() {
         if (!ElemPtr || !ElemType || !ElemPtr->getType()->isPointerTy())
           return LogErrorV("Invalid array element pointer");
 
+        if (access.elementTypeInfo.isArray) {
+          if (auto *newExpr = extractNewArrayExpr(getRHS())) {
+            if (!emitArrayResizeAssignment(ElemPtr, access.elementTypeInfo,
+                                           *newExpr, "array.element",
+                                           nullptr))
+              return nullptr;
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+          }
+        }
+
         auto *arrayElementRHSVar =
             dynamic_cast<VariableExprAST *>(getRHS());
 
@@ -11848,6 +12416,18 @@ llvm::Value *BinaryExprAST::codegen() {
 
         if (rhsIsNullable && !fieldInfo.allowsNull) {
           return LogErrorV(("Cannot assign nullable value to non-nullable field '" + LHSMA->getMemberName() + "'").c_str());
+        }
+
+        if (fieldInfo.declaredFieldType.isArray) {
+          if (auto *newExpr = extractNewArrayExpr(getRHS())) {
+            if (!emitArrayResizeAssignment(fieldInfo.fieldPtr,
+                                           fieldInfo.declaredFieldType,
+                                           *newExpr, LHSMA->getMemberName(),
+                                           nullptr))
+              return nullptr;
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+          }
         }
 
         std::string diagFieldTypeName = fieldInfo.sanitizedFieldTypeName;
@@ -13141,9 +13721,17 @@ llvm::Value *NewExprAST::codegen() {
   };
 
   if (ArrayForm) {
+    const auto &bounds = getArraySizes();
     std::string arrayTypeName = targetType;
-    if (arrayTypeName.find('[') == std::string::npos)
-      arrayTypeName += "[]";
+    if (arrayTypeName.find('[') == std::string::npos) {
+      if (bounds.size() > 1) {
+        arrayTypeName += "[";
+        arrayTypeName.append(bounds.size() - 1, ',');
+        arrayTypeName += "]";
+      } else {
+        arrayTypeName += "[]";
+      }
+    }
 
     TypeInfo arrayInfo = makeTypeInfo(arrayTypeName);
     finalizeTypeInfoMetadata(arrayInfo);
@@ -13166,37 +13754,22 @@ llvm::Value *NewExprAST::codegen() {
     TypeInfo elementInfo = makeTypeInfo(elementTypeName);
     finalizeTypeInfoMetadata(elementInfo);
 
-    llvm::Value *lengthVal = nullptr;
-    if (ArraySizeExpr) {
-      lengthVal = ArraySizeExpr->codegen();
-      if (!lengthVal)
-        return nullptr;
-    }
-    if (!lengthVal) {
-      reportCompilerError("Array size expression could not be evaluated");
+    unsigned rank =
+        desc.arrayRanks.empty() ? 1 : std::max(1u, desc.arrayRanks.back());
+    if (bounds.size() != rank) {
+      reportCompilerError(
+          "Array bounds do not match declared rank for '" +
+              typeNameFromInfo(arrayInfo) + "'",
+          "Expected " + std::to_string(rank) + " bound(s) in 'new'.");
       return nullptr;
     }
 
-    if (!lengthVal->getType()->isIntegerTy()) {
-      lengthVal = castToType(lengthVal, llvm::Type::getInt32Ty(*TheContext),
-                             "int");
-      if (!lengthVal)
-        return nullptr;
-    }
+    auto boundsInfoOpt =
+        emitArrayBoundsInfo(bounds, buildArcOpLabel("new", "array.bounds"));
+    if (!boundsInfoOpt)
+      return nullptr;
+    const ArrayBoundsInfo &boundsInfo = *boundsInfoOpt;
 
-    llvm::Value *length32 = lengthVal;
-    if (!length32->getType()->isIntegerTy(32))
-      length32 = Builder->CreateTruncOrBitCast(
-          length32, llvm::Type::getInt32Ty(*TheContext), "new.array.len32");
-
-    if (auto *constLen = llvm::dyn_cast<llvm::ConstantInt>(length32)) {
-      if (constLen->isNegative()) {
-        reportCompilerError("Array size cannot be negative");
-        return nullptr;
-      }
-    }
-
-    const llvm::DataLayout &DL = TheModule->getDataLayout();
     uint64_t elemSize = getTypeSizeInBytes(elemType);
     if (elemSize == 0) {
       reportCompilerError(
@@ -13212,11 +13785,9 @@ llvm::Value *NewExprAST::codegen() {
         selectArrayElementReleaseFunction(elementInfo, "new.array.releasefn");
     llvm::Value *elemSizeVal =
         llvm::ConstantInt::get(getSizeType(), elemSize);
-    llvm::Value *lengthSize =
-        Builder->CreateZExt(length32, getSizeType(), "new.array.len");
     llvm::Value *rawPtr = Builder->CreateCall(
         getHybridAllocArrayFunction(),
-        {elemSizeVal, lengthSize, descriptorPtr}, "new.array.raw");
+        {elemSizeVal, boundsInfo.totalSize, descriptorPtr}, "new.array.raw");
 
     if (!llvm::isa<llvm::ConstantPointerNull>(releaseFn)) {
       llvm::Value *releaseFnCasted = releaseFn;
@@ -13239,20 +13810,15 @@ llvm::Value *NewExprAST::codegen() {
     llvm::Value *dataPtr = Builder->CreateBitCast(
         payloadBytePtr, pointerType(elemType), "new.array.payload");
 
-    unsigned rank =
-        desc.arrayRanks.empty() ? 1 : std::max(1u, desc.arrayRanks.back());
     llvm::StructType *arrayStructTy = getArrayStructType(elemType, rank);
     llvm::Value *arrayValue = llvm::UndefValue::get(arrayStructTy);
     llvm::Value *opaqueDataPtr =
         Builder->CreateBitCast(dataPtr, pointerType(), "new.array.ptr");
     arrayValue = Builder->CreateInsertValue(arrayValue, opaqueDataPtr, {0});
-    arrayValue = Builder->CreateInsertValue(arrayValue, length32, {1});
+    arrayValue = Builder->CreateInsertValue(arrayValue, boundsInfo.totalSize32, {1});
 
     for (unsigned i = 0; i < rank; ++i) {
-      llvm::Value *dimVal = (i == 0)
-                                ? static_cast<llvm::Value *>(length32)
-                                : llvm::ConstantInt::get(
-                                      llvm::Type::getInt32Ty(*TheContext), 0);
+      llvm::Value *dimVal = boundsInfo.dims32[i];
       arrayValue = Builder->CreateInsertValue(arrayValue, dimVal, {2u, i});
     }
 
@@ -15089,6 +15655,9 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   if (InitializerExpr) {
     if (!validateInvariantAssignment(declaredInfo, InitializerExpr,
                                      "initializer for '" + getName() + "'"))
+      return nullptr;
+    if (!validateArrayNewBoundsForDeclaration(declaredInfo, InitializerExpr,
+                                              getName()))
       return nullptr;
   }
 

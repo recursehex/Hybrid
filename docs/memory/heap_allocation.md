@@ -13,6 +13,7 @@ Shape polymorphic = new Rectangle(5, 6)
 // Arrays
 int[] numbers = new int[8]
 int[] inferred = new[4]         // type inferred from the target
+int[,] grid = new[2, 3]
 
 // Manual release (optional)
 free box
@@ -22,6 +23,7 @@ free box
 - `new Type(args...)` allocates a heap instance and invoke the matching constructor.
 - `new(args...)` is the shorthand for target-typed construction when the surrounding context provides the type.
 - `new Type[size]` / `new[size]` allocates a 1-D array of the given length. Elements are zero-initialized.
+- `new Type[size1, size2]` / `new[size1, size2]` allocates a rectangular array with one bound per dimension.
 - `free expr` explicitly releases an ARC-managed reference. ARC will still release automatically when the last strong reference dies; `free` simply schedules an explicit release at that point in code.
 
 ## Behaviour and ARC rules
@@ -49,7 +51,7 @@ free box
 - Smart pointers (`unique<T>`, `shared<T>`, `weak<T>`) reject `free` because their control blocks own the payload. Use the smart pointer APIs instead.
 - Stack values are not heap-managed; `free` reports an error when applied to locals allocated on the stack, even if the type is ARC-capable.
 - `free` is compile-time checked, so double frees and any subsequent use of a manually released value both emit diagnostics to prevent use-after-free bugs.
-- Array allocations expect a single length expression; negative lengths are rejected.
+- Array allocations expect one bound per dimension; negative lengths are rejected.
 
 > [!CAUTION]
 > Attempting to use `free` on stack locals or smart pointers is rejected at compile time, so use it only on objects created with `new`.
