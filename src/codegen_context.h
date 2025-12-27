@@ -76,6 +76,22 @@ struct CompositeMemberInfo {
   llvm::Function *directFunction = nullptr;
 };
 
+struct PropertyInfo {
+  TypeInfo type;
+  MemberModifiers modifiers;
+  bool isStatic = false;
+  bool hasGetter = false;
+  bool hasSetter = false;
+  bool isIndexer = false;
+  std::string getterName;
+  std::string setterName;
+  std::vector<TypeInfo> parameterTypes;
+  std::vector<bool> parameterIsRef;
+  std::vector<std::string> parameterNames;
+  std::vector<DefaultArgInfo> parameterDefaults;
+  std::vector<SourceLocation> parameterDefaultLocations;
+};
+
 struct InstanceFieldInfo {
   std::string name;
   unsigned index = 0;
@@ -89,6 +105,8 @@ struct CompositeTypeInfo {
   std::map<std::string, std::string> staticFieldTypes;
   std::map<std::string, MemberModifiers> staticFieldModifiers;
   std::map<std::string, std::string> staticFieldGlobals;
+  std::map<std::string, PropertyInfo> properties;
+  std::optional<PropertyInfo> indexer;
   std::set<std::string> fieldDeclarationInitializers;
   std::set<std::string> staticDeclarationInitializers;
   std::vector<std::string> constructorMangledNames;
@@ -180,6 +198,8 @@ struct ActiveCompositeContext {
   std::string name;
   MethodKind kind = MethodKind::Regular;
   bool isStatic = false;
+  bool isPropertyAccessor = false;
+  std::optional<std::string> activePropertyName;
   std::optional<std::string> baseClassName;
   bool baseConstructorRequired = false;
   bool baseConstructorInvoked = false;

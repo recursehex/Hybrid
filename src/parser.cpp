@@ -663,6 +663,19 @@ static MemberModifiers FinalizeMemberModifiers(const PendingMemberModifiers &pen
   return modifiers;
 }
 
+class ScopedValueKeyword {
+  ParserContext &Parser;
+  bool Previous = false;
+
+public:
+  explicit ScopedValueKeyword(bool enable)
+      : Parser(currentParser()), Previous(Parser.allowValueIdentifier) {
+    Parser.allowValueIdentifier = enable;
+  }
+
+  ~ScopedValueKeyword() { Parser.allowValueIdentifier = Previous; }
+};
+
 static bool isPascalCase(const std::string &name) {
   if (name.empty())
     return false;
@@ -1822,7 +1835,22 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   case tok_shared:
   case tok_weak:
     return ParseIdentifierExpr();
+  case tok_value:
+    {
+      if (!currentParser().allowValueIdentifier) {
+        reportCompilerError("'value' may only be used inside property or indexer setters");
+        getNextToken();
+        return nullptr;
+      }
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'value'
+      auto expr = std::make_unique<VariableExprAST>("value");
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_identifier:
+  case tok_get:
+  case tok_set:
     return ParseIdentifierExpr();
   case tok_this:
     {
@@ -2117,7 +2145,8 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         isDestructor = true;
         MemberName = IdentifierStr;
         getNextToken();
-      } else if (CurTok == tok_identifier) {
+      } else if (CurTok == tok_identifier || CurTok == tok_get ||
+                 CurTok == tok_set) {
         MemberName = IdentifierStr;
         getNextToken();
       } else if (CurTok == tok_weak) {
@@ -2159,7 +2188,8 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         reportCompilerError("Null-safe destructor access is not supported");
         return nullptr;
       }
-      if (CurTok != tok_identifier && CurTok != tok_weak) {
+      if (CurTok != tok_identifier && CurTok != tok_get && CurTok != tok_set &&
+          CurTok != tok_weak) {
         LogError("Expected member name after '?.'");
         return nullptr;
       }
@@ -2184,8 +2214,8 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       bool isDestructor = false;
       if (CurTok == tok_tilde_identifier)
         isDestructor = true;
-      if (CurTok != tok_identifier && CurTok != tok_tilde_identifier &&
-          CurTok != tok_weak) {
+      if (CurTok != tok_identifier && CurTok != tok_get && CurTok != tok_set &&
+          CurTok != tok_tilde_identifier && CurTok != tok_weak) {
         LogError("Expected member name after '->'");
         return nullptr;
       }
@@ -3821,11 +3851,13 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     getNextToken();
 
   std::vector<std::unique_ptr<FieldAST>> Fields;
+  std::vector<std::unique_ptr<PropertyAST>> Properties;
   std::vector<MethodDefinition> Methods;
   bool seenThisOverride = false;
   bool hasConstructor = false;
   bool hasDestructor = false;
   int destructorIndex = -1;
+  bool hasIndexer = false;
 
   auto parseConstructor = [&](MemberModifiers modifiers,
                               std::vector<std::string> ctorGenericParams) -> bool {
@@ -4065,6 +4097,231 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     return true;
   };
 
+  auto memberNameCollides = [&](const std::string &name) -> bool {
+    for (const auto &field : Fields) {
+      if (field && field->getName() == name)
+        return true;
+    }
+    for (const auto &prop : Properties) {
+      if (prop && prop->getName() == name)
+        return true;
+    }
+    for (const auto &method : Methods) {
+      if (method.getDisplayName() == name)
+        return true;
+    }
+    return false;
+  };
+
+  auto parseIndexerParameters = [&](std::vector<Parameter> &params) -> bool {
+    if (CurTok != '[') {
+      reportCompilerError("Expected '[' after 'this' in indexer declaration");
+      return false;
+    }
+    getNextToken(); // eat '['
+    SkipNewlines();
+    while (CurTok != ']' && CurTok != tok_eof) {
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
+      bool paramIsRef = false;
+      if (CurTok == tok_ref) {
+        paramIsRef = true;
+        getNextToken(); // eat 'ref'
+        SkipNewlines();
+      }
+
+      if (!IsValidType()) {
+        LogError("Expected parameter type");
+        return false;
+      }
+
+      std::string ParamType = ParseCompleteType();
+      if (ParamType.empty()) {
+        LogError("Failed to parse parameter type");
+        return false;
+      }
+
+      if (CurTok != tok_identifier) {
+        LogError("Expected parameter name");
+        return false;
+      }
+
+      std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
+      getNextToken();
+
+      if (ParamName == "value") {
+        reportCompilerError("Indexer parameter name 'value' is reserved");
+        return false;
+      }
+
+      if (paramIsParams) {
+        reportCompilerError("Indexers cannot declare 'params' parameters");
+        return false;
+      }
+
+      Parameter param;
+      param.Type = ParamType;
+      param.Name = ParamName;
+      param.IsRef = paramIsRef;
+      param.IsParams = paramIsParams;
+      param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+      param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
+      SkipNewlines();
+      if (CurTok == '=') {
+        reportCompilerError("Indexer parameters cannot declare default values");
+        return false;
+      }
+      params.push_back(std::move(param));
+
+      SkipNewlines();
+      if (CurTok == ']')
+        break;
+      if (CurTok != ',') {
+        LogError("Expected ']' or ',' in indexer parameter list");
+        return false;
+      }
+      getNextToken(); // eat ','
+      SkipNewlines();
+    }
+
+    if (CurTok != ']') {
+      LogError("Expected ']' after indexer parameters");
+      return false;
+    }
+    getNextToken(); // eat ']'
+
+    if (!ValidateParameterDefaults(params))
+      return false;
+
+    if (params.empty()) {
+      reportCompilerError("Indexers must declare at least one parameter");
+      return false;
+    }
+
+    return true;
+  };
+
+  auto parseAccessorBlock =
+      [&](std::unique_ptr<AccessorAST> &getter,
+          std::unique_ptr<AccessorAST> &setter) -> bool {
+    if (CurTok != '{') {
+      reportCompilerError("Expected '{' to begin accessor block");
+      return false;
+    }
+    getNextToken(); // eat '{'
+    SkipNewlines();
+
+    while (CurTok != '}' && CurTok != tok_eof) {
+      if (CurTok == tok_newline) {
+        getNextToken();
+        continue;
+      }
+
+      bool isGetter = false;
+      if (CurTok == tok_get) {
+        isGetter = true;
+      } else if (CurTok == tok_set) {
+        isGetter = false;
+      } else {
+        reportCompilerError("Expected 'get' or 'set' accessor");
+        return false;
+      }
+
+      SourceLocation keywordLoc = currentParser().currentTokenLocation;
+      getNextToken(); // eat accessor keyword
+      SkipNewlines();
+
+      std::unique_ptr<ExprAST> exprBody;
+      std::unique_ptr<BlockStmtAST> blockBody;
+      bool isImplicit = false;
+
+      if (CurTok == '{') {
+        ScopedValueKeyword valueScope(!isGetter);
+        blockBody = ParseBlock();
+        if (!blockBody)
+          return false;
+      } else if (CurTok == tok_get || CurTok == tok_set || CurTok == '}' ||
+                 CurTok == tok_newline) {
+        isImplicit = true;
+      } else {
+        ScopedValueKeyword valueScope(!isGetter);
+        exprBody = ParseExpression();
+        if (!exprBody)
+          return false;
+      }
+
+      if (isGetter) {
+        if (getter) {
+          reportCompilerError("Duplicate 'get' accessor");
+          return false;
+        }
+        getter = std::make_unique<AccessorAST>(
+            AccessorKind::Get, keywordLoc, std::move(exprBody),
+            std::move(blockBody), isImplicit);
+      } else {
+        if (setter) {
+          reportCompilerError("Duplicate 'set' accessor");
+          return false;
+        }
+        setter = std::make_unique<AccessorAST>(
+            AccessorKind::Set, keywordLoc, std::move(exprBody),
+            std::move(blockBody), isImplicit);
+      }
+
+      SkipNewlines();
+    }
+
+    if (CurTok != '}') {
+      LogError("Expected '}' after accessor block");
+      return false;
+    }
+    getNextToken(); // eat '}'
+    return true;
+  };
+
+  auto applyAccessorAccessDefaults =
+      [&](MemberModifiers &modifiers,
+          const PendingMemberModifiers &pending,
+          const std::string &memberName,
+          bool hasGetter,
+          bool hasSetter,
+          bool isIndexer) -> bool {
+    if (!isIndexer && pending.hasExplicitAccess &&
+        (pending.access == AccessSpecifier::Private ||
+         pending.access == AccessSpecifier::Protected)) {
+      const char *accessName =
+          pending.access == AccessSpecifier::Private ? "private" : "protected";
+      std::string effect;
+      if (hasGetter && hasSetter)
+        effect = "getting and setting";
+      else if (hasGetter)
+        effect = "getting";
+      else if (hasSetter)
+        effect = "setting";
+      else
+        effect = "accessing";
+      reportCompilerError("Property '" + memberName + "' cannot be declared " +
+                              accessName + " because it prevents " + effect,
+                          std::string("Remove the ") + accessName +
+                              " modifier or the accessor block.");
+      return false;
+    }
+
+    if (!pending.hasExplicitAccess && hasSetter)
+      modifiers.access = MemberAccess::PublicReadWrite();
+
+    return true;
+  };
+
   while (CurTok != '}' && CurTok != tok_eof) {
     SkipNewlines();
     if (CurTok == '}')
@@ -4207,6 +4464,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     }
 
     std::string MemberName;
+    SourceLocation memberNameLoc = currentParser().currentTokenLocation;
     if (CurTok == tok_identifier) {
       MemberName = IdentifierStr;
       getNextToken();
@@ -4226,6 +4484,93 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       SkipNewlines();
     if (!methodGenericParams.empty())
       maybeWarnGenericArity(methodGenericParams, MemberName, "Method");
+
+    if (MemberName == "this" && CurTok == '[') {
+      if (!methodGenericParams.empty()) {
+        reportCompilerError("Indexers cannot declare generic parameter lists");
+        return nullptr;
+      }
+      if (memberNameCollides(MemberName)) {
+        reportCompilerError("Type '" + compositeName +
+                            "' already declares member '" + MemberName + "'");
+        return nullptr;
+      }
+      if (hasIndexer) {
+        reportCompilerError("Type '" + compositeName +
+                            "' already declares an indexer");
+        return nullptr;
+      }
+
+      std::vector<Parameter> indexerParams;
+      if (!parseIndexerParameters(indexerParams))
+        return nullptr;
+
+      MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+      modifiers.isProperty = true;
+
+      if ((modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+        reportCompilerError("Indexers must be instance members");
+        return nullptr;
+      }
+
+      if (kind == AggregateKind::Interface && !modifiers.isAbstract)
+        modifiers.isAbstract = true;
+
+      SkipNewlines();
+      std::unique_ptr<AccessorAST> getter;
+      std::unique_ptr<AccessorAST> setter;
+      if (!parseAccessorBlock(getter, setter))
+        return nullptr;
+
+      if (!getter && !setter) {
+        reportCompilerError("Indexers must declare at least one accessor");
+        return nullptr;
+      }
+
+      if (setter && !getter) {
+        reportCompilerError("Indexer on type '" + compositeName +
+                            "' does not define a getter");
+        return nullptr;
+      }
+
+      if (!applyAccessorAccessDefaults(modifiers, pendingMods, MemberName,
+                                       getter != nullptr, setter != nullptr,
+                                       true))
+        return nullptr;
+
+      auto hasAccessorBody = [](const std::unique_ptr<AccessorAST> &accessor) {
+        return accessor &&
+               (accessor->hasBlockBody() || accessor->hasExpressionBody());
+      };
+
+      if ((kind == AggregateKind::Interface || modifiers.isAbstract) &&
+          (hasAccessorBody(getter) || hasAccessorBody(setter))) {
+        reportCompilerError("Abstract indexers cannot declare accessor bodies");
+        return nullptr;
+      }
+
+      if (!modifiers.isAbstract &&
+          ((getter && getter->isImplicit()) ||
+           (setter && setter->isImplicit()))) {
+        reportCompilerError("Indexer accessors must declare a body");
+        return nullptr;
+      }
+
+      if (setter &&
+          (modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+        reportCompilerError("Const indexers cannot declare a setter");
+        return nullptr;
+      }
+
+      auto Indexer = std::make_unique<PropertyAST>(
+          Type, buildDeclaredTypeInfo(Type, false), MemberName, modifiers,
+          nullptr, std::move(indexerParams),
+          memberNameLoc, std::move(getter),
+          std::move(setter));
+      Properties.push_back(std::move(Indexer));
+      hasIndexer = true;
+      continue;
+    }
 
     if (!methodGenericParams.empty() && CurTok != '(') {
       reportCompilerError("Generic parameter list must be followed by '(' in method declarations");
@@ -4276,11 +4621,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         return nullptr;
       }
       if (MemberName == "this") {
-        reportCompilerError("'this' can only be used as a formatter method name");
-        return nullptr;
-      }
-      if (kind == AggregateKind::Interface) {
-        reportCompilerError("Interfaces cannot declare fields");
+        reportCompilerError("'this' can only be used as a formatter method name or indexer");
         return nullptr;
       }
       std::unique_ptr<ExprAST> MemberInitializer;
@@ -4290,6 +4631,93 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         MemberInitializer = ParseExpression();
         if (!MemberInitializer)
           return nullptr;
+      }
+      SkipNewlines();
+
+      if (CurTok == '{') {
+        if (memberNameCollides(MemberName)) {
+          reportCompilerError("Type '" + compositeName +
+                              "' already declares member '" + MemberName + "'");
+          return nullptr;
+        }
+
+        std::unique_ptr<AccessorAST> getter;
+        std::unique_ptr<AccessorAST> setter;
+        if (!parseAccessorBlock(getter, setter))
+          return nullptr;
+
+        if (!getter && !setter) {
+          reportCompilerError("Properties must declare at least one accessor");
+          return nullptr;
+        }
+
+        MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+        modifiers.isProperty = true;
+
+        if (!applyAccessorAccessDefaults(modifiers, pendingMods, MemberName,
+                                         getter != nullptr, setter != nullptr,
+                                         false))
+          return nullptr;
+
+        if (kind == AggregateKind::Interface && !modifiers.isAbstract)
+          modifiers.isAbstract = true;
+
+        if (kind == AggregateKind::Interface &&
+            (modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+          reportCompilerError("Interfaces cannot declare static properties");
+          return nullptr;
+        }
+
+        auto hasAccessorBody = [](const std::unique_ptr<AccessorAST> &accessor) {
+          return accessor &&
+                 (accessor->hasBlockBody() || accessor->hasExpressionBody());
+        };
+
+        if ((kind == AggregateKind::Interface || modifiers.isAbstract) &&
+            (hasAccessorBody(getter) || hasAccessorBody(setter))) {
+          reportCompilerError("Abstract properties cannot declare accessor bodies");
+          return nullptr;
+        }
+
+        if (setter &&
+            (modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+          reportCompilerError("Const properties cannot declare a setter");
+          return nullptr;
+        }
+
+        if (MemberInitializer &&
+            (modifiers.storage & StorageFlag::Static) == StorageFlag::None) {
+          reportCompilerError("Only static members may specify declaration initializers",
+                              "Assign non-static members inside constructors instead");
+          return nullptr;
+        }
+
+        if (kind == AggregateKind::Interface && MemberInitializer) {
+          reportCompilerError("Interfaces cannot declare property initializers");
+          return nullptr;
+        }
+
+        TypeInfo propInfo = buildDeclaredTypeInfo(Type, false);
+        if (kind != AggregateKind::Interface) {
+          auto Field = std::make_unique<FieldAST>(Type, propInfo, MemberName,
+                                                  modifiers,
+                                                  std::move(MemberInitializer));
+          Fields.push_back(std::move(Field));
+        } else {
+          MemberInitializer.reset();
+        }
+
+        auto Property = std::make_unique<PropertyAST>(
+            Type, std::move(propInfo), MemberName, modifiers, nullptr,
+            std::vector<Parameter>{}, memberNameLoc,
+            std::move(getter), std::move(setter));
+        Properties.push_back(std::move(Property));
+        continue;
+      }
+
+      if (kind == AggregateKind::Interface) {
+        reportCompilerError("Interfaces cannot declare fields");
+        return nullptr;
       }
       MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
       if (MemberInitializer &&
@@ -4330,7 +4758,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   }
 
   auto Result = std::make_unique<StructAST>(
-      kind, compositeName, std::move(Fields), std::move(Methods),
+      kind, compositeName, std::move(Fields), std::move(Properties),
+      std::move(Methods),
       std::move(baseTypes), std::move(genericParameters));
   Result->setBaseClass(std::move(baseClass));
   Result->setInterfaces(std::move(interfaceTypes));

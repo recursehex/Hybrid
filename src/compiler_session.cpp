@@ -268,6 +268,12 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("ref");
     case tok_params:
       return makeKeyword("params");
+    case tok_get:
+      return makeKeyword("get");
+    case tok_set:
+      return makeKeyword("set");
+    case tok_value:
+      return makeKeyword("value");
     case tok_weak:
       return makeKeyword("weak");
     case tok_unique:
@@ -436,6 +442,7 @@ void ParserContext::reset(bool clearSymbols) {
   genericParameterStack.clear();
   activeGenericParameters.clear();
   templateAngleDepth = 0;
+  allowValueIdentifier = false;
   if (clearSymbols)
     structNames.clear();
   if (clearSymbols)

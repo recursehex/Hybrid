@@ -93,10 +93,12 @@ The following keywords are reserved:
 - Structure keywords: `use`, `struct`, `this`
 - Class keywords: `class`, `inherits`, `base`, `interface`, `abstract`, `virtual`, `override`
 - Access modifiers: `public`, `private`, `protected`, `const`, `static`
+- Property keywords: `get`, `set`, `value`
 - Boolean literals: `true`, `false`
 - Null literal: `null`
 - Exception handling: `assert`
 - Pass by reference: `ref`
+- Variadic parameters: `params`
 - Memory safety: `unsafe`
 - Memory management: `new`, `free`
 - Smart pointers: `unique`, `shared`, `weak`

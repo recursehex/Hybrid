@@ -22,6 +22,7 @@ struct SourceLocation {
 
 struct FunctionOverload;
 struct ClassDescriptor;
+class AccessorAST;
 
 enum class RefStorageClass {
   None,
@@ -356,6 +357,24 @@ public:
   
   llvm::Value *codegen() override;
   ExprAST *getExpression() const { return Expression.get(); }
+};
+
+/// AccessorBodyStmtAST - Statement class for property/indexer accessor bodies.
+class AccessorBodyStmtAST : public StmtAST {
+  const AccessorAST *Accessor = nullptr;
+  std::string OwnerName;
+  std::string PropertyName;
+  bool IsStatic = false;
+
+public:
+  AccessorBodyStmtAST(const AccessorAST *Accessor, std::string OwnerName,
+                      std::string PropertyName, bool IsStatic)
+      : Accessor(Accessor),
+        OwnerName(std::move(OwnerName)),
+        PropertyName(std::move(PropertyName)),
+        IsStatic(IsStatic) {}
+
+  llvm::Value *codegen() override;
 };
 
 /// ForEachStmtAST - Statement class for foreach loops.
@@ -1216,6 +1235,98 @@ enum class MethodKind : uint8_t {
   Destructor
 };
 
+enum class AccessorKind : uint8_t {
+  Get,
+  Set
+};
+
+class AccessorAST {
+  AccessorKind Kind;
+  SourceLocation KeywordLocation{};
+  std::unique_ptr<ExprAST> ExpressionBody;
+  std::unique_ptr<BlockStmtAST> BlockBody;
+  bool IsImplicit = false;
+
+public:
+  AccessorAST(AccessorKind Kind, SourceLocation KeywordLocation,
+              std::unique_ptr<ExprAST> ExpressionBody,
+              std::unique_ptr<BlockStmtAST> BlockBody,
+              bool IsImplicit)
+      : Kind(Kind),
+        KeywordLocation(KeywordLocation),
+        ExpressionBody(std::move(ExpressionBody)),
+        BlockBody(std::move(BlockBody)),
+        IsImplicit(IsImplicit) {}
+
+  AccessorKind getKind() const { return Kind; }
+  SourceLocation getKeywordLocation() const { return KeywordLocation; }
+  bool isImplicit() const { return IsImplicit; }
+  bool hasExpressionBody() const { return static_cast<bool>(ExpressionBody); }
+  bool hasBlockBody() const { return static_cast<bool>(BlockBody); }
+  ExprAST *getExpressionBody() const { return ExpressionBody.get(); }
+  BlockStmtAST *getBlockBody() const { return BlockBody.get(); }
+  std::unique_ptr<ExprAST> takeExpressionBody() {
+    return std::move(ExpressionBody);
+  }
+  std::unique_ptr<BlockStmtAST> takeBlockBody() {
+    return std::move(BlockBody);
+  }
+};
+
+class PropertyAST {
+  std::string Type;
+  TypeInfo DeclaredTypeInfo;
+  std::string Name;
+  MemberModifiers Modifiers;
+  std::unique_ptr<ExprAST> Initializer;
+  std::vector<Parameter> Parameters;
+  SourceLocation NameLocation{};
+  std::unique_ptr<AccessorAST> Getter;
+  std::unique_ptr<AccessorAST> Setter;
+
+public:
+  PropertyAST(std::string Type,
+              TypeInfo DeclaredTypeInfo,
+              std::string Name,
+              MemberModifiers Modifiers,
+              std::unique_ptr<ExprAST> Initializer,
+              std::vector<Parameter> Parameters,
+              SourceLocation NameLocation,
+              std::unique_ptr<AccessorAST> Getter,
+              std::unique_ptr<AccessorAST> Setter)
+      : Type(std::move(Type)),
+        DeclaredTypeInfo(std::move(DeclaredTypeInfo)),
+        Name(std::move(Name)),
+        Modifiers(Modifiers),
+        Initializer(std::move(Initializer)),
+        Parameters(std::move(Parameters)),
+        NameLocation(NameLocation),
+        Getter(std::move(Getter)),
+        Setter(std::move(Setter)) {
+    this->Type = this->DeclaredTypeInfo.typeName;
+  }
+
+  const std::string &getType() const { return Type; }
+  const TypeInfo &getTypeInfo() const { return DeclaredTypeInfo; }
+  const std::string &getName() const { return Name; }
+  const MemberModifiers &getModifiers() const { return Modifiers; }
+  bool isIndexer() const { return !Parameters.empty(); }
+  bool isStatic() const {
+    return static_cast<uint8_t>(Modifiers.storage & StorageFlag::Static) != 0;
+  }
+  bool hasInitializer() const { return static_cast<bool>(Initializer); }
+  ExprAST *getInitializer() const { return Initializer.get(); }
+  std::unique_ptr<ExprAST> takeInitializer() { return std::move(Initializer); }
+  const std::vector<Parameter> &getParameters() const { return Parameters; }
+  SourceLocation getNameLocation() const { return NameLocation; }
+  bool hasGetter() const { return static_cast<bool>(Getter); }
+  bool hasSetter() const { return static_cast<bool>(Setter); }
+  AccessorAST *getGetter() const { return Getter.get(); }
+  AccessorAST *getSetter() const { return Setter.get(); }
+  std::unique_ptr<AccessorAST> takeGetter() { return std::move(Getter); }
+  std::unique_ptr<AccessorAST> takeSetter() { return std::move(Setter); }
+};
+
 struct ConstructorInitializer {
   enum class Kind : uint8_t {
     Base,
@@ -1289,6 +1400,7 @@ class StructAST {
   AggregateKind Kind = AggregateKind::Struct;
   std::string Name;
   std::vector<std::unique_ptr<FieldAST>> Fields;
+  std::vector<std::unique_ptr<PropertyAST>> Properties;
   std::vector<MethodDefinition> Methods;
   std::vector<std::string> BaseTypes;
   std::vector<std::string> GenericParameters;
@@ -1307,11 +1419,13 @@ public:
   StructAST(AggregateKind Kind,
             std::string Name,
             std::vector<std::unique_ptr<FieldAST>> Fields,
+            std::vector<std::unique_ptr<PropertyAST>> Properties,
             std::vector<MethodDefinition> Methods,
             std::vector<std::string> BaseTypes = {},
             std::vector<std::string> GenericParameters = {})
       : Kind(Kind), Name(std::move(Name)), Fields(std::move(Fields)),
-        Methods(std::move(Methods)), BaseTypes(std::move(BaseTypes)),
+        Properties(std::move(Properties)), Methods(std::move(Methods)),
+        BaseTypes(std::move(BaseTypes)),
         GenericParameters(std::move(GenericParameters)) {}
   
   llvm::Type *codegen();
@@ -1319,6 +1433,9 @@ public:
   AggregateKind getKind() const { return Kind; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<std::unique_ptr<FieldAST>> &getFields() const { return Fields; }
+  const std::vector<std::unique_ptr<PropertyAST>> &getProperties() const {
+    return Properties;
+  }
   const std::vector<MethodDefinition> &getMethods() const { return Methods; }
   std::vector<MethodDefinition> &getMethods() { return Methods; }
   const std::vector<std::string> &getBaseTypes() const { return BaseTypes; }

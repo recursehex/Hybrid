@@ -478,6 +478,10 @@ int gettok() {
       return tok_ref;
     if (lex.identifierStr == "params")
       return tok_params;
+    if (lex.identifierStr == "get")
+      return tok_get;
+    if (lex.identifierStr == "set")
+      return tok_set;
     if (lex.identifierStr == "weak")
       return tok_weak;
     if (lex.identifierStr == "unique")

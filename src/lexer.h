@@ -143,6 +143,9 @@ enum Token {
 
   // variadic parameter keyword
   tok_params = -108,          // params
+  tok_get = -109,             // get (property/indexer accessor)
+  tok_set = -110,             // set (property/indexer accessor)
+  tok_value = -111,           // value (setter parameter)
 
   // interpolated string tokens
   tok_interpolated_string_start = -90,    // $"

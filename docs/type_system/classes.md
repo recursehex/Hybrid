@@ -33,6 +33,45 @@ class Door
 }
 ```
 
+## Properties and Indexers
+
+Properties expose field access through `get` and `set` accessors. The setter
+receives an implicit `value` parameter that is only valid inside the setter
+body. Accessing `obj.prop` calls the getter, and assigning `obj.prop = rhs`
+invokes the setter (compound assignments call getter + setter).
+Properties and indexers that declare a setter default to public read/write
+access, so `public` is optional. Declaring a property as `private` or
+`protected` is rejected because it would block the accessors.
+
+Indexers provide array-like access via `this[...]` and are always instance
+members. `obj[index]` uses the indexer when present; otherwise it falls back to
+native array indexing.
+Indexers may omit `set` for read-only access; indexers that declare a setter
+must also declare a getter.
+
+```cs
+class IntList
+{
+    private int[] items
+
+    int count
+    {
+        get items.size
+    }
+
+    int this[int index]
+    {
+        get items[index]
+        set items[index] = value
+    }
+
+    IntList(int size)
+    {
+        this.items = new int[size]
+    }
+}
+```
+
 ## Value Semantics and Construction
 
 - Class instances follow the same value semantics as structs. `Door d = Door(2)` allocates storage in the surrounding scope.
