@@ -185,24 +185,24 @@ static bool verifyObjectPointer(void *object, std::string &reason) {
     reason = "null object";
     return false;
   }
+  const std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(object);
+  if (addr % alignof(hybrid::memory::ARCHeader) != 0) {
+    reason = "misaligned ARC header";
+    return false;
+  }
   RefCount counts = RefCount::fromObject(object);
   const HybridTypeDescriptor *descriptor = counts.descriptor();
   if (!descriptor || !descriptor->typeName) {
     reason = "missing descriptor";
-    return true;
+    return false;
+  }
+  if (!descriptorRegistered(descriptor)) {
+    reason = "descriptor not registered";
+    return false;
   }
   if (!descriptorLooksValid(descriptor)) {
     reason = "descriptor layout invalid";
     return false;
-  }
-  if (!descriptorRegistered(descriptor)) {
-    const HybridTypeDescriptor *canonical =
-        hybrid_register_type_descriptor(descriptor);
-    if (canonical != descriptor) {
-      RefCount writable = counts;
-      writable.setDescriptor(canonical);
-      descriptor = canonical;
-    }
   }
 
   const std::uint32_t strong = counts.strongCount();

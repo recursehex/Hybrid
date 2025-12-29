@@ -5636,6 +5636,9 @@ static bool typeAllowsNull(const ParsedTypeDescriptor &desc) {
   return desc.isNullable || (!desc.isArray && desc.pointerDepth > 0);
 }
 
+static bool isKnownNonNull(const std::string &name);
+static std::optional<TypeInfo> resolveExprTypeInfo(const ExprAST *expr);
+
 static bool expressionIsNullable(const ExprAST *expr) {
   if (!expr)
     return false;
@@ -5649,6 +5652,15 @@ static bool expressionIsNullable(const ExprAST *expr) {
         return false;
     }
   }
+  if (const auto *var = dynamic_cast<const VariableExprAST *>(expr)) {
+    if (isKnownNonNull(var->getName()))
+      return false;
+  }
+
+  if (auto infoOpt = resolveExprTypeInfo(expr)) {
+    return typeAllowsNull(*infoOpt);
+  }
+
   std::string typeName = expr->getTypeName();
   if (typeName.empty())
     return false;
