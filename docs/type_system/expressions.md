@@ -671,6 +671,36 @@ int sum = calculateSum(array)
 int value = process(transform(getData()))
 ```
 
+## Tuple Literals
+
+Tuple literals use parentheses with commas and must contain at least two elements:
+
+```cs
+(int, string) pair = (8, "hello")
+((int, int), string) point = ((1, 2), "origin")
+```
+
+Single-element parentheses remain a grouping expression: `(expr)` does not create a tuple.
+
+## Tuple Access
+
+Tuple indexing uses a zero-based, compile-time integer literal:
+
+```cs
+(int, string) pair = (2, "hi")
+int first = pair[0]
+string second = pair[1]
+```
+
+Named tuple elements are accessed with dot syntax:
+
+```cs
+(int count, string greeting) message = (2, "hi")
+int c = message.count
+```
+
+Tuple elements are mutable, so assignments like `pair[0] = 3` or `message.count = 5` update the tuple value in place.
+
 ## Array Indexing
 
 Array indexing expressions access array elements:

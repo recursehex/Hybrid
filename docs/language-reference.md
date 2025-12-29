@@ -194,6 +194,23 @@ int[] samples = [
 
 The same indentation rules apply to rectangular (`[,]`) and jagged (`[][]`) literals, making it easier to visualize large datasets.
 
+### Tuple Literals
+
+Tuple literals use parentheses with commas and require at least two elements:
+
+```cs
+(int, string) pair = (8, "hello")
+((int, int), string) point = ((1, 2), "origin")
+```
+
+Index into tuples with literal indices, or use named elements when declared:
+
+```cs
+(int count, string greeting) message = (2, "hi")
+int c = message.count
+string g = message[1]
+```
+
 ## Language Safety Features
 
 Hybrid includes several safety features designed to prevent common programming errors:

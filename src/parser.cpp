@@ -37,6 +37,7 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args,
                               std::vector<SourceLocation> &ArgNameLocations,
                               std::vector<SourceLocation> &ArgEqualsLocations);
 static std::string ParseCompleteType();
+static bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef = false);
 static std::unique_ptr<ExprAST> ParseNewExpression();
 static bool ParseGenericParameterList(std::vector<std::string> &parameters);
 static bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
@@ -850,7 +851,7 @@ static bool ParseOptionalGenericArgumentList(std::string &Type,
       return fail("Expected ',' or '>' in generic argument list");
     }
 
-    if (!IsValidType())
+    if (!IsValidType() && CurTok != '(')
       return fail("Expected type argument in generic list");
 
     std::string argument = ParseCompleteType();
@@ -910,25 +911,165 @@ static bool ParseGenericParameterList(std::vector<std::string> &parameters) {
   return true;
 }
 
-std::string ParseCompleteType()
-{
-  if (!IsValidType())
-    return "";
+static bool ParseTypeArgumentListForType(std::string &TypeName,
+                                         std::vector<TypeInfo> &TypeArgs) {
+  if (CurTok != tok_lt)
+    return true;
 
-  std::string Type = IdentifierStr;
-  getNextToken(); // eat base type
+  TemplateAngleScope angleScope;
+  TypeName.push_back('<');
 
-  if (!ParseOptionalGenericArgumentList(Type))
-    return "";
+  getNextToken(); // eat '<'
+  SkipNewlines();
+
+  bool expectArgument = true;
+  while (true) {
+    if (CurTok == tok_gt) {
+      if (expectArgument) {
+        reportCompilerError("Expected type argument after '<'");
+        return false;
+      }
+      TypeName.push_back('>');
+      getNextToken();
+      break;
+    }
+
+    if (CurTok == tok_eof) {
+      reportCompilerError("Unterminated generic argument list");
+      return false;
+    }
+
+    if (!expectArgument) {
+      if (CurTok == ',') {
+        TypeName.push_back(',');
+        getNextToken();
+        SkipNewlines();
+        expectArgument = true;
+        continue;
+      }
+      if (CurTok == tok_gt)
+        continue;
+      reportCompilerError("Expected ',' or '>' in generic argument list");
+      return false;
+    }
+
+    if (!IsValidType() && CurTok != '(') {
+      reportCompilerError("Expected type argument in generic list");
+      return false;
+    }
+
+    TypeInfo argInfo;
+    if (!ParseCompleteTypeInfo(argInfo, false)) {
+      reportCompilerError("Failed to parse type argument");
+      return false;
+    }
+
+    TypeArgs.push_back(argInfo);
+    TypeName.append(typeNameFromInfo(argInfo));
+    SkipNewlines();
+    expectArgument = false;
+  }
+
+  return true;
+}
+
+static bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef) {
+  std::string TypeName;
+  std::vector<TypeInfo> parsedTypeArguments;
+  std::vector<std::string> tupleElementNames;
+
+  if (CurTok == '(') {
+    getNextToken(); // eat '('
+    SkipNewlines();
+
+    std::vector<TypeInfo> elementInfos;
+    std::vector<std::string> elementTypeNames;
+    bool sawComma = false;
+
+    if (CurTok != ')') {
+      while (true) {
+        TypeInfo elementInfo;
+        if (!ParseCompleteTypeInfo(elementInfo, false))
+          return false;
+        elementTypeNames.push_back(typeNameFromInfo(elementInfo));
+        elementInfos.push_back(elementInfo);
+
+        SkipNewlines();
+        if (CurTok == tok_identifier) {
+          tupleElementNames.push_back(IdentifierStr);
+          getNextToken();
+          SkipNewlines();
+        } else {
+          tupleElementNames.emplace_back();
+        }
+
+        if (CurTok == ')')
+          break;
+
+        if (CurTok != ',') {
+          reportCompilerError("Expected ')' or ',' in tuple type");
+          return false;
+        }
+
+        sawComma = true;
+        getNextToken(); // eat ','
+        SkipNewlines();
+      }
+    }
+
+    if (CurTok != ')') {
+      reportCompilerError("Expected ')' to close tuple type");
+      return false;
+    }
+    getNextToken(); // eat ')'
+
+    if (!sawComma || elementInfos.size() < 2) {
+      reportCompilerError("Tuple types require at least two elements");
+      return false;
+    }
+
+    TypeName = "tuple<";
+    for (size_t i = 0; i < elementTypeNames.size(); ++i) {
+      if (i > 0)
+        TypeName += ",";
+      TypeName += elementTypeNames[i];
+    }
+    TypeName += ">";
+
+    parsedTypeArguments = std::move(elementInfos);
+  } else {
+    if (!IsValidType())
+      return false;
+
+    TypeName = IdentifierStr;
+    getNextToken(); // eat base type
+
+    if (!ParseTypeArgumentListForType(TypeName, parsedTypeArguments))
+      return false;
+  }
 
   SkipNewlines();
 
   bool pointerSeen = false;
+  if (!AppendTypeSuffix(TypeName, pointerSeen))
+    return false;
 
-  if (!AppendTypeSuffix(Type, pointerSeen))
+  outInfo = buildDeclaredTypeInfo(TypeName, declaredRef);
+  if (!parsedTypeArguments.empty()) {
+    outInfo.typeArguments = std::move(parsedTypeArguments);
+    finalizeTypeInfoMetadata(outInfo);
+  }
+  if (!tupleElementNames.empty())
+    outInfo.tupleElementNames = std::move(tupleElementNames);
+  return true;
+}
+
+std::string ParseCompleteType()
+{
+  TypeInfo info;
+  if (!ParseCompleteTypeInfo(info, false))
     return "";
-
-  return Type;
+  return typeNameFromInfo(info);
 }
 
 static bool ParseNewTypeName(std::string &OutType, bool stopBeforeArrayBounds) {
@@ -2324,11 +2465,11 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   }
 
   // Parse return type
-  if (!IsValidType())
+  if (!IsValidType() && CurTok != '(')
     return LogErrorP("Expected return type in prototype");
 
-  std::string ReturnType = ParseCompleteType();
-  if (ReturnType.empty())
+  TypeInfo ReturnTypeInfo;
+  if (!ParseCompleteTypeInfo(ReturnTypeInfo, returnsByRef))
     return LogErrorP("Failed to parse return type");
 
   std::string FnName;
@@ -2376,11 +2517,11 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
         SkipNewlines();
       }
 
-      if (!IsValidType())
+      if (!IsValidType() && CurTok != '(')
         return LogErrorP("Expected parameter type");
 
-      std::string ParamType = ParseCompleteType();
-      if (ParamType.empty())
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef))
         return LogErrorP("Failed to parse parameter type");
 
       if (CurTok != tok_identifier)
@@ -2391,11 +2532,11 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
       getNextToken();
 
       Parameter param;
-      param.Type = ParamType;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
       param.Name = ParamName;
       param.IsRef = paramIsRef;
       param.IsParams = paramIsParams;
-      param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+      param.DeclaredType = std::move(ParamTypeInfo);
       param.NameLocation = nameLoc;
       param.ParamsLocation = paramsLoc;
 
@@ -2430,8 +2571,7 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   if (!ValidateParameterDefaults(Args))
     return nullptr;
 
-  TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
-  return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName,
+  return std::make_unique<PrototypeAST>(std::move(ReturnTypeInfo), FnName,
                                         std::move(Args), isUnsafe, returnsByRef,
                                         std::move(GenericParams));
 }
@@ -2507,11 +2647,11 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   ParserContext parserBackup = currentParser();
   LexerContext lexerBackup = currentLexer();
 
-  if (!IsValidType())
+  if (!IsValidType() && CurTok != '(')
     return nullptr;
 
-  std::string Type = ParseCompleteType();
-  if (Type.empty()) {
+  TypeInfo declInfo;
+  if (!ParseCompleteTypeInfo(declInfo, isRef)) {
     currentParser() = parserBackup;
     currentLexer() = lexerBackup;
     return nullptr;
@@ -2525,8 +2665,6 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
 
   std::string Name = IdentifierStr;
   getNextToken(); // eat identifier
-
-  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
 
   if (CurTok == ',') {
     LogError("Expected '=' after variable name. Multiple variable declarations in a single statement are not allowed");
@@ -3392,7 +3530,7 @@ std::unique_ptr<StmtAST> ParseStatement() {
   case tok_ref:
     // Handle ref variable declarations
     getNextToken(); // eat 'ref'
-    if (!IsValidType()) {
+    if (!IsValidType() && CurTok != '(') {
       LogError("Expected type after 'ref'");
       return nullptr;
     }
@@ -3403,7 +3541,10 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return nullptr;
   default:
     // Check for valid types (built-in and struct) for variable declarations
-    if (IsValidType()) {
+    if (CurTok == '(') {
+      if (auto Decl = ParseVariableDeclaration())
+        return Decl;
+    } else if (IsValidType()) {
       if (currentLexer().lastChar != '.')
         if (auto Decl = ParseVariableDeclaration())
           return Decl;
@@ -3489,12 +3630,14 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
 /// Could be either a variable declaration or function definition
 bool ParseTypeIdentifier(bool isRef) {
   // Parse the complete type (including arrays and pointers)
-  std::string Type = ParseCompleteType();
-  if (Type.empty()) {
+  TypeInfo typeInfo;
+  if (!ParseCompleteTypeInfo(typeInfo, isRef)) {
     return false;
   }
 
   SkipNewlines();
+
+  std::string Type = typeNameFromInfo(typeInfo);
 
   // Handle constructor call (struct name followed directly by '(')
   if (CurTok == '(' && (StructNames.contains(Type) || ClassNames.contains(Type))) {
@@ -3565,13 +3708,13 @@ bool ParseTypeIdentifier(bool isRef) {
           SkipNewlines();
         }
 
-        if (!IsValidType()) {
+        if (!IsValidType() && CurTok != '(') {
           reportCompilerError("Expected parameter type");
           return false;
         }
 
-        std::string ParamType = ParseCompleteType();
-        if (ParamType.empty()) {
+        TypeInfo ParamTypeInfo;
+        if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef)) {
           reportCompilerError("Failed to parse parameter type");
           return false;
         }
@@ -3586,11 +3729,11 @@ bool ParseTypeIdentifier(bool isRef) {
         getNextToken();
 
         Parameter param;
-        param.Type = ParamType;
+        param.Type = typeNameFromInfo(ParamTypeInfo);
         param.Name = ParamName;
         param.IsRef = paramIsRef;
         param.IsParams = paramIsParams;
-        param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+        param.DeclaredType = std::move(ParamTypeInfo);
         param.NameLocation = nameLoc;
         param.ParamsLocation = paramsLoc;
         SkipNewlines();
@@ -3628,8 +3771,7 @@ bool ParseTypeIdentifier(bool isRef) {
       return false;
 
     // Create prototype
-    TypeInfo returnInfo = buildDeclaredTypeInfo(Type, isRef);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(returnInfo), Name,
+    auto Proto = std::make_unique<PrototypeAST>(std::move(typeInfo), Name,
                                                 std::move(Args), false, isRef,
                                                 std::move(genericParams));
     
@@ -3663,7 +3805,7 @@ bool ParseTypeIdentifier(bool isRef) {
     getNextToken(); // eat '='
     SkipNewlines();
 
-    TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+    TypeInfo declInfo = typeInfo;
 
     // Check if the initializer has 'ref' keyword (for linking two variables)
     bool initializerIsRef = false;
@@ -3777,18 +3919,18 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     bool expectBaseClass = (kind == AggregateKind::Class);
     bool sawType = false;
     while (true) {
-      if (!IsValidType()) {
+      if (!IsValidType() && CurTok != '(') {
         LogError("Expected type name after 'inherits'");
         return nullptr;
       }
 
-      std::string typeName = ParseCompleteType();
-      if (typeName.empty())
+      TypeInfo clauseInfo;
+      if (!ParseCompleteTypeInfo(clauseInfo, false))
         return nullptr;
       sawType = true;
       SkipNewlines();
 
-      TypeInfo clauseInfo = buildDeclaredTypeInfo(typeName, false);
+      std::string typeName = typeNameFromInfo(clauseInfo);
       baseTypeInfos.push_back(clauseInfo);
 
       if (expectBaseClass) {
@@ -3877,13 +4019,13 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         SkipNewlines();
       }
 
-      if (!IsValidType()) {
+      if (!IsValidType() && CurTok != '(') {
         LogError("Expected parameter type");
         return false;
       }
 
-      std::string ParamType = ParseCompleteType();
-      if (ParamType.empty()) {
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, false)) {
         LogError("Failed to parse parameter type");
         return false;
       }
@@ -3898,11 +4040,11 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       getNextToken();
 
       Parameter param;
-      param.Type = ParamType;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
       param.Name = ParamName;
       param.IsRef = false;
       param.IsParams = paramIsParams;
-      param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
+      param.DeclaredType = std::move(ParamTypeInfo);
       param.NameLocation = nameLoc;
       param.ParamsLocation = paramsLoc;
       SkipNewlines();
@@ -3980,7 +4122,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     return true;
   };
 
-  auto parseCompositeMethod = [&](const std::string &ReturnType,
+  auto parseCompositeMethod = [&](TypeInfo ReturnTypeInfo,
                                   const std::string &MethodName,
                                   MemberModifiers modifiers,
                                   MethodKind methodKind,
@@ -4006,12 +4148,16 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         SkipNewlines();
       }
 
-      if (!IsValidType()) {
+      if (!IsValidType() && CurTok != '(') {
         LogError("Expected parameter type");
         return false;
       }
 
-      std::string ParamType = ParseCompleteType();
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef)) {
+        LogError("Failed to parse parameter type");
+        return false;
+      }
 
       if (CurTok != tok_identifier) {
         LogError("Expected parameter name");
@@ -4023,11 +4169,11 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       getNextToken();
 
       Parameter param;
-      param.Type = ParamType;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
       param.Name = ParamName;
       param.IsRef = paramIsRef;
       param.IsParams = paramIsParams;
-      param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+      param.DeclaredType = std::move(ParamTypeInfo);
       param.NameLocation = nameLoc;
       param.ParamsLocation = paramsLoc;
       SkipNewlines();
@@ -4069,8 +4215,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
     const bool requiresBody = !modifiers.isAbstract && kind != AggregateKind::Interface;
     std::string QualifiedName = compositeName + "." + MethodName;
-    TypeInfo methodReturn = buildDeclaredTypeInfo(ReturnType, false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), QualifiedName,
+    auto Proto = std::make_unique<PrototypeAST>(std::move(ReturnTypeInfo), QualifiedName,
                                                 std::move(Args), false, false,
                                                 std::move(methodGenericParams));
 
@@ -4137,13 +4282,13 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         SkipNewlines();
       }
 
-      if (!IsValidType()) {
+      if (!IsValidType() && CurTok != '(') {
         LogError("Expected parameter type");
         return false;
       }
 
-      std::string ParamType = ParseCompleteType();
-      if (ParamType.empty()) {
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef)) {
         LogError("Failed to parse parameter type");
         return false;
       }
@@ -4168,11 +4313,11 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       }
 
       Parameter param;
-      param.Type = ParamType;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
       param.Name = ParamName;
       param.IsRef = paramIsRef;
       param.IsParams = paramIsParams;
-      param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+      param.DeclaredType = std::move(ParamTypeInfo);
       param.NameLocation = nameLoc;
       param.ParamsLocation = paramsLoc;
       SkipNewlines();
@@ -4413,7 +4558,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       continue;
     }
 
+    TypeInfo memberTypeInfo;
     std::string Type;
+    bool hasMemberTypeInfo = false;
 
     if (CurTok == tok_identifier && IdentifierStr == compositeName) {
       getNextToken();
@@ -4452,12 +4599,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       bool pointerSeen = false;
       if (!AppendTypeSuffix(Type, pointerSeen))
         return nullptr;
-    } else if (IsValidType()) {
-      Type = ParseCompleteType();
-      if (Type.empty()) {
+      memberTypeInfo = buildDeclaredTypeInfo(Type, false);
+      hasMemberTypeInfo = true;
+    } else if (IsValidType() || CurTok == '(') {
+      if (!ParseCompleteTypeInfo(memberTypeInfo, false)) {
         LogError("Failed to parse member type");
         return nullptr;
       }
+      Type = typeNameFromInfo(memberTypeInfo);
+      hasMemberTypeInfo = true;
     } else {
       LogError("Expected field or method declaration inside type definition");
       return nullptr;
@@ -4562,11 +4712,12 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         return nullptr;
       }
 
+      TypeInfo indexerInfo =
+          hasMemberTypeInfo ? memberTypeInfo : buildDeclaredTypeInfo(Type, false);
       auto Indexer = std::make_unique<PropertyAST>(
-          Type, buildDeclaredTypeInfo(Type, false), MemberName, modifiers,
-          nullptr, std::move(indexerParams),
-          memberNameLoc, std::move(getter),
-          std::move(setter));
+          typeNameFromInfo(indexerInfo), std::move(indexerInfo), MemberName,
+          modifiers, nullptr, std::move(indexerParams), memberNameLoc,
+          std::move(getter), std::move(setter));
       Properties.push_back(std::move(Indexer));
       hasIndexer = true;
       continue;
@@ -4612,7 +4763,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
                               "Rename '" + MemberName + "' to PascalCase for consistency");
       }
 
-      if (!parseCompositeMethod(Type, MemberName, modifiers, methodKind,
+      if (!parseCompositeMethod(memberTypeInfo, MemberName, modifiers, methodKind,
                                 std::move(methodGenericParams)))
         return nullptr;
     } else {
@@ -4697,9 +4848,11 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
           return nullptr;
         }
 
-        TypeInfo propInfo = buildDeclaredTypeInfo(Type, false);
+        TypeInfo propInfo =
+            hasMemberTypeInfo ? memberTypeInfo : buildDeclaredTypeInfo(Type, false);
+        std::string propTypeName = typeNameFromInfo(propInfo);
         if (kind != AggregateKind::Interface) {
-          auto Field = std::make_unique<FieldAST>(Type, propInfo, MemberName,
+          auto Field = std::make_unique<FieldAST>(propTypeName, propInfo, MemberName,
                                                   modifiers,
                                                   std::move(MemberInitializer));
           Fields.push_back(std::move(Field));
@@ -4708,7 +4861,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         }
 
         auto Property = std::make_unique<PropertyAST>(
-            Type, std::move(propInfo), MemberName, modifiers, nullptr,
+            propTypeName, std::move(propInfo), MemberName, modifiers, nullptr,
             std::vector<Parameter>{}, memberNameLoc,
             std::move(getter), std::move(setter));
         Properties.push_back(std::move(Property));
@@ -4726,8 +4879,10 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
                             "Assign non-static members inside constructors instead");
         return nullptr;
       }
-      TypeInfo fieldInfo = buildDeclaredTypeInfo(Type, false);
-      auto Field = std::make_unique<FieldAST>(Type, std::move(fieldInfo),
+      TypeInfo fieldInfo =
+          hasMemberTypeInfo ? memberTypeInfo : buildDeclaredTypeInfo(Type, false);
+      std::string fieldTypeName = typeNameFromInfo(fieldInfo);
+      auto Field = std::make_unique<FieldAST>(fieldTypeName, std::move(fieldInfo),
                                               MemberName, modifiers,
                                               std::move(MemberInitializer));
       Fields.push_back(std::move(Field));

@@ -316,7 +316,12 @@ static bool ensureNoDuplicateGenericParameters(const std::vector<std::string> &p
                                                const std::string &contextDescription);
 
 static std::string stripNullableAnnotations(const std::string &typeName);
-static std::string typeNameFromInfo(const TypeInfo &info);
+static llvm::Value *emitTargetTypedConstruction(const TypeInfo &targetInfo,
+                                                ParenExprAST &paren);
+bool areTypesCompatible(llvm::Type *type1, llvm::Type *type2);
+static std::optional<TypeInfo> resolveTupleTypeInfo(const ExprAST *expr);
+static std::optional<size_t> findTupleElementIndex(const TypeInfo &tupleInfo,
+                                                   std::string_view name);
 static bool typeHasDestructor(const TypeInfo &info);
 static bool typeNeedsLifetimeTracking(const TypeInfo &info);
 
@@ -474,6 +479,11 @@ static void assignARCEligibility(TypeInfo &info) {
   }
 
   if (info.baseTypeName == "string") {
+    info.arcManaged = true;
+    return;
+  }
+
+  if (info.baseTypeName == "tuple") {
     info.arcManaged = true;
     return;
   }
@@ -1099,7 +1109,7 @@ static std::string ensureOuterNullable(const std::string &typeName) {
   return typeName + "?";
 }
 
-static std::string typeNameFromInfo(const TypeInfo &info) {
+std::string typeNameFromInfo(const TypeInfo &info) {
   if (info.pointerDepth > 0)
     return info.typeName;
 
@@ -1355,6 +1365,8 @@ static bool typeNeedsLifetimeTracking(const TypeInfo &info) {
   if (info.isAlias())
     return false;
   if (info.requiresARC()) {
+    if (info.isTupleType())
+      return true;
     std::string base = sanitizeCompositeLookupName(typeNameFromInfo(info));
     if (!base.empty()) {
       if (const CompositeTypeInfo *meta = lookupCompositeInfo(base)) {
@@ -5644,6 +5656,33 @@ static bool expressionIsNullable(const ExprAST *expr) {
   return typeAllowsNull(desc);
 }
 
+static std::optional<TypeInfo> resolveExprTypeInfo(const ExprAST *expr) {
+  if (!expr)
+    return std::nullopt;
+
+  if (const TypeInfo *info = expr->getTypeInfo()) {
+    TypeInfo bound = applyActiveTypeBindings(*info);
+    finalizeTypeInfoMetadata(bound);
+    return bound;
+  }
+
+  if (const auto *var = dynamic_cast<const VariableExprAST *>(expr)) {
+    if (const TypeInfo *sym = lookupTypeInfo(var->getName())) {
+      TypeInfo bound = applyActiveTypeBindings(*sym);
+      finalizeTypeInfoMetadata(bound);
+      return bound;
+    }
+  }
+
+  std::string typeName = expr->getTypeName();
+  if (typeName.empty())
+    return std::nullopt;
+
+  TypeInfo info = applyActiveTypeBindings(makeTypeInfo(typeName));
+  finalizeTypeInfoMetadata(info);
+  return info;
+}
+
 class InjectedValueExprAST : public ExprAST {
 public:
   InjectedValueExprAST(llvm::Value *value, std::string typeName,
@@ -5798,6 +5837,66 @@ static bool validateInvariantAssignment(const TypeInfo &targetInfo,
                         contextDescription + " expecting '" +
                         typeNameFromInfo(boundTarget) + "'");
     return false;
+  }
+
+  return true;
+}
+
+static bool validateTupleAssignmentCompatibility(
+    const TypeInfo &targetInfo, const ExprAST *sourceExpr,
+    const std::string &contextDescription) {
+  const ExprAST *coreExpr = unwrapRefExpr(sourceExpr);
+  if (!coreExpr || exprIsNullLiteral(coreExpr))
+    return true;
+
+  TypeInfo boundTarget = applyActiveTypeBindings(targetInfo);
+  finalizeTypeInfoMetadata(boundTarget);
+
+  auto sourceInfoOpt = resolveExprTypeInfo(coreExpr);
+  if (!sourceInfoOpt)
+    return true;
+
+  TypeInfo boundSource = *sourceInfoOpt;
+
+  const bool targetIsTuple = boundTarget.isTupleType();
+  const bool sourceIsTuple = boundSource.isTupleType();
+
+  if (targetIsTuple != sourceIsTuple) {
+    if (targetIsTuple) {
+      reportCompilerError("Cannot use non-tuple value for " +
+                          contextDescription + " expecting '" +
+                          typeNameFromInfo(boundTarget) + "'");
+    } else {
+      reportCompilerError("Cannot use tuple value of type '" +
+                          typeNameFromInfo(boundSource) + "' for " +
+                          contextDescription + " expecting '" +
+                          typeNameFromInfo(boundTarget) + "'");
+    }
+    return false;
+  }
+
+  if (!targetIsTuple)
+    return true;
+
+  if (boundTarget.typeArguments.size() != boundSource.typeArguments.size()) {
+    reportCompilerError(
+        "Tuple arity mismatch for " + contextDescription + ": expected " +
+        std::to_string(boundTarget.typeArguments.size()) +
+        " element(s), got " +
+        std::to_string(boundSource.typeArguments.size()));
+    return false;
+  }
+
+  for (size_t i = 0; i < boundTarget.typeArguments.size(); ++i) {
+    if (!typeInfoEquals(boundTarget.typeArguments[i],
+                        boundSource.typeArguments[i])) {
+      reportCompilerError(
+          "Tuple element " + std::to_string(i) +
+          " type mismatch for " + contextDescription + ": expected '" +
+          typeNameFromInfo(boundTarget.typeArguments[i]) + "', got '" +
+          typeNameFromInfo(boundSource.typeArguments[i]) + "'");
+      return false;
+    }
   }
 
   return true;
@@ -5960,6 +6059,7 @@ static TypeInfo applyTypeWrappers(const TypeInfo &replacement,
   result.arcManaged = replacement.arcManaged;
   result.classDescriptor = replacement.classDescriptor;
   result.genericKey = replacement.genericKey;
+  result.tupleElementNames = replacement.tupleElementNames;
   return result;
 }
 
@@ -6018,6 +6118,7 @@ substituteTypeInfo(const TypeInfo &info,
   result.smartPointerKind = info.smartPointerKind;
   result.arcManaged = info.arcManaged;
   result.classDescriptor = info.classDescriptor;
+  result.tupleElementNames = info.tupleElementNames;
   rebuildGenericBindingKey(result);
   return result;
 }
@@ -6694,6 +6795,124 @@ static bool materializeSmartPointerInstantiation(
                                     payloadInfo, payloadTy))
     return false;
   if (!emitSmartPointerHelpers(constructedName, structTy, metadata, kind))
+    return false;
+
+  return true;
+}
+
+static bool materializeTupleInstantiation(const TypeInfo &requestedType) {
+  TypeInfo tupleInfo = applyActiveTypeBindings(requestedType);
+  finalizeTypeInfoMetadata(tupleInfo);
+
+  if (!tupleInfo.isTupleType())
+    return false;
+
+  std::string constructedName =
+      stripNullableAnnotations(typeNameFromInfo(tupleInfo));
+  if (constructedName.empty())
+    return false;
+
+  if (CG.compositeMetadata.contains(constructedName))
+    return true;
+
+  llvm::StructType *structTy = nullptr;
+  auto structIt = StructTypes.find(constructedName);
+  if (structIt != StructTypes.end() && structIt->second)
+    structTy = structIt->second;
+  if (!structTy) {
+    structTy = llvm::StructType::create(*TheContext, constructedName);
+    StructTypes[constructedName] = structTy;
+  }
+
+  std::vector<llvm::Type *> fieldTypes;
+  std::vector<std::pair<std::string, unsigned>> fieldIndices;
+  std::map<std::string, std::string> fieldTypeMap;
+  std::map<std::string, MemberModifiers> fieldModifiers;
+  std::vector<InstanceFieldInfo> instanceFields;
+
+  llvm::StructType *headerTy = getArcHeaderType();
+  fieldTypes.push_back(headerTy);
+
+  auto appendField = [&](std::string fieldName, const TypeInfo &fieldInfo) -> bool {
+    std::string fieldTypeName = typeNameFromInfo(fieldInfo);
+    llvm::Type *fieldLLVMType = getTypeFromString(fieldTypeName);
+    if (!fieldLLVMType) {
+      reportCompilerError("Unable to materialize tuple element of type '" +
+                          fieldTypeName + "'");
+      return false;
+    }
+
+    unsigned index = static_cast<unsigned>(fieldTypes.size());
+    fieldTypes.push_back(fieldLLVMType);
+    fieldIndices.emplace_back(fieldName, index);
+    fieldTypeMap[fieldName] = fieldTypeName;
+
+    MemberModifiers modifiers;
+    modifiers.access = MemberAccess::PublicReadWrite();
+    fieldModifiers[fieldName] = modifiers;
+
+    InstanceFieldInfo info;
+    info.name = std::move(fieldName);
+    info.index = index;
+    info.type = fieldInfo;
+    instanceFields.push_back(std::move(info));
+    return true;
+  };
+
+  for (size_t i = 0; i < tupleInfo.typeArguments.size(); ++i) {
+    std::string fieldName = "$" + std::to_string(i);
+    if (!appendField(std::move(fieldName), tupleInfo.typeArguments[i]))
+      return false;
+  }
+
+  structTy->setBody(fieldTypes);
+  StructFieldIndices[constructedName] = fieldIndices;
+  StructFieldTypes[constructedName] = fieldTypeMap;
+
+  std::string dummyGlobalName =
+      "__hybrid_force_type_emission_" + sanitizeForMangle(constructedName);
+  if (!TheModule->getGlobalVariable(dummyGlobalName, true)) {
+    new llvm::GlobalVariable(
+        *TheModule, structTy, true, llvm::GlobalValue::InternalLinkage,
+        llvm::Constant::getNullValue(structTy), dummyGlobalName);
+  }
+
+  CompositeTypeInfo info;
+  info.kind = AggregateKind::Struct;
+  info.hasARCHeader = true;
+  info.headerFieldIndex = 0;
+  info.fieldTypes = fieldTypeMap;
+  info.fieldModifiers = fieldModifiers;
+  info.instanceFields = instanceFields;
+  info.hasClassDescriptor = true;
+  info.descriptor.name = constructedName;
+  info.descriptor.kind = AggregateKind::Struct;
+  info.descriptor.baseClassName = std::nullopt;
+  info.descriptor.interfaceNames.clear();
+  info.descriptor.inheritanceChain.clear();
+  info.descriptor.isAbstract = false;
+  info.descriptor.isInterface = false;
+
+  if (info.descriptorGlobalName.empty()) {
+    llvm::StructType *typeDescTy = getTypeDescriptorType();
+    std::string descriptorName =
+        makeRuntimeSymbolName("__hybrid_type_descriptor$", constructedName);
+    llvm::GlobalVariable *descriptorGV =
+        TheModule->getGlobalVariable(descriptorName, true);
+    if (!descriptorGV) {
+      descriptorGV = new llvm::GlobalVariable(
+          *TheModule, typeDescTy, false, llvm::GlobalValue::InternalLinkage,
+          llvm::Constant::getNullValue(typeDescTy), descriptorName);
+    }
+    info.descriptorGlobalName = descriptorName;
+  }
+
+  CG.compositeMetadata[constructedName] = std::move(info);
+  CompositeTypeInfo &metadata = CG.compositeMetadata[constructedName];
+
+  if (!emitCompositeDealloc(constructedName, structTy, metadata))
+    return false;
+  if (!emitClassRuntimeStructures(constructedName, structTy, metadata))
     return false;
 
   return true;
@@ -7556,6 +7775,14 @@ lookupCompositeInfo(const std::string &name, bool countHit) {
   if (!requested.hasTypeArguments())
     return nullptr;
 
+  if (requested.baseTypeName == "tuple") {
+    if (!materializeTupleInstantiation(requested))
+      return nullptr;
+    std::string key = stripNullableAnnotations(typeNameFromInfo(requested));
+    auto it = CG.compositeMetadata.find(key);
+    return it != CG.compositeMetadata.end() ? &it->second : nullptr;
+  }
+
   return materializeCompositeInstantiation(requested);
 }
 
@@ -8046,6 +8273,26 @@ collectMemberFieldAssignmentInfo(MemberAccessExprAST &member) {
   info.fieldPtr = member.codegen_ptr();
   if (!info.fieldPtr)
     return std::nullopt;
+
+  if (auto tupleInfoOpt = resolveTupleTypeInfo(member.getObject());
+      tupleInfoOpt && tupleInfoOpt->isTupleType()) {
+    auto indexOpt = findTupleElementIndex(*tupleInfoOpt, member.getMemberName());
+    if (!indexOpt) {
+      reportCompilerError("Unknown tuple field '" + member.getMemberName() + "'");
+      return std::nullopt;
+    }
+
+    TypeInfo elementInfo =
+        applyActiveTypeBindings(tupleInfoOpt->typeArguments[*indexOpt]);
+    finalizeTypeInfoMetadata(elementInfo);
+    info.declaredFieldType = elementInfo;
+    info.rawFieldTypeName = typeNameFromInfo(elementInfo);
+    info.sanitizedFieldTypeName = sanitizeBaseTypeName(info.rawFieldTypeName);
+    info.allowsNull = typeAllowsNull(elementInfo);
+    info.isStatic = false;
+    info.fieldType = getTypeFromString(info.rawFieldTypeName);
+    return info;
+  }
 
   std::string objectTypeName;
   if (auto *obj = member.getObject())
@@ -8752,12 +8999,402 @@ llvm::Value *NullExprAST::codegen() {
   return llvm::ConstantPointerNull::get(OpaquePtr);
 }
 
+static std::string buildTupleTypeName(const std::vector<TypeInfo> &elementInfos) {
+  std::string typeName = "tuple<";
+  for (size_t i = 0; i < elementInfos.size(); ++i) {
+    if (i > 0)
+      typeName += ",";
+    typeName += typeNameFromInfo(elementInfos[i]);
+  }
+  typeName += ">";
+  return typeName;
+}
+
+static llvm::Value *allocateTupleLiteralStorage(
+    const TypeInfo &tupleInfo, llvm::StructType **outStructTy,
+    const CompositeTypeInfo **outMeta, std::string_view label) {
+  TypeInfo boundTuple = applyActiveTypeBindings(tupleInfo);
+  finalizeTypeInfoMetadata(boundTuple);
+  if (!boundTuple.isTupleType())
+    return nullptr;
+
+  if (!materializeTupleInstantiation(boundTuple))
+    return nullptr;
+
+  std::string tupleName =
+      stripNullableAnnotations(typeNameFromInfo(boundTuple));
+  auto structIt = StructTypes.find(tupleName);
+  if (structIt == StructTypes.end() || !structIt->second) {
+    reportCompilerError("Internal error: missing tuple type '" + tupleName + "'");
+    return nullptr;
+  }
+
+  const CompositeTypeInfo *metadata =
+      lookupCompositeInfo(tupleName, /*countHit=*/false);
+  if (!metadata) {
+    reportCompilerError("Internal error: missing tuple metadata for '" +
+                        tupleName + "'");
+    return nullptr;
+  }
+
+  if (metadata->descriptorGlobalName.empty()) {
+    reportCompilerError("Internal error: missing tuple descriptor for '" +
+                        tupleName + "'");
+    return nullptr;
+  }
+
+  llvm::GlobalVariable *descriptorGV = TheModule->getGlobalVariable(
+      metadata->descriptorGlobalName, true);
+  if (!descriptorGV) {
+    reportCompilerError("Internal error: tuple descriptor '" +
+                        metadata->descriptorGlobalName + "' missing");
+    return nullptr;
+  }
+
+  const llvm::DataLayout &DL = TheModule->getDataLayout();
+  uint64_t typeSize = DL.getTypeAllocSize(structIt->second);
+  llvm::Value *sizeVal = llvm::ConstantInt::get(getSizeType(), typeSize);
+
+  llvm::Value *descriptorPtr = llvm::ConstantExpr::getBitCast(
+      descriptorGV, pointerType(getTypeDescriptorType()));
+
+  llvm::Value *rawPtr = Builder->CreateCall(
+      getHybridAllocObjectFunction(), {sizeVal, descriptorPtr},
+      std::string(label) + ".alloc");
+  llvm::Value *typedPtr = Builder->CreateBitCast(
+      rawPtr, pointerType(structIt->second),
+      std::string(label) + ".ptr");
+
+  if (outStructTy)
+    *outStructTy = structIt->second;
+  if (outMeta)
+    *outMeta = metadata;
+  return typedPtr;
+}
+
+static bool storeTupleElementValue(const TypeInfo &elementInfo,
+                                   llvm::StructType *tupleStructTy,
+                                   llvm::Value *tuplePtr,
+                                   unsigned fieldIndex,
+                                   ExprAST *elementExpr,
+                                   llvm::Value *elementValue,
+                                   std::string_view label) {
+  if (!tupleStructTy || !tuplePtr || !elementValue)
+    return false;
+
+  llvm::Value *fieldPtr = Builder->CreateStructGEP(
+      tupleStructTy, tuplePtr, fieldIndex,
+      std::string(label) + ".field");
+
+  if (!fieldPtr || !fieldPtr->getType()->isPointerTy())
+    return false;
+
+  bool elementIsTemporary = elementExpr && elementExpr->isTemporary();
+
+  if (elementInfo.isSmartPointer()) {
+    const std::string constructedName =
+        stripNullableAnnotations(typeNameFromInfo(elementInfo));
+    auto structIt = StructTypes.find(constructedName);
+    llvm::StructType *structTy =
+        structIt != StructTypes.end() ? structIt->second : nullptr;
+    const CompositeTypeInfo *metadata =
+        resolveSmartPointerMetadata(elementInfo);
+    if (!structTy || !metadata) {
+      reportCompilerError(
+          "Initializer for tuple element has incompatible smart pointer representation");
+      return false;
+    }
+
+    if (auto *rhsVar = dynamic_cast<VariableExprAST *>(elementExpr)) {
+      if (emitSmartPointerInitFromVariable(elementInfo, fieldPtr, *rhsVar,
+                                           "tuple")) {
+        return true;
+      }
+    }
+
+    if (!metadata->smartPointerDestroyHelper.empty()) {
+      llvm::Function *destroyFn = TheModule->getFunction(
+          metadata->smartPointerDestroyHelper);
+      if (!destroyFn) {
+        reportCompilerError(
+            "Internal error: missing smart pointer destroy helper '" +
+            metadata->smartPointerDestroyHelper + "'");
+        return false;
+      }
+      llvm::Value *destroyArg = fieldPtr;
+      llvm::Type *expectedTy =
+          destroyFn->getFunctionType()->getParamType(0);
+      if (expectedTy && destroyArg->getType() != expectedTy) {
+        destroyArg = Builder->CreateBitCast(
+            destroyArg, expectedTy,
+            buildArcOpLabel(label, "smart.destroy.cast"));
+      }
+      Builder->CreateCall(destroyFn, {destroyArg});
+    }
+
+    llvm::Value *stored = elementValue;
+    if (stored->getType()->isPointerTy()) {
+      stored = Builder->CreateLoad(
+          structTy, stored, buildArcOpLabel(label, "smart.assign.load"));
+    }
+    if (stored->getType() != structTy) {
+      reportCompilerError(
+          "Initializer for tuple element has incompatible smart pointer representation");
+      return false;
+    }
+
+    Builder->CreateStore(stored, fieldPtr);
+    return true;
+  }
+
+  if (elementInfo.requiresARC()) {
+    if (!emitManagedStore(fieldPtr, elementValue, elementInfo, label,
+                          elementIsTemporary))
+      return false;
+    return true;
+  }
+
+  Builder->CreateStore(elementValue, fieldPtr);
+  return true;
+}
+
+static llvm::Value *emitTupleLiteralWithTarget(ParenExprAST &paren,
+                                               const TypeInfo &targetInfo) {
+  if (!paren.isTuple())
+    return nullptr;
+
+  if (paren.size() < 2) {
+    reportCompilerError("Tuple literals require at least two elements");
+    return nullptr;
+  }
+
+  TypeInfo tupleInfo = applyActiveTypeBindings(targetInfo);
+  finalizeTypeInfoMetadata(tupleInfo);
+  if (!tupleInfo.isTupleType())
+    return nullptr;
+
+  if (tupleInfo.typeArguments.size() != paren.size()) {
+    reportCompilerError("Tuple literal has " +
+                        std::to_string(paren.size()) +
+                        " element(s), but expected " +
+                        std::to_string(tupleInfo.typeArguments.size()));
+    return nullptr;
+  }
+
+  llvm::StructType *tupleStructTy = nullptr;
+  const CompositeTypeInfo *metadata = nullptr;
+  llvm::Value *tuplePtr = allocateTupleLiteralStorage(
+      tupleInfo, &tupleStructTy, &metadata, "tuple.literal");
+  if (!tuplePtr || !tupleStructTy || !metadata)
+    return nullptr;
+
+  for (size_t i = 0; i < paren.size(); ++i) {
+    ExprAST *elementExpr = paren.getElement(i);
+    if (!elementExpr)
+      return nullptr;
+
+    TypeInfo elementInfo = applyActiveTypeBindings(tupleInfo.typeArguments[i]);
+    finalizeTypeInfoMetadata(elementInfo);
+
+    if (!validateNullableAssignment(
+            elementInfo, elementExpr,
+            "tuple element " + std::to_string(i))) {
+      return nullptr;
+    }
+
+    llvm::Value *elementValue = nullptr;
+    if (auto *elemParen = dynamic_cast<ParenExprAST *>(elementExpr)) {
+      elementValue = emitTargetTypedConstruction(elementInfo, *elemParen);
+    }
+
+    if (!elementValue) {
+      if (auto *newExpr = dynamic_cast<NewExprAST *>(elementExpr))
+        propagateTypeToNewExpr(newExpr, elementInfo);
+    }
+
+    std::string elementTypeName = typeNameFromInfo(elementInfo);
+    std::string cleanElementTypeName =
+        sanitizeBaseTypeName(elementTypeName);
+    if (cleanElementTypeName.empty())
+      cleanElementTypeName = elementTypeName;
+
+    llvm::Type *elementLLVMType = getTypeFromString(elementTypeName);
+
+    if (!elementValue) {
+      if (auto *num = dynamic_cast<NumberExprAST *>(elementExpr)) {
+        if (elementLLVMType)
+          elementValue = num->codegen_with_target(elementLLVMType);
+      } else if (auto *ch = dynamic_cast<CharExprAST *>(elementExpr)) {
+        if (elementLLVMType) {
+          elementValue =
+              ch->codegen_with_target(elementLLVMType, cleanElementTypeName);
+        }
+      }
+    }
+
+    if (!elementValue)
+      elementValue = elementExpr->codegen();
+    if (!elementValue)
+      return nullptr;
+
+    if (!elementLLVMType) {
+      reportCompilerError("Unknown tuple element type '" +
+                          elementTypeName + "'");
+      return nullptr;
+    }
+
+    if (!validateTupleAssignmentCompatibility(
+            elementInfo, elementExpr,
+            "tuple element " + std::to_string(i)))
+      return nullptr;
+
+    llvm::Type *actualType = elementValue->getType();
+    if (actualType != elementLLVMType) {
+      bool compatible = false;
+      if (actualType && elementLLVMType &&
+          actualType->isPointerTy() && elementLLVMType->isPointerTy()) {
+        compatible = true;
+      } else if (actualType && elementLLVMType &&
+                 areTypesCompatible(actualType, elementLLVMType)) {
+        compatible = true;
+      }
+      if (!compatible) {
+        std::string actualTypeName = elementExpr->getTypeName();
+        if (actualTypeName.empty())
+          actualTypeName = describeTypeForDiagnostic(actualType);
+        reportCompilerError(
+            "Tuple element " + std::to_string(i) + " expects '" +
+            elementTypeName + "', got '" + actualTypeName + "'");
+        return nullptr;
+      }
+    }
+
+    if (diagnoseDisallowedImplicitIntegerConversion(
+            elementExpr, elementValue, elementLLVMType, elementTypeName,
+            "tuple element " + std::to_string(i)))
+      return nullptr;
+
+    llvm::Value *storedValue = elementValue;
+    if (!elementInfo.isSmartPointer()) {
+      storedValue = castToType(elementValue, elementLLVMType,
+                               cleanElementTypeName);
+      if (!storedValue)
+        return nullptr;
+    }
+
+    unsigned fieldIndex = static_cast<unsigned>(i);
+    if (metadata->hasARCHeader)
+      fieldIndex += metadata->headerFieldIndex + 1;
+    if (fieldIndex >= tupleStructTy->getNumElements()) {
+      reportCompilerError("Tuple element index out of range");
+      return nullptr;
+    }
+
+    if (!storeTupleElementValue(elementInfo, tupleStructTy, tuplePtr,
+                                fieldIndex, elementExpr, storedValue,
+                                "tuple.elem"))
+      return nullptr;
+  }
+
+  paren.setTypeInfo(tupleInfo);
+  paren.markTemporary();
+  return tuplePtr;
+}
+
+static llvm::Value *emitTupleLiteralInferred(ParenExprAST &paren) {
+  if (paren.size() < 2) {
+    reportCompilerError("Tuple literals require at least two elements");
+    return nullptr;
+  }
+
+  std::vector<llvm::Value *> elementValues;
+  std::vector<TypeInfo> elementInfos;
+  elementValues.reserve(paren.size());
+  elementInfos.reserve(paren.size());
+
+  for (size_t i = 0; i < paren.size(); ++i) {
+    ExprAST *elementExpr = paren.getElement(i);
+    if (!elementExpr)
+      return nullptr;
+
+    llvm::Value *elementValue = elementExpr->codegen();
+    if (!elementValue)
+      return nullptr;
+
+    auto infoOpt = resolveExprTypeInfo(elementExpr);
+    if (!infoOpt || infoOpt->typeName.empty() ||
+        infoOpt->baseTypeName == "null") {
+      reportCompilerError(
+          "Cannot infer type for tuple element " + std::to_string(i),
+          "Specify the tuple type explicitly or use a typed element.");
+      return nullptr;
+    }
+
+    elementValues.push_back(elementValue);
+    elementInfos.push_back(*infoOpt);
+  }
+
+  TypeInfo tupleInfo = makeTypeInfo(buildTupleTypeName(elementInfos));
+  tupleInfo.typeArguments = elementInfos;
+  finalizeTypeInfoMetadata(tupleInfo);
+
+  llvm::StructType *tupleStructTy = nullptr;
+  const CompositeTypeInfo *metadata = nullptr;
+  llvm::Value *tuplePtr = allocateTupleLiteralStorage(
+      tupleInfo, &tupleStructTy, &metadata, "tuple.literal");
+  if (!tuplePtr || !tupleStructTy || !metadata)
+    return nullptr;
+
+  for (size_t i = 0; i < elementInfos.size(); ++i) {
+    const TypeInfo &elementInfo = elementInfos[i];
+    std::string elementTypeName = typeNameFromInfo(elementInfo);
+    llvm::Type *elementLLVMType = getTypeFromString(elementTypeName);
+    if (!elementLLVMType) {
+      reportCompilerError("Unknown tuple element type '" +
+                          elementTypeName + "'");
+      return nullptr;
+    }
+
+    llvm::Value *storedValue = elementValues[i];
+    if (!elementInfo.isSmartPointer()) {
+      storedValue = castToType(storedValue, elementLLVMType, elementTypeName);
+      if (!storedValue)
+        return nullptr;
+    }
+
+    unsigned fieldIndex = static_cast<unsigned>(i);
+    if (metadata->hasARCHeader)
+      fieldIndex += metadata->headerFieldIndex + 1;
+    if (fieldIndex >= tupleStructTy->getNumElements()) {
+      reportCompilerError("Tuple element index out of range");
+      return nullptr;
+    }
+
+    ExprAST *elementExpr = paren.getElement(i);
+    if (!storeTupleElementValue(elementInfo, tupleStructTy, tuplePtr,
+                                fieldIndex, elementExpr, storedValue,
+                                "tuple.elem"))
+      return nullptr;
+  }
+
+  paren.setTypeInfo(tupleInfo);
+  paren.markTemporary();
+  return tuplePtr;
+}
+
 llvm::Value *ParenExprAST::codegen() {
   if (IsTupleExpr) {
-    reportCompilerError(
-        "Tuple expressions are not supported in this context",
-        "Use constructor call syntax like Type(arg1, arg2) instead of relying on bare tuples.");
-    return nullptr;
+    if (const TypeInfo *tupleInfo = getTypeInfo()) {
+      if (tupleInfo->isTupleType())
+        return emitTupleLiteralWithTarget(*this, *tupleInfo);
+    }
+    if (!getTypeName().empty()) {
+      TypeInfo tupleInfo = makeTypeInfo(getTypeName());
+      finalizeTypeInfoMetadata(tupleInfo);
+      if (tupleInfo.isTupleType())
+        return emitTupleLiteralWithTarget(*this, tupleInfo);
+    }
+    return emitTupleLiteralInferred(*this);
   }
 
   if (Elements.empty()) {
@@ -8894,6 +9531,12 @@ static llvm::Value *emitTargetTypedConstruction(const TypeInfo &targetInfo,
                                                 ParenExprAST &paren) {
   TypeInfo boundTarget = applyActiveTypeBindings(targetInfo);
   finalizeTypeInfoMetadata(boundTarget);
+
+  if (boundTarget.isTupleType()) {
+    if (!paren.isTuple())
+      return nullptr;
+    return emitTupleLiteralWithTarget(paren, boundTarget);
+  }
 
   if (boundTarget.isArray || boundTarget.pointerDepth > 0)
     return nullptr;
@@ -10052,6 +10695,96 @@ llvm::Value *ArrayExprAST::codegen() {
     TypeInfo elementTypeInfo;
   };
 
+static std::optional<TypeInfo> resolveTupleTypeInfo(const ExprAST *expr) {
+  return resolveExprTypeInfo(expr);
+}
+
+static std::optional<size_t> findTupleElementIndex(const TypeInfo &tupleInfo,
+                                                   std::string_view name) {
+  if (!tupleInfo.isTupleType())
+    return std::nullopt;
+  if (tupleInfo.tupleElementNames.empty())
+    return std::nullopt;
+
+  for (size_t i = 0; i < tupleInfo.tupleElementNames.size(); ++i) {
+    if (tupleInfo.tupleElementNames[i] == name)
+      return i;
+  }
+  return std::nullopt;
+}
+
+static std::optional<ArrayElementAccessInfo>
+computeTupleElementAccess(const TypeInfo &tupleInfo,
+                          llvm::Value *tupleValue,
+                          size_t elementIndex,
+                          std::string_view label) {
+  if (!tupleValue)
+    return std::nullopt;
+
+  TypeInfo boundTuple = applyActiveTypeBindings(tupleInfo);
+  finalizeTypeInfoMetadata(boundTuple);
+
+  if (!boundTuple.isTupleType())
+    return std::nullopt;
+
+  if (elementIndex >= boundTuple.typeArguments.size()) {
+    reportCompilerError("Tuple index out of range");
+    return std::nullopt;
+  }
+
+  if (!materializeTupleInstantiation(boundTuple))
+    return std::nullopt;
+
+  std::string tupleName =
+      stripNullableAnnotations(typeNameFromInfo(boundTuple));
+  auto structIt = StructTypes.find(tupleName);
+  if (structIt == StructTypes.end() || !structIt->second) {
+    reportCompilerError("Internal error: missing tuple type '" + tupleName + "'");
+    return std::nullopt;
+  }
+
+  llvm::StructType *structTy = structIt->second;
+  const CompositeTypeInfo *metadata =
+      lookupCompositeInfo(tupleName, /*countHit=*/false);
+  if (!metadata) {
+    reportCompilerError("Internal error: missing tuple metadata for '" +
+                        tupleName + "'");
+    return std::nullopt;
+  }
+
+  llvm::Value *tuplePtr = tupleValue;
+  if (!tuplePtr->getType()->isPointerTy()) {
+    llvm::AllocaInst *tmp = Builder->CreateAlloca(
+        structTy, nullptr, std::string(label) + ".tuple.tmp");
+    Builder->CreateStore(tupleValue, tmp);
+    tuplePtr = tmp;
+  } else if (tuplePtr->getType() != pointerType(structTy)) {
+    tuplePtr = Builder->CreateBitCast(tuplePtr, pointerType(structTy),
+                                      std::string(label) + ".tuple.cast");
+  }
+
+  unsigned fieldIndex = static_cast<unsigned>(elementIndex);
+  if (metadata->hasARCHeader)
+    fieldIndex += metadata->headerFieldIndex + 1;
+
+  if (fieldIndex >= structTy->getNumElements()) {
+    reportCompilerError("Tuple index out of range");
+    return std::nullopt;
+  }
+
+  ArrayElementAccessInfo access;
+  llvm::Value *elemPtr =
+      Builder->CreateStructGEP(structTy, tuplePtr, fieldIndex,
+                               std::string(label) + ".elem.ptr");
+  access.elementPtr = elemPtr;
+  access.elementLLVMType = structTy->getElementType(fieldIndex);
+  access.elementTypeInfo = boundTuple.typeArguments[elementIndex];
+  finalizeTypeInfoMetadata(access.elementTypeInfo);
+  access.elementTypeName = typeNameFromInfo(access.elementTypeInfo);
+  access.elementNullable = access.elementTypeInfo.isNullable;
+  return access;
+}
+
 static std::optional<ArrayElementAccessInfo>
 computeArrayElementAccess(ArrayIndexExprAST *node, llvm::Value *arrayValue = nullptr) {
   ArrayElementAccessInfo access;
@@ -10260,6 +10993,43 @@ llvm::Value *ArrayIndexExprAST::codegen() {
     reportCompilerError("Cannot index nullable type '" + arrayTypeName +
                         "' without null-safe operator");
     return nullptr;
+  }
+
+  if (auto tupleInfoOpt = resolveTupleTypeInfo(getArray());
+      tupleInfoOpt && tupleInfoOpt->isTupleType()) {
+    if (getIndexCount() != 1) {
+      reportCompilerError("Tuple indexing requires a single index");
+      return nullptr;
+    }
+
+    ExprAST *indexExpr = getIndex(0);
+    auto *literalIndex = dynamic_cast<NumberExprAST *>(indexExpr);
+    if (!literalIndex || !literalIndex->isIntegerLiteral()) {
+      reportCompilerError("Tuple index must be an integer literal");
+      return nullptr;
+    }
+
+    int64_t indexValue = literalIndex->getLiteral().getSignedValue();
+    if (indexValue < 0) {
+      reportCompilerError("Tuple index cannot be negative");
+      return nullptr;
+    }
+
+    if (static_cast<size_t>(indexValue) >= tupleInfoOpt->typeArguments.size()) {
+      reportCompilerError("Tuple index out of range");
+      return nullptr;
+    }
+
+    auto accessOpt = computeTupleElementAccess(*tupleInfoOpt, arrayValue,
+                                               static_cast<size_t>(indexValue),
+                                               "tuple.index");
+    if (!accessOpt)
+      return nullptr;
+
+    auto &access = *accessOpt;
+    setTypeInfo(access.elementTypeInfo);
+    return Builder->CreateLoad(access.elementLLVMType, access.elementPtr,
+                               "tuple.elem");
   }
 
   std::string ownerName = arrayDesc.sanitized;
@@ -10473,7 +11243,7 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   llvm::Value *V = NamedValues[getName()];
   if (V) {
     if (const TypeInfo *info = lookupLocalTypeInfo(getName())) {
-      setTypeName(typeNameFromInfo(*info));
+      setTypeInfo(*info);
       if (info->isAlias())
         return materializeAliasPointer(V, *info, getName());
       bool needsLoad = false;
@@ -10496,7 +11266,7 @@ llvm::Value *VariableExprAST::codegen_ptr() {
   llvm::Value *G = GlobalValues[getName()];
   if (G) {
     if (const TypeInfo *info = lookupGlobalTypeInfo(getName())) {
-      setTypeName(typeNameFromInfo(*info));
+      setTypeInfo(*info);
       if (info->isAlias())
         return materializeAliasPointer(G, *info, getName());
       bool needsLoad = false;
@@ -10568,6 +11338,42 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
 
   std::string arrayTypeName = getArray()->getTypeName();
   ParsedTypeDescriptor arrayDesc = parseTypeString(arrayTypeName);
+  if (auto tupleInfoOpt = resolveTupleTypeInfo(getArray());
+      tupleInfoOpt && tupleInfoOpt->isTupleType()) {
+    if (getIndexCount() != 1) {
+      reportCompilerError("Tuple indexing requires a single index");
+      return nullptr;
+    }
+
+    ExprAST *indexExpr = getIndex(0);
+    auto *literalIndex = dynamic_cast<NumberExprAST *>(indexExpr);
+    if (!literalIndex || !literalIndex->isIntegerLiteral()) {
+      reportCompilerError("Tuple index must be an integer literal");
+      return nullptr;
+    }
+
+    int64_t indexValue = literalIndex->getLiteral().getSignedValue();
+    if (indexValue < 0) {
+      reportCompilerError("Tuple index cannot be negative");
+      return nullptr;
+    }
+
+    if (static_cast<size_t>(indexValue) >= tupleInfoOpt->typeArguments.size()) {
+      reportCompilerError("Tuple index out of range");
+      return nullptr;
+    }
+
+    auto accessOpt = computeTupleElementAccess(*tupleInfoOpt, arrayValue,
+                                               static_cast<size_t>(indexValue),
+                                               "tuple.index");
+    if (!accessOpt)
+      return nullptr;
+
+    auto &access = *accessOpt;
+    setTypeInfo(access.elementTypeInfo);
+    return access.elementPtr;
+  }
+
   std::string ownerName = arrayDesc.sanitized;
   if (!ownerName.empty()) {
     if (const CompositeTypeInfo *info = lookupCompositeInfo(ownerName)) {
@@ -10736,7 +11542,7 @@ llvm::Value *VariableExprAST::codegen() {
       TypeInfo effective = *info;
       if (typeAllowsNull(*info) && isKnownNonNull(getName()))
         effective.isNullable = false;
-      setTypeName(typeNameFromInfo(effective));
+      setTypeInfo(effective);
 
       if (info->isAlias()) {
         llvm::Value *Ptr = materializeAliasPointer(V, *info, getName());
@@ -10767,7 +11573,7 @@ llvm::Value *VariableExprAST::codegen() {
       TypeInfo effective = *info;
       if (typeAllowsNull(*info) && isKnownNonNull(getName()))
         effective.isNullable = false;
-      setTypeName(typeNameFromInfo(effective));
+      setTypeInfo(effective);
 
       if (info->isAlias()) {
         llvm::Value *Ptr = materializeAliasPointer(GV, *info, getName());
@@ -12779,6 +13585,11 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Value *rhsValue = emitAssignmentRHS(info);
             if (!rhsValue)
               return nullptr;
+            if (info &&
+                !validateTupleAssignmentCompatibility(
+                    *info, getRHS(),
+                    "assignment to variable '" + LHSE->getName() + "'"))
+              return nullptr;
             if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
               return nullptr;
             rhsValue = castToType(rhsValue, ActualLLVMType);
@@ -12827,6 +13638,11 @@ llvm::Value *BinaryExprAST::codegen() {
             return nullptr;
 
           const TypeInfo *info = lookupLocalTypeInfo(LHSE->getName());
+          if (info &&
+              !validateTupleAssignmentCompatibility(
+                  *info, getRHS(),
+                  "assignment to variable '" + LHSE->getName() + "'"))
+            return nullptr;
           if (info && info->isSmartPointer()) {
             const std::string constructedName =
                 stripNullableAnnotations(typeNameFromInfo(*info));
@@ -12970,6 +13786,11 @@ llvm::Value *BinaryExprAST::codegen() {
             llvm::Value *rhsValue = emitAssignmentRHS(info);
             if (!rhsValue)
               return nullptr;
+            if (info &&
+                !validateTupleAssignmentCompatibility(
+                    *info, getRHS(),
+                    "assignment to variable '" + LHSE->getName() + "'"))
+              return nullptr;
             if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, ActualLLVMType, info->typeName, "assignment to '" + LHSE->getName() + "'"))
               return nullptr;
             rhsValue = castToType(rhsValue, ActualLLVMType);
@@ -13016,6 +13837,11 @@ llvm::Value *BinaryExprAST::codegen() {
             return nullptr;
 
           const TypeInfo *info = lookupGlobalTypeInfo(LHSE->getName());
+          if (info &&
+              !validateTupleAssignmentCompatibility(
+                  *info, getRHS(),
+                  "assignment to variable '" + LHSE->getName() + "'"))
+            return nullptr;
           if (info && info->isSmartPointer()) {
             const std::string constructedName =
                 stripNullableAnnotations(typeNameFromInfo(*info));
@@ -13102,8 +13928,33 @@ llvm::Value *BinaryExprAST::codegen() {
 
         return LogErrorV(("Unknown variable name: " + LHSE->getName()).c_str());
       } else if (ArrayIndexExprAST *LHSAI = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
-        // Array element assignment
-        auto accessOpt = computeArrayElementAccess(LHSAI);
+        // Array or tuple element assignment
+        std::optional<ArrayElementAccessInfo> accessOpt;
+        if (auto tupleInfoOpt = resolveTupleTypeInfo(LHSAI->getArray());
+            tupleInfoOpt && tupleInfoOpt->isTupleType()) {
+          if (LHSAI->getIndexCount() != 1) {
+            return LogErrorV("Tuple indexing requires a single index");
+          }
+
+          ExprAST *indexExpr = LHSAI->getIndex(0);
+          auto *literalIndex = dynamic_cast<NumberExprAST *>(indexExpr);
+          if (!literalIndex || !literalIndex->isIntegerLiteral())
+            return LogErrorV("Tuple index must be an integer literal");
+
+          int64_t indexValue = literalIndex->getLiteral().getSignedValue();
+          if (indexValue < 0)
+            return LogErrorV("Tuple index cannot be negative");
+          if (static_cast<size_t>(indexValue) >=
+              tupleInfoOpt->typeArguments.size())
+            return LogErrorV("Tuple index out of range");
+
+          accessOpt = computeTupleElementAccess(
+              *tupleInfoOpt, LHSAI->getArray()->codegen(),
+              static_cast<size_t>(indexValue), "tuple.index.assign");
+        } else {
+          accessOpt = computeArrayElementAccess(LHSAI);
+        }
+
         if (!accessOpt)
           return nullptr;
         auto &access = *accessOpt;
@@ -13136,6 +13987,9 @@ llvm::Value *BinaryExprAST::codegen() {
 
         llvm::Value *rhsValue = emitAssignmentRHS(&access.elementTypeInfo);
         if (!rhsValue)
+          return nullptr;
+        if (!validateTupleAssignmentCompatibility(access.elementTypeInfo, getRHS(),
+                                                   "assignment to array element"))
           return nullptr;
         rhsIsTemporary =
             rhsIsTemporary || (getRHS() && getRHS()->isTemporary());
@@ -15610,7 +16464,7 @@ static llvm::Value *emitResolvedCallInternal(
   } else {
     CallValue = Builder->CreateCall(CalleeF, FinalArgs, "calltmp");
     if (typeOwner)
-      typeOwner->setTypeName(typeNameFromInfo(chosen->returnType));
+      typeOwner->setTypeInfo(chosen->returnType);
 
     if (chosen->returnsByRef) {
       llvm::Type *valueType = getTypeFromString(typeNameFromInfo(chosen->returnType));
@@ -16334,7 +17188,7 @@ static llvm::Value *emitDynamicCallRaw(const CompositeMemberInfo &memberInfo,
   } else {
     callValue = Builder->CreateCall(fnType, fnPtr, argValues, "member.dyncall");
     if (typeOwner)
-      typeOwner->setTypeName(typeNameFromInfo(memberInfo.returnType));
+      typeOwner->setTypeInfo(memberInfo.returnType);
     if (memberInfo.returnsByRef) {
       llvm::Type *valueType = getTypeFromString(typeNameFromInfo(memberInfo.returnType));
       if (!valueType)
@@ -16757,6 +17611,9 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     if (!validateInvariantAssignment(declaredInfo, InitializerExpr,
                                      "initializer for '" + getName() + "'"))
       return nullptr;
+    if (!validateTupleAssignmentCompatibility(declaredInfo, InitializerExpr,
+                                              "initializer for '" + getName() + "'"))
+      return nullptr;
     if (!validateArrayNewBoundsForDeclaration(declaredInfo, InitializerExpr,
                                               getName()))
       return nullptr;
@@ -16850,9 +17707,11 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   auto generateInitializerValue = [&](ExprAST *expr) -> llvm::Value * {
     if (!expr)
       return nullptr;
-    if (declaredInfo.isSmartPointer()) {
-      if (auto *paren = dynamic_cast<ParenExprAST *>(expr))
-        return emitTargetTypedConstruction(declaredInfo, *paren);
+    if (auto *paren = dynamic_cast<ParenExprAST *>(expr)) {
+      if (declaredInfo.isTupleType() || declaredInfo.isSmartPointer()) {
+        if (auto constructed = emitTargetTypedConstruction(declaredInfo, *paren))
+          return constructed;
+      }
     }
     if (auto *ArrayInit = dynamic_cast<ArrayExprAST*>(expr)) {
       if (declaredInfo.isArray) {
@@ -20179,6 +21038,25 @@ llvm::Value *MemberAccessExprAST::codegen() {
         return lenVal;
       }
     }
+
+    if (auto tupleInfoOpt = resolveTupleTypeInfo(Object.get());
+        tupleInfoOpt && tupleInfoOpt->isTupleType()) {
+      auto indexOpt = findTupleElementIndex(*tupleInfoOpt, MemberName);
+      if (!indexOpt) {
+        reportCompilerError("Unknown tuple field '" + MemberName + "'");
+        return nullptr;
+      }
+
+      auto accessOpt = computeTupleElementAccess(
+          *tupleInfoOpt, ObjectPtr, *indexOpt, "tuple.field");
+      if (!accessOpt)
+        return nullptr;
+
+      auto &access = *accessOpt;
+      setTypeInfo(access.elementTypeInfo);
+      return Builder->CreateLoad(access.elementLLVMType, access.elementPtr,
+                                 "tuple.elem");
+    }
     StructLookupName = ObjectTypeDesc.sanitized;
 
     info = lookupCompositeInfo(StructLookupName);
@@ -20437,6 +21315,24 @@ llvm::Value *MemberAccessExprAST::codegen_ptr() {
     if (MemberName == "size") {
       if (ObjectTypeDesc.isArray || baseLookup == "string")
         return LogErrorV("Property 'size' is read-only");
+    }
+
+    if (auto tupleInfoOpt = resolveTupleTypeInfo(Object.get());
+        tupleInfoOpt && tupleInfoOpt->isTupleType()) {
+      auto indexOpt = findTupleElementIndex(*tupleInfoOpt, MemberName);
+      if (!indexOpt) {
+        reportCompilerError("Unknown tuple field '" + MemberName + "'");
+        return nullptr;
+      }
+
+      auto accessOpt = computeTupleElementAccess(
+          *tupleInfoOpt, ObjectPtr, *indexOpt, "tuple.field");
+      if (!accessOpt)
+        return nullptr;
+
+      auto &access = *accessOpt;
+      setTypeInfo(access.elementTypeInfo);
+      return access.elementPtr;
     }
     StructLookupName = ObjectTypeDesc.sanitized;
 

@@ -56,6 +56,7 @@ struct TypeInfo {
   std::string typeName;           // canonical language-visible type
   std::string baseTypeName;       // base identifier without generic arguments or suffixes
   std::vector<TypeInfo> typeArguments; // explicit generic type arguments, if any
+  std::vector<std::string> tupleElementNames; // optional tuple element names
   unsigned pointerDepth = 0;      // number of explicit pointer levels (@)
   bool isArray = false;           // whether type is an array ("[]")
   unsigned arrayDepth = 0;        // number of array segments ([], [,,], etc.)
@@ -79,6 +80,9 @@ struct TypeInfo {
   bool isAlias() const { return refStorage == RefStorageClass::RefAlias; }
   bool hasTypeArguments() const { return !typeArguments.empty(); }
   bool isSmartPointer() const { return smartPointerKind != SmartPointerKind::None; }
+  bool isTupleType() const {
+    return baseTypeName == "tuple" && !typeArguments.empty();
+  }
   bool participatesInARC() const {
     return arcManaged && isArcLoweringEnabled();
   }
@@ -89,6 +93,7 @@ struct TypeInfo {
 };
 
 void finalizeTypeInfoMetadata(TypeInfo &info);
+std::string typeNameFromInfo(const TypeInfo &info);
 
 enum class AggregateKind : uint8_t {
   Struct,
@@ -241,6 +246,7 @@ void NoteTopLevelStatementEmitted();
 class ExprAST {
 protected:
   mutable std::string TypeName; // The type name of this expression (e.g. "int", "byte", "float")
+  mutable std::optional<TypeInfo> TypeInfoCache;
   bool TemporaryValue = false;
   GenericBindingKey BoundGenericKey;
   bool HasBoundGenericKey = false;
@@ -255,7 +261,18 @@ public:
   [[nodiscard]] virtual std::string getTypeName() const { return TypeName; }
   
   // Set the type name (used during codegen)
-  void setTypeName(const std::string &TN) const { TypeName = TN; }
+  void setTypeName(const std::string &TN) const {
+    TypeName = TN;
+    if (TypeInfoCache && typeNameFromInfo(*TypeInfoCache) != TN)
+      TypeInfoCache.reset();
+  }
+  void setTypeInfo(TypeInfo info) const {
+    TypeInfoCache = std::move(info);
+    TypeName = typeNameFromInfo(*TypeInfoCache);
+  }
+  const TypeInfo *getTypeInfo() const {
+    return TypeInfoCache ? &*TypeInfoCache : nullptr;
+  }
   bool isTemporary() const { return TemporaryValue; }
   void markTemporary(bool value = true) { TemporaryValue = value; }
   bool hasGenericBindingKey() const { return HasBoundGenericKey; }

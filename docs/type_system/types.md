@@ -54,6 +54,25 @@ string[] names = ["Alice", "Bob", "Charlie"]
 
 Arrays are implemented as structs containing a pointer to elements and a size in LLVM IR. Array literals regenerate their elements to match the declared element type, so `float[] temps = [98.6, 100.0]` stores true 32-bit floats even though the literal syntax defaults to `double`. The same width-aware regeneration applies to character arrays, so `schar[] ascii = ['A', 'B']` produces 8-bit code units while `lchar[]` stores full 32-bit values.
 
+## Tuple Types
+
+Tuple types bundle a fixed number of values into a single aggregate without declaring a named struct. Use parentheses in the type position, and include at least two elements:
+
+```cs
+(int, string) pair = (8, "hello")
+((int, int), string) point = ((1, 2), "origin")
+```
+
+Tuple elements can be named for readability and dot access:
+
+```cs
+(int count, string greeting) message = (2, "hi")
+int c = message.count
+```
+
+Element names are metadata only: they do not change the tuple's layout or assignment compatibility, which is structural by element types.
+Tuple elements are mutable, so you can assign through indexing or named access when the tuple itself is mutable.
+
 ## Strings and Unicode
 
 `string` values are stored as UTF-16 sequences. Every string literal is validated and converted from its UTF-8 spelling during lexing, then emitted as a 16-bit array that shares a single global instance: identical literals point at the same address, so pointer equality works while still representing Unicode text correctly. Character literals adopt the consumer's width, so `'😊'` becomes a 32-bit `lchar` in wide contexts, but narrows to `char`/`schar` if it fits the target range, otherwise invalid UTF-8 triggers a diagnostic. Use the sized character aliases (`schar`, `char`, `lchar`) when you need to control storage explicitly.
