@@ -150,8 +150,13 @@ Treat descriptive errors as a first-class requirement. Pipe new failure paths th
 
 Tests are classified by their expected behavior:
 - **Passing Tests**: Should compile without errors
-- **Failing Tests**: Names containing "fail" are expected to produce errors
+- **Failing Tests**: Names containing "fail" or "error" are expected to produce compile-time failures by default
 - **Feature Tests**: Demonstrate specific language features
+
+You can override the default classification with inline annotations:
+- `// EXPECT_FAIL: compile|runtime|any` to require a specific failure kind (defaults to `compile` when omitted)
+- `// EXPECT_PASS` to force a test to be treated as passing even if the filename contains `fail`/`error`
+- `// EXPECT_EXIT: <code|nonzero|zero|abort>` to assert the runtime exit status when a program is executed
 
 ### Output Format
 
@@ -290,6 +295,17 @@ int useUndefined()
     return x  // Error: x is not defined
 }
 ```
+
+If the failure should occur at runtime (for example, a non-zero `main` return),
+add an explicit expectation:
+
+```c
+// EXPECT_FAIL: runtime
+// EXPECT_EXIT: 1
+```
+
+If a file name contains `fail`/`error` for non-failure reasons (for example, ARC
+escape analysis fixtures), add `// EXPECT_PASS` to force a passing expectation.
 
 ## Test Coverage
 

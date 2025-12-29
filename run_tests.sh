@@ -237,7 +237,54 @@ run_test() {
     local test_name=$(basename "$test_file" .hy)
     local test_wall_start=$(now_time)
     local counts_for_timing=1
-    if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+    local expected_mode="pass"
+    local expected_fail_kind=""
+    local expected_exit=""
+    local expect_pass=0
+
+    if grep -qE "^// EXPECT_PASS" "$test_file"; then
+        expect_pass=1
+    fi
+
+    while IFS= read -r line; do
+        line=${line#"// EXPECT_FAIL:"}
+        line=$(echo "$line" | sed -e 's/^[[:space:]]*//')
+        if [ -z "$line" ]; then
+            expected_fail_kind="compile"
+        else
+            local lower
+            lower=$(printf "%s" "$line" | tr '[:upper:]' '[:lower:]')
+            case "$lower" in
+                compile|compiler)
+                    expected_fail_kind="compile"
+                    ;;
+                runtime|run)
+                    expected_fail_kind="runtime"
+                    ;;
+                any|either)
+                    expected_fail_kind="any"
+                    ;;
+                *)
+                    expected_fail_kind="compile"
+                    ;;
+            esac
+        fi
+    done < <(grep -E "^// EXPECT_FAIL:" "$test_file" || true)
+
+    if [ $expect_pass -eq 1 ]; then
+        expected_mode="pass"
+    elif [ -n "$expected_fail_kind" ]; then
+        expected_mode="fail"
+    elif [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+        expected_mode="fail"
+        expected_fail_kind="compile"
+    fi
+
+    if [ "$expected_mode" = "fail" ] && [ -z "$expected_fail_kind" ]; then
+        expected_fail_kind="compile"
+    fi
+
+    if [ "$expected_mode" = "fail" ]; then
         counts_for_timing=0
     fi
     local run_opts=()
@@ -257,27 +304,12 @@ run_test() {
     exit_code=$?
     
     # Check for error patterns in output
-    local has_errors=0
-    if grep -q "Error" <<< "$output" 2>/dev/null; then
-        has_errors=1
+    local compile_failed=0
+    if [ $exit_code -ne 0 ]; then
+        compile_failed=1
     fi
-    if grep -q "Failed to generate" <<< "$output" 2>/dev/null; then
-        has_errors=1
-    fi
-    if grep -q "Unknown function" <<< "$output" 2>/dev/null; then
-        has_errors=1
-    fi
-    if grep -q "Unknown variable" <<< "$output" 2>/dev/null; then
-        has_errors=1
-    fi
-    if grep -q "invalid binary operator" <<< "$output" 2>/dev/null; then
-        has_errors=1
-    fi
-    if grep -q "Binary operator" <<< "$output" 2>/dev/null; then
-        has_errors=1
-    fi
-    if grep -q "Expected.*after" <<< "$output" 2>/dev/null; then
-        has_errors=1
+    if grep -E -q "Error at line|Error:|Failed to generate|Unknown function|Unknown variable|invalid binary operator|Binary operator|Expected.*after" <<< "$output" 2>/dev/null; then
+        compile_failed=1
     fi
 
     local expected_output=()
@@ -298,18 +330,42 @@ run_test() {
         fi
     done < <(grep -E "^// EXPECT_RUNTIME:" "$test_file" || true)
 
+    while IFS= read -r line; do
+        line=${line#"// EXPECT_EXIT:"}
+        line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        if [ -n "$line" ]; then
+            expected_exit="$line"
+        fi
+    done < <(grep -E "^// EXPECT_EXIT:" "$test_file" || true)
+
+    local compiler_expectation_failed=0
     for expected in "${expected_output[@]}"; do
         if ! grep -F -q "$expected" <<< "$output"; then
-            has_errors=1
+            compiler_expectation_failed=1
             output="${output}"$'\n'"[test-expectation] missing: ${expected}"
         fi
     done
 
-    # If compilation succeeded and test is not expected to fail, compile and run with clang
     local runtime_exit_code=0
     local runtime_output=""
-    if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ] && [[ "$test_name" != *"fail"* ]] && [[ "$test_name" != *"error"* ]]; then
-        # Check if clang is available and we have runtime library
+    local runtime_ran=0
+    local runtime_failed=0
+    local runtime_failure_kind=""
+    local should_run_runtime=0
+
+    if [ $compile_failed -eq 0 ] && [ $exit_code -eq 0 ]; then
+        if [ "$expected_mode" = "pass" ]; then
+            should_run_runtime=1
+        else
+            if [ "$expected_fail_kind" != "compile" ]; then
+                should_run_runtime=1
+            elif [ ${#expected_runtime[@]} -gt 0 ] || [ -n "$expected_exit" ]; then
+                should_run_runtime=1
+            fi
+        fi
+    fi
+
+    if [ $should_run_runtime -eq 1 ]; then
         if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
             # Extract the final complete LLVM module (after "=== Final Generated LLVM IR ===")
             local module_marker=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
@@ -360,16 +416,19 @@ run_test() {
                         runtime_output=$("$temp_bin" 2>&1)
                         runtime_exit_code=$?
                         set -e
+                        runtime_ran=1
 
                         if [ $runtime_exit_code -ne 0 ]; then
-                            has_errors=1
+                            runtime_failed=1
+                            runtime_failure_kind="exit"
                         fi
                     else
-                        has_errors=1
+                        runtime_failed=1
+                        runtime_failure_kind="clang"
                     fi
                 fi
 
-                if [ $has_errors -ne 0 ] && [ -n "$temp_bin" ]; then
+                if [ $runtime_failed -ne 0 ] && [ -n "$temp_bin" ]; then
                     cp "$temp_ir" /tmp/hybrid_fail.ll 2>/dev/null || true
                     cp "$temp_bin" /tmp/hybrid_fail.bin 2>/dev/null || true
                 fi
@@ -378,111 +437,107 @@ run_test() {
         fi
     fi
 
-    # For fail/error tests that compiled cleanly, run the generated program to
-    # detect failure modes like non-zero exit codes.
-    if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
-        if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
-            if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
-                local module_marker=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
-                local module_start=""
-                if [ -n "$module_marker" ]; then
-                    module_start=$((module_marker + 1))
-                fi
-
-                if [ -n "$module_start" ]; then
-                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]" | grep -v "^\\[arc-escape\\]")
-
-                    local temp_ir=$(mktemp /tmp/hybrid_test_fail.XXXXXX)
-                    mv "$temp_ir" "${temp_ir}.ll"
-                    temp_ir="${temp_ir}.ll"
-                    local temp_bin=$(mktemp /tmp/hybrid_bin_fail.XXXXXX)
-                    echo "$clean_ir" > "$temp_ir"
-
-                    if grep -q "define i32 @main" "$temp_ir"; then
-                        # Check if smart pointer runtime is needed
-                        local needs_smart_ptr_runtime=$ARC_RUNTIME_REQUIRED
-                        for opt in "${run_opts[@]}"; do
-                            case "$opt" in
-                                --arc-debug|--arc-leak-detect|--arc-verify-runtime|--arc-trace-retains)
-                                    needs_smart_ptr_runtime=1
-                                    ;;
-                            esac
-                        done
-                        if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
-                            needs_smart_ptr_runtime=1
-                        elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease\|hybrid_alloc_array\|hybrid_alloc_object" "$temp_ir"; then
-                            needs_smart_ptr_runtime=1
-                        fi
-
-                        local clang_success=0
-                        if [ $needs_smart_ptr_runtime -eq 1 ]; then
-                            # Smart pointer tests use C++ runtime - don't include stub runtime library
-                            if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
-                                clang_success=1
-                            fi
-                        else
-                            if clang++ "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
-                                clang_success=1
-                            fi
-                        fi
-
-                        if [ $clang_success -eq 1 ]; then
-                            set +e
-                            runtime_output=$("$temp_bin" 2>&1)
-                            runtime_exit_code=$?
-                            set -e
-
-                            if [ $runtime_exit_code -ne 0 ]; then
-                                has_errors=1
-                            fi
-                        else
-                            has_errors=1
-                        fi
-                    fi
-
-                    rm -f "$temp_ir" "$temp_bin"
-                fi
-            fi
-        fi
-    fi
-
+    local runtime_expectation_failed=0
     if [ ${#expected_runtime[@]} -gt 0 ]; then
-        if [ -z "$runtime_output" ]; then
-            has_errors=1
+        if [ $runtime_ran -eq 0 ]; then
+            runtime_expectation_failed=1
+            output="${output}"$'\n'"[runtime-expectation] runtime did not run"
+        elif [ -z "$runtime_output" ]; then
+            runtime_expectation_failed=1
             output="${output}"$'\n'"[runtime-expectation] missing runtime output"
         else
             for expected in "${expected_runtime[@]}"; do
                 if ! grep -F -q "$expected" <<< "$runtime_output"; then
-                    has_errors=1
+                    runtime_expectation_failed=1
                     output="${output}"$'\n'"[runtime-expectation] missing: ${expected}"
                 fi
             done
         fi
     fi
 
-    # Determine if test passed or failed
-    local test_passed=0
-
-    # Special case: tests that should fail (have "fail" in name)
-    if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
-        if [ $has_errors -eq 1 ] || [ $exit_code -ne 0 ]; then
-            test_passed=1
-            PASSED_TESTS=$((PASSED_TESTS + 1))
+    if [ -n "$expected_exit" ]; then
+        if [ $runtime_ran -eq 0 ]; then
+            runtime_expectation_failed=1
+            output="${output}"$'\n'"[runtime-expectation] missing runtime exit"
         else
-            test_passed=0
-            FAILED_TESTS=$((FAILED_TESTS + 1))
-        fi
-    else
-        # Normal tests should not have errors (including runtime errors)
-        if [ $has_errors -eq 0 ] && [ $exit_code -eq 0 ]; then
-            test_passed=1
-            PASSED_TESTS=$((PASSED_TESTS + 1))
-        else
-            test_passed=0
-            FAILED_TESTS=$((FAILED_TESTS + 1))
+            local exit_expectation_failed=0
+            local lower_exit
+            lower_exit=$(printf "%s" "$expected_exit" | tr '[:upper:]' '[:lower:]')
+            case "$lower_exit" in
+                nonzero)
+                    if [ $runtime_exit_code -eq 0 ]; then
+                        exit_expectation_failed=1
+                    fi
+                    ;;
+                zero)
+                    if [ $runtime_exit_code -ne 0 ]; then
+                        exit_expectation_failed=1
+                    fi
+                    ;;
+                abort|sigabrt)
+                    if [ $runtime_exit_code -ne 134 ]; then
+                        exit_expectation_failed=1
+                    fi
+                    ;;
+                *)
+                    if [ "$runtime_exit_code" -ne "$expected_exit" ]; then
+                        exit_expectation_failed=1
+                    fi
+                    ;;
+            esac
+            if [ $exit_expectation_failed -eq 1 ]; then
+                runtime_expectation_failed=1
+                output="${output}"$'\n'"[runtime-expectation] expected exit ${expected_exit}, got ${runtime_exit_code}"
+            fi
         fi
     fi
+
+    # Determine if test passed or failed
+    local test_passed=0
+    if [ "$expected_mode" = "fail" ]; then
+        case "$expected_fail_kind" in
+            compile)
+                if [ $compile_failed -eq 1 ] && [ $compiler_expectation_failed -eq 0 ] && [ $runtime_expectation_failed -eq 0 ]; then
+                    test_passed=1
+                fi
+                ;;
+            runtime)
+                if [ $compile_failed -eq 0 ] && [ $compiler_expectation_failed -eq 0 ] && [ $runtime_failed -eq 1 ] && [ $runtime_expectation_failed -eq 0 ]; then
+                    test_passed=1
+                fi
+                ;;
+            any)
+                if { [ $compile_failed -eq 1 ] || [ $runtime_failed -eq 1 ]; } && [ $compiler_expectation_failed -eq 0 ] && [ $runtime_expectation_failed -eq 0 ]; then
+                    test_passed=1
+                fi
+                ;;
+            *)
+                if [ $compile_failed -eq 1 ] && [ $compiler_expectation_failed -eq 0 ] && [ $runtime_expectation_failed -eq 0 ]; then
+                    test_passed=1
+                fi
+                ;;
+        esac
+    else
+        if [ $compile_failed -eq 0 ] && [ $compiler_expectation_failed -eq 0 ] && [ $runtime_failed -eq 0 ] && [ $runtime_expectation_failed -eq 0 ]; then
+            test_passed=1
+        fi
+    fi
+
+    if [ $test_passed -eq 1 ]; then
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+    else
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
     
+    local expected_label="expected to pass"
+    if [ "$expected_mode" = "fail" ]; then
+        if [ "$expected_fail_kind" = "any" ]; then
+            expected_label="expected failure"
+        else
+            expected_label="expected ${expected_fail_kind} failure"
+        fi
+    fi
+
     local should_show_output=0
     if [ $FAILURES_ONLY -eq 0 ] || [ $test_passed -eq 0 ]; then
         should_show_output=1
@@ -498,26 +553,49 @@ run_test() {
         echo "Output:"
         printf "%s\n" "$output"
         echo
-        if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+        if [ "$expected_mode" = "fail" ]; then
             if [ $test_passed -eq 1 ]; then
-                echo -e "${GREEN}✓ PASSED: $test_name (correctly failed as expected)${NC}"
+                echo -e "${GREEN}✓ PASSED: $test_name (${expected_label})${NC}"
             else
-                echo -e "${RED}✗ FAILED: $test_name (should have failed but didn't)${NC}"
+                echo -e "${RED}✗ FAILED: $test_name (${expected_label})${NC}"
             fi
         else
             if [ $test_passed -eq 1 ]; then
                 echo -e "${GREEN}✓ PASSED: $test_name${NC}"
             else
                 echo -e "${RED}✗ FAILED: $test_name${NC}"
-                if [ $exit_code -ne 0 ]; then
-                    echo -e "${RED}  Compilation exit code: $exit_code${NC}"
-                fi
+            fi
+        fi
+        if [ $test_passed -eq 0 ]; then
+            if [ $exit_code -ne 0 ]; then
+                echo -e "${RED}  Compilation exit code: $exit_code${NC}"
+            elif [ $compile_failed -ne 0 ]; then
+                echo -e "${RED}  Compiler diagnostics detected${NC}"
+            fi
+            if [ $runtime_ran -eq 1 ]; then
                 if [ $runtime_exit_code -ne 0 ]; then
-                    echo -e "${RED}  Runtime exit code: $runtime_exit_code (possible assert failure or abort)${NC}"
+                    echo -e "${RED}  Runtime exit code: $runtime_exit_code${NC}"
                 fi
-                if [ $has_errors -eq 1 ]; then
-                    echo -e "${RED}  Errors found in output:${NC}"
-                    echo "$output" | grep -E "(Error|Failed to generate|Unknown function|Unknown variable|Binary operator|Expected.*after)" | head -3
+            elif [ "$expected_mode" = "fail" ] && [ "$expected_fail_kind" = "runtime" ]; then
+                echo -e "${RED}  Runtime did not run${NC}"
+            fi
+            if [ $compiler_expectation_failed -ne 0 ] || [ $runtime_expectation_failed -ne 0 ]; then
+                echo -e "${RED}  Expectation mismatch detected${NC}"
+            fi
+            if [ $compile_failed -ne 0 ] || [ $compiler_expectation_failed -ne 0 ]; then
+                local error_lines
+                error_lines=$(echo "$output" | grep -E "Error at line|Error:|Warning at line" || true)
+                echo -e "${RED}  Compiler output:${NC}"
+                if [ -n "$error_lines" ]; then
+                    echo "$error_lines" | head -5
+                else
+                    echo "$output" | head -5
+                fi
+            fi
+            if [ $runtime_expectation_failed -ne 0 ] || [ $runtime_failed -ne 0 ]; then
+                if [ -n "$runtime_output" ]; then
+                    echo -e "${RED}  Runtime output:${NC}"
+                    echo "$runtime_output" | head -5
                 fi
             fi
         fi
@@ -534,26 +612,49 @@ run_test() {
         echo -e "${YELLOW}Running test: $test_name${NC}"
         echo "----------------------------------------"
         
-        if [[ "$test_name" == *"fail"* ]] || [[ "$test_name" == *"error"* ]]; then
+        if [ "$expected_mode" = "fail" ]; then
             if [ $test_passed -eq 1 ]; then
-                echo -e "${GREEN}✓ PASSED: $test_name (correctly failed as expected)${NC}"
+                echo -e "${GREEN}✓ PASSED: $test_name (${expected_label})${NC}"
             else
-                echo -e "${RED}✗ FAILED: $test_name (should have failed but didn't)${NC}"
+                echo -e "${RED}✗ FAILED: $test_name (${expected_label})${NC}"
             fi
         else
             if [ $test_passed -eq 1 ]; then
                 echo -e "${GREEN}✓ PASSED: $test_name${NC}"
             else
                 echo -e "${RED}✗ FAILED: $test_name${NC}"
-                if [ $exit_code -ne 0 ]; then
-                    echo -e "${RED}  Compilation exit code: $exit_code${NC}"
-                fi
+            fi
+        fi
+        if [ $test_passed -eq 0 ]; then
+            if [ $exit_code -ne 0 ]; then
+                echo -e "${RED}  Compilation exit code: $exit_code${NC}"
+            elif [ $compile_failed -ne 0 ]; then
+                echo -e "${RED}  Compiler diagnostics detected${NC}"
+            fi
+            if [ $runtime_ran -eq 1 ]; then
                 if [ $runtime_exit_code -ne 0 ]; then
-                    echo -e "${RED}  Runtime exit code: $runtime_exit_code (possible assert failure or abort)${NC}"
+                    echo -e "${RED}  Runtime exit code: $runtime_exit_code${NC}"
                 fi
-                if [ $has_errors -eq 1 ]; then
-                    echo -e "${RED}  Errors found in output:${NC}"
-                    echo "$output" | grep -E "(Error|Failed to generate|Unknown function|Unknown variable|Binary operator|Expected.*after)" | head -3
+            elif [ "$expected_mode" = "fail" ] && [ "$expected_fail_kind" = "runtime" ]; then
+                echo -e "${RED}  Runtime did not run${NC}"
+            fi
+            if [ $compiler_expectation_failed -ne 0 ] || [ $runtime_expectation_failed -ne 0 ]; then
+                echo -e "${RED}  Expectation mismatch detected${NC}"
+            fi
+            if [ $compile_failed -ne 0 ] || [ $compiler_expectation_failed -ne 0 ]; then
+                local error_lines
+                error_lines=$(echo "$output" | grep -E "Error at line|Error:|Warning at line" || true)
+                echo -e "${RED}  Compiler output:${NC}"
+                if [ -n "$error_lines" ]; then
+                    echo "$error_lines" | head -5
+                else
+                    echo "$output" | head -5
+                fi
+            fi
+            if [ $runtime_expectation_failed -ne 0 ] || [ $runtime_failed -ne 0 ]; then
+                if [ -n "$runtime_output" ]; then
+                    echo -e "${RED}  Runtime output:${NC}"
+                    echo "$runtime_output" | head -5
                 fi
             fi
         fi

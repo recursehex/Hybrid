@@ -484,17 +484,56 @@ rem ==========================================================
 :run_test
 set "test_file=%~1"
 set "test_name=%~n1"
-set has_errors=0
+set compile_failed=0
+set compiler_expectation_failed=0
+set runtime_expectation_failed=0
 set runtime_exit_code=0
+set runtime_ran=0
+set runtime_failed=0
 set test_passed=0
 set "run_opts="
 set counts_for_timing=1
 set "runtime_output_file="
+set "expected_mode=pass"
+set "expected_fail_kind="
+set "expected_exit="
+set "expect_pass=0"
 set "output_file=%TEMP%\hybrid_test_output_%RANDOM%.txt"
 set "runtime_log=%TEMP%\hybrid_runtime_%RANDOM%.txt"
 
-echo !test_name! | findstr /i "fail error" >nul
-if !errorlevel! equ 0 set counts_for_timing=0
+findstr /b /c:"// EXPECT_PASS" "!test_file!" >nul 2>&1 && set expect_pass=1
+
+for /f "usebackq delims=" %%l in (`findstr /b /c:"// EXPECT_FAIL:" "%test_file%"`) do (
+    set "line=%%l"
+    set "line=!line:// EXPECT_FAIL:=!"
+    for /f "tokens=* delims= " %%o in ("!line!") do set "line=%%o"
+    if "!line!"=="" (
+        set "expected_fail_kind=compile"
+    ) else (
+        if /i "!line!"=="compile" set "expected_fail_kind=compile"
+        if /i "!line!"=="compiler" set "expected_fail_kind=compile"
+        if /i "!line!"=="runtime" set "expected_fail_kind=runtime"
+        if /i "!line!"=="run" set "expected_fail_kind=runtime"
+        if /i "!line!"=="any" set "expected_fail_kind=any"
+        if /i "!line!"=="either" set "expected_fail_kind=any"
+    )
+)
+
+if %expect_pass%==1 (
+    set "expected_mode=pass"
+) else if defined expected_fail_kind (
+    set "expected_mode=fail"
+) else (
+    echo !test_name! | findstr /i "fail error" >nul
+    if !errorlevel! equ 0 (
+        set "expected_mode=fail"
+        set "expected_fail_kind=compile"
+    )
+)
+
+if /i "!expected_mode!"=="fail" if not defined expected_fail_kind set "expected_fail_kind=compile"
+
+if /i "!expected_mode!"=="fail" set counts_for_timing=0
 
 rem Parse RUN_OPTS
 for /f "usebackq delims=" %%l in (`findstr /b /c:"// RUN_OPTS:" "%test_file%"`) do (
@@ -510,13 +549,14 @@ cmd /c ""%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! < "%test_file%" > "!outp
 set exit_code=%errorlevel%
 
 rem Track known diagnostic patterns
-findstr /i "Error" "!output_file!" >nul 2>&1 && set has_errors=1
-findstr /i "Failed to generate" "!output_file!" >nul 2>&1 && set has_errors=1
-findstr /i "Unknown function" "!output_file!" >nul 2>&1 && set has_errors=1
-findstr /i "Unknown variable" "!output_file!" >nul 2>&1 && set has_errors=1
-findstr /i "invalid binary operator" "!output_file!" >nul 2>&1 && set has_errors=1
-findstr /i "Binary operator" "!output_file!" >nul 2>&1 && set has_errors=1
-findstr /i "Expected" "!output_file!" | findstr /i "after" >nul 2>&1 && set has_errors=1
+if not "%exit_code%"=="0" set compile_failed=1
+findstr /i "Error" "!output_file!" >nul 2>&1 && set compile_failed=1
+findstr /i "Failed to generate" "!output_file!" >nul 2>&1 && set compile_failed=1
+findstr /i "Unknown function" "!output_file!" >nul 2>&1 && set compile_failed=1
+findstr /i "Unknown variable" "!output_file!" >nul 2>&1 && set compile_failed=1
+findstr /i "invalid binary operator" "!output_file!" >nul 2>&1 && set compile_failed=1
+findstr /i "Binary operator" "!output_file!" >nul 2>&1 && set compile_failed=1
+findstr /i "Expected" "!output_file!" | findstr /i "after" >nul 2>&1 && set compile_failed=1
 
 rem EXPECT_OUTPUT checks
 for /f "usebackq delims=" %%l in (`findstr /b /c:"// EXPECT_OUTPUT:" "%test_file%"`) do (
@@ -526,7 +566,7 @@ for /f "usebackq delims=" %%l in (`findstr /b /c:"// EXPECT_OUTPUT:" "%test_file
     if defined expect_line (
         findstr /C:"!expect_line!" "!output_file!" >nul 2>&1
         if !errorlevel! neq 0 (
-            set has_errors=1
+            set compiler_expectation_failed=1
             echo [test-expectation] missing: !expect_line!>>"!output_file!"
         )
     )
@@ -544,12 +584,22 @@ for /f "usebackq delims=" %%l in (`findstr /b /c:"// EXPECT_RUNTIME:" "%test_fil
     )
 )
 
+for /f "usebackq delims=" %%l in (`findstr /b /c:"// EXPECT_EXIT:" "%test_file%"`) do (
+    set "exit_line=%%l"
+    set "exit_line=!exit_line:// EXPECT_EXIT:=!"
+    for /f "tokens=* delims= " %%o in ("!exit_line!") do set "exit_line=%%o"
+    if defined exit_line set "expected_exit=!exit_line!"
+)
+
 set should_check_runtime=0
-echo !test_name! | findstr /i "fail error" >nul
-if !errorlevel! equ 0 (
-    set should_check_runtime=1
-) else (
-    if !has_errors! equ 0 if !exit_code! equ 0 set should_check_runtime=1
+if !compile_failed! equ 0 if !exit_code! equ 0 (
+    if /i "!expected_mode!"=="pass" (
+        set should_check_runtime=1
+    ) else (
+        if /i not "!expected_fail_kind!"=="compile" set should_check_runtime=1
+        if !expected_runtime_count! gtr 0 set should_check_runtime=1
+        if defined expected_exit set should_check_runtime=1
+    )
 )
 
 if !should_check_runtime! equ 1 if defined RUNTIME_LIB (
@@ -578,8 +628,10 @@ if !should_check_runtime! equ 1 if defined RUNTIME_LIB (
                 if !errorlevel! equ 0 (
                     cmd /c ""!temp_bin!"" > "!runtime_log!" 2>&1
                     set runtime_exit_code=!errorlevel!
+                    set runtime_ran=1
+                    if not "!runtime_exit_code!"=="0" set runtime_failed=1
                 ) else (
-                    set has_errors=1
+                    set runtime_failed=1
                 )
             )
             if exist "!temp_ir!" del "!temp_ir!" >nul 2>&1
@@ -589,8 +641,11 @@ if !should_check_runtime! equ 1 if defined RUNTIME_LIB (
 )
 
 if %expected_runtime_count% gtr 0 (
-    if not exist "!runtime_log!" (
-        set has_errors=1
+    if !runtime_ran! equ 0 (
+        set runtime_expectation_failed=1
+        echo [runtime-expectation] runtime did not run>>"!output_file!"
+    ) else if not exist "!runtime_log!" (
+        set runtime_expectation_failed=1
         echo [runtime-expectation] missing runtime output>>"!output_file!"
     ) else (
         for /l %%e in (1,1,!expected_runtime_count!) do (
@@ -598,7 +653,7 @@ if %expected_runtime_count% gtr 0 (
             if defined needle (
                 findstr /C:"!needle!" "!runtime_log!" >nul 2>&1
                 if !errorlevel! neq 0 (
-                    set has_errors=1
+                    set runtime_expectation_failed=1
                     echo [runtime-expectation] missing: !needle!>>"!output_file!"
                 )
             )
@@ -606,21 +661,55 @@ if %expected_runtime_count% gtr 0 (
     )
 )
 
-set is_fail_test=0
-echo !test_name! | findstr /i "fail error" >nul
-if !errorlevel! equ 0 set is_fail_test=1
+if defined expected_exit (
+    if !runtime_ran! equ 0 (
+        set runtime_expectation_failed=1
+        echo [runtime-expectation] missing runtime exit>>"!output_file!"
+    ) else (
+        set "expected_exit_lower=!expected_exit!"
+        for %%A in (!expected_exit_lower!) do set "expected_exit_lower=%%A"
+        set exit_expectation_failed=0
+        if /i "!expected_exit_lower!"=="nonzero" (
+            if "!runtime_exit_code!"=="0" set exit_expectation_failed=1
+        ) else if /i "!expected_exit_lower!"=="zero" (
+            if not "!runtime_exit_code!"=="0" set exit_expectation_failed=1
+        ) else if /i "!expected_exit_lower!"=="abort" (
+            if not "!runtime_exit_code!"=="134" set exit_expectation_failed=1
+        ) else if /i "!expected_exit_lower!"=="sigabrt" (
+            if not "!runtime_exit_code!"=="134" set exit_expectation_failed=1
+        ) else (
+            if not "!runtime_exit_code!"=="!expected_exit!" set exit_expectation_failed=1
+        )
+        if !exit_expectation_failed! neq 0 (
+            set runtime_expectation_failed=1
+            echo [runtime-expectation] expected exit !expected_exit!, got !runtime_exit_code!>>"!output_file!"
+        )
+    )
+)
 
-if !is_fail_test! equ 1 (
-    if !has_errors! equ 1 (
-        set test_passed=1
-    ) else if !exit_code! neq 0 (
-        set test_passed=1
-    ) else if !runtime_exit_code! neq 0 (
-        set test_passed=1
+if /i "!expected_mode!"=="fail" (
+    if /i "!expected_fail_kind!"=="compile" (
+        if !compile_failed! equ 1 if !compiler_expectation_failed! equ 0 if !runtime_expectation_failed! equ 0 set test_passed=1
+    ) else if /i "!expected_fail_kind!"=="runtime" (
+        if !compile_failed! equ 0 if !compiler_expectation_failed! equ 0 if !runtime_failed! equ 1 if !runtime_expectation_failed! equ 0 set test_passed=1
+    ) else if /i "!expected_fail_kind!"=="any" (
+        if !compiler_expectation_failed! equ 0 if !runtime_expectation_failed! equ 0 (
+            if !compile_failed! equ 1 set test_passed=1
+            if !runtime_failed! equ 1 set test_passed=1
+        )
+    ) else (
+        if !compile_failed! equ 1 if !compiler_expectation_failed! equ 0 if !runtime_expectation_failed! equ 0 set test_passed=1
     )
 ) else (
-    if !has_errors! equ 0 if !exit_code! equ 0 if !runtime_exit_code! equ 0 (
-        set test_passed=1
+    if !compile_failed! equ 0 if !compiler_expectation_failed! equ 0 if !runtime_failed! equ 0 if !runtime_expectation_failed! equ 0 set test_passed=1
+)
+
+set "expected_label=expected to pass"
+if /i "!expected_mode!"=="fail" (
+    if /i "!expected_fail_kind!"=="any" (
+        set "expected_label=expected failure"
+    ) else (
+        set "expected_label=expected !expected_fail_kind! failure"
     )
 )
 
@@ -647,26 +736,55 @@ if %VERBOSE_MODE% equ 1 if !show_output! equ 1 (
         type "!runtime_log!"
         echo.
     )
-    if !is_fail_test! equ 1 (
+    if /i "!expected_mode!"=="fail" (
         if !test_passed! equ 1 (
-            echo %GREEN%✓ PASSED: !test_name! ^(correctly failed as expected^)%NC%
+            echo %GREEN%✓ PASSED: !test_name! ^(!expected_label!^)%NC%
         ) else (
-            echo %RED%✗ FAILED: !test_name! ^(should have failed but didn't^)%NC%
+            echo %RED%✗ FAILED: !test_name! ^(!expected_label!^)%NC%
         )
     ) else (
         if !test_passed! equ 1 (
             echo %GREEN%✓ PASSED: !test_name!%NC%
         ) else (
             echo %RED%✗ FAILED: !test_name!%NC%
-            if !exit_code! neq 0 (
-                echo %RED%  Compilation exit code: !exit_code!%NC%
+        )
+    )
+    if !test_passed! equ 0 (
+        if not "!exit_code!"=="0" (
+            echo %RED%  Compilation exit code: !exit_code!%NC%
+        ) else if !compile_failed! equ 1 (
+            echo %RED%  Compiler diagnostics detected%NC%
+        )
+        if !runtime_ran! equ 1 (
+            if not "!runtime_exit_code!"=="0" (
+                echo %RED%  Runtime exit code: !runtime_exit_code!%NC%
             )
-            if !runtime_exit_code! neq 0 (
-                echo %RED%  Runtime exit code: !runtime_exit_code! ^(possible assert failure or abort^)%NC%
+        ) else if /i "!expected_mode!"=="fail" if /i "!expected_fail_kind!"=="runtime" (
+            echo %RED%  Runtime did not run%NC%
+        )
+        if !compiler_expectation_failed! neq 0 if !runtime_expectation_failed! neq 0 (
+            echo %RED%  Expectation mismatch detected%NC%
+        ) else if !compiler_expectation_failed! neq 0 (
+            echo %RED%  Expectation mismatch detected%NC%
+        ) else if !runtime_expectation_failed! neq 0 (
+            echo %RED%  Expectation mismatch detected%NC%
+        )
+        if !compile_failed! neq 0 (
+            echo %RED%  Compiler output:%NC%
+            powershell -NoProfile -Command "$lines = Select-String -Path '!output_file!' -Pattern 'Error','Warning' | Select-Object -First 5; if ($lines) { $lines | ForEach-Object { $_.Line } } else { Get-Content -Path '!output_file!' -TotalCount 5 }"
+        ) else if !compiler_expectation_failed! neq 0 (
+            echo %RED%  Compiler output:%NC%
+            powershell -NoProfile -Command "$lines = Select-String -Path '!output_file!' -Pattern 'Error','Warning' | Select-Object -First 5; if ($lines) { $lines | ForEach-Object { $_.Line } } else { Get-Content -Path '!output_file!' -TotalCount 5 }"
+        )
+        if !runtime_expectation_failed! neq 0 (
+            if exist "!runtime_log!" (
+                echo %RED%  Runtime output:%NC%
+                powershell -NoProfile -Command "Get-Content -Path '!runtime_log!' -TotalCount 5"
             )
-            if !has_errors! equ 1 (
-                echo %RED%  Errors found in output:%NC%
-                findstr /i "Error Failed Unknown invalid Binary Expected" "!output_file!" 2>nul | findstr /n "^" | findstr "^[1-3]:"
+        ) else if !runtime_failed! neq 0 (
+            if exist "!runtime_log!" (
+                echo %RED%  Runtime output:%NC%
+                powershell -NoProfile -Command "Get-Content -Path '!runtime_log!' -TotalCount 5"
             )
         )
     )
@@ -675,26 +793,55 @@ if %VERBOSE_MODE% equ 1 if !show_output! equ 1 (
     call :ensure_progress_newline
     echo %YELLOW%Running test: !test_name!%NC%
     echo ----------------------------------------
-    if !is_fail_test! equ 1 (
+    if /i "!expected_mode!"=="fail" (
         if !test_passed! equ 1 (
-            echo %GREEN%✓ PASSED: !test_name! ^(correctly failed as expected^)%NC%
+            echo %GREEN%✓ PASSED: !test_name! ^(!expected_label!^)%NC%
         ) else (
-            echo %RED%✗ FAILED: !test_name! ^(should have failed but didn't^)%NC%
+            echo %RED%✗ FAILED: !test_name! ^(!expected_label!^)%NC%
         )
     ) else (
         if !test_passed! equ 1 (
             echo %GREEN%✓ PASSED: !test_name!%NC%
         ) else (
             echo %RED%✗ FAILED: !test_name!%NC%
-            if !exit_code! neq 0 (
-                echo %RED%  Compilation exit code: !exit_code!%NC%
+        )
+    )
+    if !test_passed! equ 0 (
+        if not "!exit_code!"=="0" (
+            echo %RED%  Compilation exit code: !exit_code!%NC%
+        ) else if !compile_failed! equ 1 (
+            echo %RED%  Compiler diagnostics detected%NC%
+        )
+        if !runtime_ran! equ 1 (
+            if not "!runtime_exit_code!"=="0" (
+                echo %RED%  Runtime exit code: !runtime_exit_code!%NC%
             )
-            if !runtime_exit_code! neq 0 (
-                echo %RED%  Runtime exit code: !runtime_exit_code! ^(possible assert failure or abort^)%NC%
+        ) else if /i "!expected_mode!"=="fail" if /i "!expected_fail_kind!"=="runtime" (
+            echo %RED%  Runtime did not run%NC%
+        )
+        if !compiler_expectation_failed! neq 0 if !runtime_expectation_failed! neq 0 (
+            echo %RED%  Expectation mismatch detected%NC%
+        ) else if !compiler_expectation_failed! neq 0 (
+            echo %RED%  Expectation mismatch detected%NC%
+        ) else if !runtime_expectation_failed! neq 0 (
+            echo %RED%  Expectation mismatch detected%NC%
+        )
+        if !compile_failed! neq 0 (
+            echo %RED%  Compiler output:%NC%
+            powershell -NoProfile -Command "$lines = Select-String -Path '!output_file!' -Pattern 'Error','Warning' | Select-Object -First 5; if ($lines) { $lines | ForEach-Object { $_.Line } } else { Get-Content -Path '!output_file!' -TotalCount 5 }"
+        ) else if !compiler_expectation_failed! neq 0 (
+            echo %RED%  Compiler output:%NC%
+            powershell -NoProfile -Command "$lines = Select-String -Path '!output_file!' -Pattern 'Error','Warning' | Select-Object -First 5; if ($lines) { $lines | ForEach-Object { $_.Line } } else { Get-Content -Path '!output_file!' -TotalCount 5 }"
+        )
+        if !runtime_expectation_failed! neq 0 (
+            if exist "!runtime_log!" (
+                echo %RED%  Runtime output:%NC%
+                powershell -NoProfile -Command "Get-Content -Path '!runtime_log!' -TotalCount 5"
             )
-            if !has_errors! equ 1 (
-                echo %RED%  Errors found in output:%NC%
-                findstr /i "Error Failed Unknown invalid Binary Expected" "!output_file!" 2>nul | findstr /n "^" | findstr "^[1-3]:"
+        ) else if !runtime_failed! neq 0 (
+            if exist "!runtime_log!" (
+                echo %RED%  Runtime output:%NC%
+                powershell -NoProfile -Command "Get-Content -Path '!runtime_log!' -TotalCount 5"
             )
         )
     )
