@@ -1,6 +1,6 @@
 # Type Casting and Promotion
 
-Hybrid provides both automatic type promotion and explicit type casting capabilities.
+Hybrid provides both automatic type promotion and explicit type casting capabilities. The `as` keyword seen in languages like C# is not supported as the casting operator handles all necessary conversions safely.
 
 ## Automatic Type Promotion
 

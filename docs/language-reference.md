@@ -227,6 +227,13 @@ if x = 0 { /* ... */ }
 if x == 0 { /* ... */ }
 ```
 
+Type checks use the `is` / `is not` keywords and are only allowed in conditional contexts:
+
+```c
+if pet is Animal { /* ... */ }
+while node is not null { /* ... */ }
+```
+
 ### Mandatory Variable Initialization
 
 All variables must be initialized when declared, preventing use of uninitialized variables:

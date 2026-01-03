@@ -446,6 +446,10 @@ int gettok() {
       return tok_null;
     if (lex.identifierStr == "if")
       return tok_if;
+    if (lex.identifierStr == "is")
+      return tok_is;
+    if (lex.identifierStr == "not")
+      return tok_not_kw;
     if (lex.identifierStr == "else")
       return tok_else;
     if (lex.identifierStr == "while")

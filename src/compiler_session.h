@@ -90,6 +90,7 @@ struct ParserContext {
   std::set<std::string> activeGenericParameters;
   int templateAngleDepth = 0;
   bool allowValueIdentifier = false;
+  bool allowTypeCheck = false;
 
   void reset(bool clearSymbols = true);
   void clearPrecedence();

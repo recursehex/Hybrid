@@ -845,6 +845,32 @@ private:
   llvm::Value *codegenNullCoalescingAssign(llvm::Value *lhsValue);
 };
 
+/// TypeCheckExprAST - Expression class for runtime type checking (is / is not).
+class TypeCheckExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+  TypeInfo TargetType;
+  bool IsNegated = false;
+  bool TargetIsNull = false;
+  std::optional<std::string> BindingName;
+  mutable llvm::Value *BindingValue = nullptr;
+
+public:
+  TypeCheckExprAST(std::unique_ptr<ExprAST> Operand, TypeInfo TargetType,
+                   bool IsNegated, bool TargetIsNull,
+                   std::optional<std::string> BindingName)
+      : Operand(std::move(Operand)), TargetType(std::move(TargetType)),
+        IsNegated(IsNegated), TargetIsNull(TargetIsNull),
+        BindingName(std::move(BindingName)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+  const TypeInfo &getTargetTypeInfo() const { return TargetType; }
+  bool isNegated() const { return IsNegated; }
+  bool isNullCheck() const { return TargetIsNull; }
+  const std::optional<std::string> &getBindingName() const { return BindingName; }
+  llvm::Value *getBindingValue() const { return BindingValue; }
+};
+
 /// UnaryExprAST - Expression class for a unary operator.
 class UnaryExprAST : public ExprAST {
   std::string Op;

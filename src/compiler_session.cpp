@@ -186,6 +186,10 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("by");
     case tok_if:
       return makeKeyword("if");
+    case tok_is:
+      return makeKeyword("is");
+    case tok_not_kw:
+      return makeKeyword("not");
     case tok_else:
       return makeKeyword("else");
     case tok_while:
@@ -443,6 +447,7 @@ void ParserContext::reset(bool clearSymbols) {
   activeGenericParameters.clear();
   templateAngleDepth = 0;
   allowValueIdentifier = false;
+  allowTypeCheck = false;
   if (clearSymbols)
     structNames.clear();
   if (clearSymbols)

@@ -33,6 +33,8 @@ enum Token {
   tok_case = -18,           // case in switch
   tok_default = -19,        // default case in switch
   tok_assert = -20,         // assert statement
+  tok_is = -112,            // is (type check)
+  tok_not_kw = -113,        // not (type check)
 
   // basic types
   tok_int = -21,            // int (32-bit signed integer)

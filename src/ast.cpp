@@ -5695,6 +5695,156 @@ static std::optional<TypeInfo> resolveExprTypeInfo(const ExprAST *expr) {
   return info;
 }
 
+static const CompositeTypeInfo *resolveCompositeTypeInfo(const TypeInfo &info) {
+  TypeInfo bound = applyActiveTypeBindings(info);
+  finalizeTypeInfoMetadata(bound);
+  std::string typeName = stripNullableAnnotations(typeNameFromInfo(bound));
+  if (typeName.empty())
+    typeName = stripNullableAnnotations(bound.typeName);
+  if (typeName.empty())
+    return nullptr;
+
+  if (const CompositeTypeInfo *meta =
+          lookupCompositeInfo(typeName, /*countHit=*/false))
+    return meta;
+  return materializeCompositeInstantiation(bound);
+}
+
+static llvm::Value *emitNullCheckValue(llvm::Value *value,
+                                       const TypeInfo &valueInfo,
+                                       std::string_view label) {
+  if (!value)
+    return nullptr;
+
+  if (value->getType()->isPointerTy()) {
+    auto *ptrTy = llvm::cast<llvm::PointerType>(value->getType());
+    llvm::Value *nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+    return Builder->CreateICmpEQ(value, nullPtr,
+                                 std::string(label) + ".isnull");
+  }
+
+  if (valueInfo.isArray && value->getType()->isStructTy()) {
+    llvm::Value *arrayPtr =
+        Builder->CreateExtractValue(value, 0, std::string(label) + ".ptr");
+    if (!arrayPtr->getType()->isPointerTy())
+      return llvm::ConstantInt::getFalse(*TheContext);
+    auto *ptrTy = llvm::cast<llvm::PointerType>(arrayPtr->getType());
+    llvm::Value *nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+    return Builder->CreateICmpEQ(arrayPtr, nullPtr,
+                                 std::string(label) + ".isnull");
+  }
+
+  return llvm::ConstantInt::getFalse(*TheContext);
+}
+
+enum class TypeCheckMatchKind : uint8_t { Exact, Chain, Interface };
+
+static llvm::Value *emitTypeDescriptorMatch(llvm::Value *objectPtr,
+                                            llvm::Value *targetDescriptor,
+                                            TypeCheckMatchKind kind,
+                                            std::string_view label) {
+  if (!objectPtr || !objectPtr->getType()->isPointerTy())
+    return llvm::ConstantInt::getFalse(*TheContext);
+
+  llvm::Function *parent = Builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *entryBB = Builder->GetInsertBlock();
+  auto *typeDescPtrTy = pointerType(getTypeDescriptorType());
+  auto *boolTy = llvm::Type::getInt1Ty(*TheContext);
+
+  auto *objPtrTy = llvm::cast<llvm::PointerType>(objectPtr->getType());
+  llvm::Value *nullObj = llvm::ConstantPointerNull::get(objPtrTy);
+  llvm::BasicBlock *loadBB =
+      llvm::BasicBlock::Create(*TheContext, std::string(label) + ".load",
+                               parent);
+  llvm::BasicBlock *doneBB =
+      llvm::BasicBlock::Create(*TheContext, std::string(label) + ".done");
+
+  llvm::Value *objIsNull = Builder->CreateICmpEQ(
+      objectPtr, nullObj, std::string(label) + ".null");
+  Builder->CreateCondBr(objIsNull, doneBB, loadBB);
+
+  Builder->SetInsertPoint(loadBB);
+  llvm::StructType *headerTy = getArcHeaderType();
+  llvm::Value *headerPtr = Builder->CreateBitCast(
+      objectPtr, pointerType(headerTy), std::string(label) + ".header");
+  llvm::Value *descAddr = Builder->CreateStructGEP(
+      headerTy, headerPtr, 2, std::string(label) + ".desc.addr");
+  llvm::Value *descriptor = Builder->CreateLoad(
+      typeDescPtrTy, descAddr, std::string(label) + ".desc");
+
+  llvm::Value *matchValue = nullptr;
+  llvm::BasicBlock *matchBB = nullptr;
+  llvm::BasicBlock *checkBB = nullptr;
+
+  if (kind == TypeCheckMatchKind::Interface) {
+    auto *voidPtrTy =
+        pointerType(llvm::Type::getInt8Ty(*TheContext));
+    auto *voidPtrPtrTy = pointerType(voidPtrTy);
+    llvm::Value *table = Builder->CreateCall(
+        getInterfaceLookupFunction(), {descriptor, targetDescriptor},
+        std::string(label) + ".iface.table");
+    matchValue = Builder->CreateICmpNE(
+        table, llvm::ConstantPointerNull::get(voidPtrPtrTy),
+        std::string(label) + ".iface.match");
+    Builder->CreateBr(doneBB);
+  } else if (kind == TypeCheckMatchKind::Exact) {
+    matchValue = Builder->CreateICmpEQ(
+        descriptor, targetDescriptor, std::string(label) + ".match");
+    Builder->CreateBr(doneBB);
+  } else {
+    checkBB = llvm::BasicBlock::Create(*TheContext,
+                                       std::string(label) + ".check",
+                                       parent);
+    matchBB = llvm::BasicBlock::Create(*TheContext,
+                                       std::string(label) + ".match",
+                                       parent);
+    llvm::BasicBlock *advanceBB = llvm::BasicBlock::Create(
+        *TheContext, std::string(label) + ".advance", parent);
+
+    Builder->CreateBr(checkBB);
+    Builder->SetInsertPoint(checkBB);
+    llvm::PHINode *descPhi =
+        Builder->CreatePHI(typeDescPtrTy, 2, std::string(label) + ".cursor");
+    descPhi->addIncoming(descriptor, loadBB);
+    llvm::Value *descIsNull = Builder->CreateICmpEQ(
+        descPhi, llvm::ConstantPointerNull::get(typeDescPtrTy),
+        std::string(label) + ".desc.null");
+    Builder->CreateCondBr(descIsNull, doneBB, matchBB);
+
+    Builder->SetInsertPoint(matchBB);
+    llvm::Value *isMatch = Builder->CreateICmpEQ(
+        descPhi, targetDescriptor, std::string(label) + ".desc.match");
+    Builder->CreateCondBr(isMatch, doneBB, advanceBB);
+
+    Builder->SetInsertPoint(advanceBB);
+    llvm::Value *baseAddr = Builder->CreateStructGEP(
+        getTypeDescriptorType(), descPhi, 1,
+        std::string(label) + ".base.addr");
+    llvm::Value *baseDesc = Builder->CreateLoad(
+        typeDescPtrTy, baseAddr, std::string(label) + ".base");
+    Builder->CreateBr(checkBB);
+    descPhi->addIncoming(baseDesc, advanceBB);
+  }
+
+  doneBB->insertInto(parent);
+  Builder->SetInsertPoint(doneBB);
+
+  if (kind == TypeCheckMatchKind::Chain) {
+    llvm::PHINode *phi = Builder->CreatePHI(
+        boolTy, 3, std::string(label) + ".result");
+    phi->addIncoming(llvm::ConstantInt::getFalse(boolTy), entryBB);
+    phi->addIncoming(llvm::ConstantInt::getFalse(boolTy), checkBB);
+    phi->addIncoming(llvm::ConstantInt::getTrue(boolTy), matchBB);
+    return phi;
+  }
+
+  llvm::PHINode *phi =
+      Builder->CreatePHI(boolTy, 2, std::string(label) + ".result");
+  phi->addIncoming(llvm::ConstantInt::getFalse(boolTy), entryBB);
+  phi->addIncoming(matchValue, loadBB);
+  return phi;
+}
+
 class InjectedValueExprAST : public ExprAST {
 public:
   InjectedValueExprAST(llvm::Value *value, std::string typeName,
@@ -5709,6 +5859,39 @@ public:
 private:
   llvm::Value *Value = nullptr;
 };
+
+static bool emitTypeCheckBinding(const TypeInfo &targetInfo,
+                                 const std::string &name,
+                                 llvm::Value *value) {
+  if (!value)
+    return false;
+
+  TypeInfo boundTarget = applyActiveTypeBindings(targetInfo);
+  finalizeTypeInfoMetadata(boundTarget);
+  std::string typeName = typeNameFromInfo(boundTarget);
+  if (typeName.empty())
+    typeName = boundTarget.typeName;
+  if (typeName.empty()) {
+    reportCompilerError("Unable to resolve type for pattern binding '" + name + "'");
+    return false;
+  }
+
+  llvm::Type *targetLLVMType = getTypeFromString(typeName);
+  if (!targetLLVMType) {
+    reportCompilerError("Unknown binding type '" + typeName + "' for '" + name + "'");
+    return false;
+  }
+
+  llvm::Value *bindingValue = value;
+  if (bindingValue->getType() != targetLLVMType)
+    bindingValue = castToType(bindingValue, targetLLVMType, typeName);
+
+  auto injected =
+      std::make_unique<InjectedValueExprAST>(bindingValue, typeName, false);
+  VariableDeclarationStmtAST bindingDecl(std::move(boundTarget), name,
+                                         std::move(injected), false);
+  return bindingDecl.codegen() != nullptr;
+}
 
 static llvm::Value *emitPackedParamsArray(
     const std::vector<int> &paramIndices,
@@ -5917,6 +6100,11 @@ static bool validateTupleAssignmentCompatibility(
 static void propagateTypeToNewExpr(ExprAST *expr, const TypeInfo &targetInfo) {
   if (!expr)
     return;
+  if (auto *ternary = dynamic_cast<TernaryExprAST *>(expr)) {
+    propagateTypeToNewExpr(ternary->getThenExpr(), targetInfo);
+    propagateTypeToNewExpr(ternary->getElseExpr(), targetInfo);
+    return;
+  }
   auto *newExpr = dynamic_cast<NewExprAST *>(expr);
   if (!newExpr || !newExpr->typeWasElided())
     return;
@@ -8044,6 +8232,20 @@ static std::optional<NullComparison>
 extractNullComparison(const ExprAST *expr, bool inverted = false) {
   if (!expr)
     return std::nullopt;
+
+  if (const auto *typeCheck = dynamic_cast<const TypeCheckExprAST *>(expr)) {
+    if (typeCheck->isNullCheck()) {
+      const ExprAST *operand = unwrapRefExpr(typeCheck->getOperand());
+      if (const auto *var = dynamic_cast<const VariableExprAST *>(operand)) {
+        NullComparisonRelation relation =
+            typeCheck->isNegated() ? NullComparisonRelation::NotEqualsNull
+                                   : NullComparisonRelation::EqualsNull;
+        if (inverted)
+          relation = invertRelation(relation);
+        return NullComparison{var->getName(), relation};
+      }
+    }
+  }
 
   if (const auto *Unary = dynamic_cast<const UnaryExprAST *>(expr)) {
     if (Unary->getOp() == "!") {
@@ -14764,6 +14966,117 @@ llvm::Value *BinaryExprAST::codegen() {
                    "Check for typos or ensure this operator has code generation support.");
 }
 
+llvm::Value *TypeCheckExprAST::codegen() {
+  BindingValue = nullptr;
+
+  llvm::Value *value = Operand->codegen();
+  if (!value)
+    return nullptr;
+
+  setTypeName("bool");
+
+  std::optional<TypeInfo> lhsInfoOpt = resolveExprTypeInfo(Operand.get());
+  TypeInfo lhsInfo;
+  if (lhsInfoOpt) {
+    lhsInfo = *lhsInfoOpt;
+  } else if (!Operand->getTypeName().empty()) {
+    lhsInfo = makeTypeInfo(Operand->getTypeName());
+    finalizeTypeInfoMetadata(lhsInfo);
+  }
+
+  if (TargetIsNull) {
+    llvm::Value *isNull = emitNullCheckValue(value, lhsInfo, "typecheck.null");
+    if (!isNull)
+      return nullptr;
+    llvm::Value *result = IsNegated
+                              ? Builder->CreateNot(isNull, "typecheck.not")
+                              : isNull;
+    return Builder->CreateZExt(result, llvm::Type::getInt8Ty(*TheContext),
+                               "booltmp");
+  }
+
+  TypeInfo targetInfo = applyActiveTypeBindings(TargetType);
+  finalizeTypeInfoMetadata(targetInfo);
+
+  std::string targetTypeName = typeNameFromInfo(targetInfo);
+  if (targetTypeName.empty())
+    targetTypeName = targetInfo.typeName;
+
+  std::string lhsTypeName = lhsInfo.typeName.empty()
+                                ? Operand->getTypeName()
+                                : lhsInfo.typeName;
+  std::string lhsSanitized = stripNullableAnnotations(lhsTypeName);
+  std::string targetSanitized = stripNullableAnnotations(targetTypeName);
+
+  const CompositeTypeInfo *targetMeta = resolveCompositeTypeInfo(targetInfo);
+  const CompositeTypeInfo *lhsMeta = resolveCompositeTypeInfo(lhsInfo);
+  llvm::Value *match = nullptr;
+
+  const bool lhsSupportsDescriptor =
+      lhsMeta && (lhsMeta->hasARCHeader ||
+                  lhsMeta->kind == AggregateKind::Interface ||
+                  lhsMeta->isInterface);
+
+  if (targetMeta && lhsSupportsDescriptor &&
+      value->getType()->isPointerTy()) {
+    if (targetMeta->descriptorGlobalName.empty()) {
+      reportCompilerError("Internal error: missing descriptor for '" +
+                          targetTypeName + "' in type check");
+      return nullptr;
+    }
+    llvm::GlobalVariable *descriptorGV =
+        TheModule->getGlobalVariable(targetMeta->descriptorGlobalName, true);
+    if (!descriptorGV) {
+      reportCompilerError("Internal error: descriptor '" +
+                          targetMeta->descriptorGlobalName +
+                          "' missing for type check");
+      return nullptr;
+    }
+    llvm::Value *targetDescriptor = llvm::ConstantExpr::getBitCast(
+        descriptorGV, pointerType(getTypeDescriptorType()));
+
+    TypeCheckMatchKind kind = TypeCheckMatchKind::Exact;
+    if (targetMeta->kind == AggregateKind::Interface || targetMeta->isInterface)
+      kind = TypeCheckMatchKind::Interface;
+    else if (targetMeta->kind == AggregateKind::Class)
+      kind = TypeCheckMatchKind::Chain;
+
+    match = emitTypeDescriptorMatch(value, targetDescriptor, kind, "typecheck");
+  } else {
+    bool sameType = !lhsSanitized.empty() && !targetSanitized.empty() &&
+                    lhsSanitized == targetSanitized;
+    if (!sameType) {
+      match = llvm::ConstantInt::getFalse(*TheContext);
+    } else if (typeAllowsNull(lhsInfo) && value->getType()->isPointerTy()) {
+      auto *ptrTy = llvm::cast<llvm::PointerType>(value->getType());
+      llvm::Value *notNull = Builder->CreateICmpNE(
+          value, llvm::ConstantPointerNull::get(ptrTy), "typecheck.notnull");
+      match = notNull;
+    } else {
+      match = llvm::ConstantInt::getTrue(*TheContext);
+    }
+  }
+
+  if (BindingName && !targetTypeName.empty()) {
+    llvm::Type *bindingLLVMType = getTypeFromString(targetTypeName);
+    if (bindingLLVMType) {
+      llvm::Value *bindingValue = value;
+      if (bindingValue->getType() != bindingLLVMType)
+        bindingValue = castToType(bindingValue, bindingLLVMType,
+                                  targetTypeName);
+      BindingValue = bindingValue;
+    }
+  }
+
+  if (!match)
+    return nullptr;
+
+  if (IsNegated)
+    match = Builder->CreateNot(match, "typecheck.not");
+  return Builder->CreateZExt(match, llvm::Type::getInt8Ty(*TheContext),
+                             "booltmp");
+}
+
 // Generate code for unary expressions like -, !, ++, --
 llvm::Value *UnaryExprAST::codegen() {
   const bool parsedUnsafe = wasParsedInUnsafe();
@@ -19081,6 +19394,9 @@ llvm::Value *ForLoopStmtAST::codegen() {
 
 // Generate code for if statements
 llvm::Value *IfStmtAST::codegen() {
+  if (builderInTopLevelContext())
+    prepareTopLevelStatementContext();
+
   llvm::Value *CondV = getCondition()->codegen();
   if (!CondV)
     return nullptr;
@@ -19110,6 +19426,22 @@ llvm::Value *IfStmtAST::codegen() {
   }
   
   llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  const TypeCheckExprAST *typeCheck =
+      dynamic_cast<const TypeCheckExprAST *>(getCondition());
+  std::optional<std::string> bindingName;
+  std::optional<TypeInfo> bindingType;
+  llvm::Value *bindingValue = nullptr;
+  bool bindInThen = false;
+  bool bindInElse = false;
+
+  if (typeCheck && typeCheck->getBindingName() &&
+      typeCheck->getBindingValue()) {
+    bindingName = *typeCheck->getBindingName();
+    bindingType = typeCheck->getTargetTypeInfo();
+    bindingValue = typeCheck->getBindingValue();
+    bindInThen = !typeCheck->isNegated();
+    bindInElse = typeCheck->isNegated();
+  }
   
   // Create blocks for the then and else cases. Insert the 'then' block at the
   // end of the function.
@@ -19128,6 +19460,12 @@ llvm::Value *IfStmtAST::codegen() {
   pushNonNullFactsFrom(baseFacts);
   if (comparison)
     applyNullComparisonToCurrentScope(*comparison, BranchKind::Then);
+  if (bindInThen && bindingName && bindingType) {
+    if (!emitTypeCheckBinding(*bindingType, *bindingName, bindingValue)) {
+      popNonNullFactsScope();
+      return nullptr;
+    }
+  }
   llvm::Value *ThenV = getThenBranch()->codegen();
   if (!ThenV) {
     popNonNullFactsScope();
@@ -19148,6 +19486,12 @@ llvm::Value *IfStmtAST::codegen() {
   pushNonNullFactsFrom(baseFacts);
   if (comparison)
     applyNullComparisonToCurrentScope(*comparison, BranchKind::Else);
+  if (bindInElse && bindingName && bindingType && getElseBranch()) {
+    if (!emitTypeCheckBinding(*bindingType, *bindingName, bindingValue)) {
+      popNonNullFactsScope();
+      return nullptr;
+    }
+  }
   
   llvm::Value *ElseV = nullptr;
   if (getElseBranch()) {
@@ -19193,6 +19537,9 @@ llvm::Value *IfStmtAST::codegen() {
 
 // Generate code for while statements
 llvm::Value *WhileStmtAST::codegen() {
+  if (builderInTopLevelContext())
+    prepareTopLevelStatementContext();
+
   llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
   
   // Create blocks for the loop condition, body, and exit
@@ -19229,6 +19576,21 @@ llvm::Value *WhileStmtAST::codegen() {
       return LogErrorV("Condition must be a numeric type");
     }
   }
+
+  const TypeCheckExprAST *typeCheck =
+      dynamic_cast<const TypeCheckExprAST *>(getCondition());
+  std::optional<std::string> bindingName;
+  std::optional<TypeInfo> bindingType;
+  llvm::Value *bindingValue = nullptr;
+  bool bindInLoop = false;
+
+  if (typeCheck && typeCheck->getBindingName() &&
+      typeCheck->getBindingValue() && !typeCheck->isNegated()) {
+    bindingName = *typeCheck->getBindingName();
+    bindingType = typeCheck->getTargetTypeInfo();
+    bindingValue = typeCheck->getBindingValue();
+    bindInLoop = true;
+  }
   
   std::optional<NullComparison> comparison = extractNullComparison(getCondition());
   ensureBaseNonNullScope();
@@ -19243,6 +19605,12 @@ llvm::Value *WhileStmtAST::codegen() {
   pushNonNullFactsFrom(baseFacts);
   if (comparison)
     applyNullComparisonToCurrentScope(*comparison, BranchKind::Then);
+  if (bindInLoop && bindingName && bindingType) {
+    if (!emitTypeCheckBinding(*bindingType, *bindingName, bindingValue)) {
+      popNonNullFactsScope();
+      return nullptr;
+    }
+  }
   
   // Push the exit and continue blocks for break/skip statements
   LoopExitBlocks.push_back(AfterBB);

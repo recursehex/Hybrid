@@ -13,3 +13,19 @@ The type system enforces several safety rules:
 5. **Bool isolation**: Boolean values cannot be converted to or from other types
 6. **Range checking**: Integer literals must fit in the target type's range
 7. **Null safety**: All types are non-nullable by default; append `?` to opt into storing `null`. Nullable types must be accessed with null-safe operators `?.` and `?[]`.
+
+## Runtime Type Checks
+
+Use `is` and `is not` in conditional contexts (`if`, `while`, ternary conditions) to test runtime types or nullability. Pattern bindings introduce a scoped name for the matched type.
+
+```cs
+if pet is Animal animal
+{
+    // animal is bound as Animal in this branch
+}
+
+while maybePet is not null
+{
+    // loop while nullable value is non-null
+}
+```

@@ -677,6 +677,19 @@ public:
   ~ScopedValueKeyword() { Parser.allowValueIdentifier = Previous; }
 };
 
+class ScopedTypeCheckContext {
+  ParserContext &Parser;
+  bool Previous = false;
+
+public:
+  explicit ScopedTypeCheckContext(bool enable)
+      : Parser(currentParser()), Previous(Parser.allowTypeCheck) {
+    Parser.allowTypeCheck = enable;
+  }
+
+  ~ScopedTypeCheckContext() { Parser.allowTypeCheck = Previous; }
+};
+
 static bool isPascalCase(const std::string &name) {
   if (name.empty())
     return false;
@@ -1284,6 +1297,8 @@ int GetTokPrecedence() {
     return BinopPrecedence["\?\?="];
   } else if (CurTok == tok_if) {
     return 4; // Ternary operator precedence (higher than assignment, lower than logical OR)
+  } else if (CurTok == tok_is) {
+    return BinopPrecedence["=="];
   }
 
   // Handle single character operators
@@ -2130,6 +2145,56 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       return ParseTernaryExpression(std::move(LHS));
     }
 
+    if (CurTok == tok_is) {
+      if (!currentParser().allowTypeCheck) {
+        LogError("Type checks with 'is' are only supported in conditional expressions");
+        RecoverAfterExpressionError();
+        return nullptr;
+      }
+
+      SourceLocation opLoc = currentParser().currentTokenLocation;
+      getNextToken(); // eat 'is'
+      SkipNewlines();
+
+      bool isNegated = false;
+      if (CurTok == tok_not_kw) {
+        isNegated = true;
+        getNextToken(); // eat 'not'
+        SkipNewlines();
+      }
+
+      bool targetIsNull = false;
+      TypeInfo targetInfo;
+      if (CurTok == tok_null) {
+        targetIsNull = true;
+        getNextToken(); // eat 'null'
+      } else {
+        if (!ParseCompleteTypeInfo(targetInfo, false)) {
+          RecoverAfterExpressionError();
+          return nullptr;
+        }
+      }
+
+      if (targetIsNull && CurTok == tok_identifier) {
+        LogError("Pattern binding is not supported for 'null' checks");
+        RecoverAfterExpressionError();
+        return nullptr;
+      }
+
+      std::optional<std::string> bindingName;
+      if (!targetIsNull && CurTok == tok_identifier) {
+        bindingName = IdentifierStr;
+        getNextToken(); // eat binding name
+      }
+
+      auto expr = std::make_unique<TypeCheckExprAST>(
+          std::move(LHS), std::move(targetInfo), isNegated,
+          targetIsNull, std::move(bindingName));
+      expr->setSourceLocation(opLoc);
+      LHS = std::move(expr);
+      continue;
+    }
+
     // Now know this is a binop
     SourceLocation opLoc = currentParser().currentTokenLocation;
     std::string BinOp;
@@ -2425,6 +2490,11 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
 /// expression
 ///   ::= primary binoprhs
 ///
+static std::unique_ptr<ExprAST> ParseConditionExpression() {
+  ScopedTypeCheckContext allowTypeChecks(true);
+  return ParseExpression();
+}
+
 std::unique_ptr<ExprAST> ParseExpression() {
   auto LHS = ParsePrimaryWithPostfix();
   if (!LHS)
@@ -2801,7 +2871,7 @@ std::unique_ptr<IfStmtAST> ParseIfStatement() {
     getNextToken();
   
   // Parse condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("Expected condition after 'if'");
     return nullptr;
@@ -2861,7 +2931,7 @@ std::unique_ptr<WhileStmtAST> ParseWhileStatement() {
     getNextToken();
   
   // Parse condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("Expected condition after 'while'");
     return nullptr;
@@ -2916,7 +2986,7 @@ std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
     getNextToken();
 
   // Parse the condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("expected expression after 'assert'");
     return nullptr;
@@ -3120,7 +3190,7 @@ std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> 
     getNextToken();
 
   // Parse condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("Expected condition after 'if' in ternary expression");
     return nullptr;

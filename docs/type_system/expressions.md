@@ -33,7 +33,7 @@ Operators are evaluated according to precedence rules (higher numbers bind tight
 | 40 | `*`, `/`, `%` | Multiplication | Left-to-right |
 | 20 | `+`, `-` | Addition | Left-to-right |
 | 15 | `<<`, `>>` | Bitwise shift | Left-to-right |
-| 10 | `<`, `>`, `<=`, `>=`, `==`, `!=` | Comparison | Left-to-right |
+| 10 | `<`, `>`, `<=`, `>=`, `==`, `!=`, `is`, `is not` | Comparison | Left-to-right |
 | 9 | `&` | Bitwise AND | Left-to-right |
 | 8 | `^` | Bitwise XOR | Left-to-right |
 | 7 | `\|` | Bitwise OR  | Left-to-right |
@@ -209,6 +209,49 @@ bool test2 = 42 == value    // Literal on left
 ```
 
 This eliminates the need for explicit casts like `b == byte: 100` in most cases. See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for details.
+
+## Type Check Operators
+
+Hybrid provides runtime type checks for conditional expressions:
+
+- `is` returns `true` when the left-hand value matches the right-hand type.
+- `is not` inverts the result.
+
+Type checks are only valid inside `if`/`while` conditions and ternary conditions.
+
+```c
+if pet is Animal
+{
+    // type matches
+}
+
+if pet is not Tree
+{
+    // type does not match
+}
+
+while node is not null
+{
+    // loop until null
+}
+
+Animal fallback = pet if pet is Animal else new()
+```
+
+### Pattern Binding
+
+Type checks can introduce a binding when the match succeeds:
+
+```c
+if pet is Dog dog
+{
+    print(dog.Id())
+}
+```
+
+The binding is available in the branch where the type check succeeds (`then` for `is`, `else` for `is not`).
+
+> C#-style `as` is not supported. Use explicit casts (`Type: expr`) or constructors instead.
 
 ## Boolean Operators
 

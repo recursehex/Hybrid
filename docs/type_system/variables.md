@@ -77,7 +77,7 @@ Address? address = user?.primaryAddress
 - Pointer types (`int@`, `float@2`, etc.) implicitly allow `null` regardless of annotation because they are raw references.
 - Assigning a nullable expression to a non-nullable target is a compile-time error. Use helper functions or explicit conversions that validate nullability.
 - Accessing members on a nullable struct requires the null-safe access operator `?.`. See [Structs](structs.md) and [Expressions](expressions.md) for examples.
-- The compiler performs flow-sensitive narrowing. After guards like `if maybeAlias != null` (and the symmetric `if maybeAlias == null` in the `else`) the guarded variable is treated as its non-nullable type for the remainder of the reachable branch. The same analysis applies to `while maybeAlias != null` loops and survives across early returns that prove a variable is null.
+- The compiler performs flow-sensitive narrowing. After guards like `if maybeAlias != null` or `if maybeAlias is not null` (and the symmetric `if maybeAlias == null` in the `else`) the guarded variable is treated as its non-nullable type for the remainder of the reachable branch. The same analysis applies to `while maybeAlias != null` and `while maybeAlias is not null` loops and survives across early returns that prove a variable is null.
 
 ## Global vs Local Variables
 

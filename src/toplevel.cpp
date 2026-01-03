@@ -123,6 +123,40 @@ void HandleAssertStatement() {
   }
 }
 
+void HandleIfStatement() {
+  if (auto IfAST = ParseIfStatement()) {
+    if (gInteractiveMode) fprintf(stderr, "Parsed if statement successfully, generating code...\n");
+    if (auto IfIR = IfAST->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) fprintf(stderr, "Generated if statement IR:\n");
+      IfIR->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    } else {
+      reportCompilerError("Failed to generate IR for if statement");
+    }
+  } else {
+    reportCompilerError("Failed to parse if statement");
+    getNextToken();
+  }
+}
+
+void HandleWhileStatement() {
+  if (auto WhileAST = ParseWhileStatement()) {
+    if (gInteractiveMode) fprintf(stderr, "Parsed while statement successfully, generating code...\n");
+    if (auto WhileIR = WhileAST->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) fprintf(stderr, "Generated while statement IR:\n");
+      WhileIR->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    } else {
+      reportCompilerError("Failed to generate IR for while statement");
+    }
+  } else {
+    reportCompilerError("Failed to parse while statement");
+    getNextToken();
+  }
+}
+
 void HandleUseStatement() {
   auto Use = ParseUseStatement();
   if (Use) {
@@ -264,6 +298,12 @@ void MainLoop() {
       break;
     case tok_for:
       HandleForEachStatement();
+      break;
+    case tok_if:
+      HandleIfStatement();
+      break;
+    case tok_while:
+      HandleWhileStatement();
       break;
     case tok_assert:
       HandleAssertStatement();
