@@ -11,7 +11,7 @@ string message = "Hello"
 string? empty = null    // Nullable string
 
 // Invalid - no initialization
-int x       // Error: variable must be initialized
+int x       // Error: Variable must be initialized
 
 // Valid struct member constructor initialization
 struct Point

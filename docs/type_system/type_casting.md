@@ -114,7 +114,7 @@ short s1 = short: 32000         // OK - within short range
 // Invalid casts - compile-time errors
 byte b2 = byte: 256             // Error: 256 exceeds byte range [0-255]
 sbyte sb2 = sbyte: 128          // Error: 128 exceeds sbyte range [-128-127]
-short s2 = short: 100000        // Error: 100000 exceeds short range
+short s2 = short: 100000        // Error: 100000 exceeds short range [-32768-32767]
 
 // Runtime values are not range-checked at compile time
 int userInput = 1000
@@ -224,5 +224,5 @@ double precise = (double: numerator) / denominator  // 3.5
 
 // Invalid operations - bool cannot be cast
 bool flag = true
-int num = int: flag         // Error: cannot cast bool to int
+int num = int: flag         // Error: Cannot cast bool to int
 ```

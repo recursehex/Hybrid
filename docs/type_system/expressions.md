@@ -991,7 +991,7 @@ sbyte sb = -128                 // OK - minimum sbyte value
 // Invalid assignments - caught at compile time
 byte bad1 = 256                 // Error: 256 exceeds byte range [0-255]
 sbyte bad2 = 128                // Error: 128 exceeds sbyte range [-128-127]
-short bad3 = 100000             // Error: 100000 exceeds short range
+short bad3 = 100000             // Error: 100000 exceeds short range [-32768-32767]
 ```
 
 ### Limitations

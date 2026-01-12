@@ -8609,7 +8609,7 @@ collectMemberFieldAssignmentInfo(MemberAccessExprAST &member) {
   return info;
 }
 
-static bool isAssignmentExpression(const ExprAST *expr) {
+[[maybe_unused]] static bool isAssignmentExpression(const ExprAST *expr) {
   auto *binary = dynamic_cast<const BinaryExprAST *>(expr);
   if (!binary)
     return false;
@@ -8619,7 +8619,7 @@ static bool isAssignmentExpression(const ExprAST *expr) {
          op == "<<=" || op == ">>=" || op == "\?\?=";
 }
 
-static bool isLValueExpression(const ExprAST *expr) {
+[[maybe_unused]] static bool isLValueExpression(const ExprAST *expr) {
   if (!expr)
     return false;
   if (auto *paren = dynamic_cast<const ParenExprAST *>(expr)) {
@@ -8937,6 +8937,103 @@ static std::string describeTypeForDiagnostic(llvm::Type *type) {
   if (type->isPointerTy())
     return "pointer";
   return "value";
+}
+
+static std::string sanitizeBaseTypeName(std::string_view typeName);
+
+struct IntegerRangeInfo {
+  std::string typeName;
+  bool isSigned = false;
+  long long minSigned = 0;
+  long long maxSigned = 0;
+  unsigned long long maxUnsigned = 0;
+  std::string minText;
+  std::string maxText;
+};
+
+static IntegerRangeInfo makeSignedRange(std::string_view typeName,
+                                        long long minValue,
+                                        long long maxValue) {
+  IntegerRangeInfo info;
+  info.typeName = std::string(typeName);
+  info.isSigned = true;
+  info.minSigned = minValue;
+  info.maxSigned = maxValue;
+  info.minText = std::to_string(minValue);
+  info.maxText = std::to_string(maxValue);
+  return info;
+}
+
+static IntegerRangeInfo makeUnsignedRange(std::string_view typeName,
+                                          unsigned long long maxValue) {
+  IntegerRangeInfo info;
+  info.typeName = std::string(typeName);
+  info.isSigned = false;
+  info.maxUnsigned = maxValue;
+  info.minText = "0";
+  info.maxText = std::to_string(maxValue);
+  return info;
+}
+
+static std::optional<IntegerRangeInfo> getIntegerRangeInfo(std::string_view typeName) {
+  if (typeName == "byte")
+    return makeUnsignedRange("byte", 255ULL);
+  if (typeName == "sbyte")
+    return makeSignedRange("sbyte", -128LL, 127LL);
+  if (typeName == "short")
+    return makeSignedRange("short", -32768LL, 32767LL);
+  if (typeName == "ushort")
+    return makeUnsignedRange("ushort", 65535ULL);
+  if (typeName == "int")
+    return makeSignedRange("int", -2147483648LL, 2147483647LL);
+  if (typeName == "uint")
+    return makeUnsignedRange("uint", 4294967295ULL);
+  if (typeName == "long")
+    return makeSignedRange("long",
+                           std::numeric_limits<long long>::min(),
+                           std::numeric_limits<long long>::max());
+  if (typeName == "ulong")
+    return makeUnsignedRange("ulong",
+                             std::numeric_limits<unsigned long long>::max());
+  return std::nullopt;
+}
+
+static std::string formatIntegerLiteralValue(const llvm::APInt &value,
+                                             bool isSigned) {
+  if (isSigned)
+    return std::to_string(value.getSExtValue());
+  return std::to_string(value.getZExtValue());
+}
+
+static std::string buildIntegerRangeError(const llvm::APInt &value,
+                                          std::string_view targetTypeName) {
+  std::string clean = sanitizeBaseTypeName(targetTypeName);
+  if (clean.empty())
+    clean = std::string(targetTypeName);
+
+  auto infoOpt = getIntegerRangeInfo(clean);
+  if (!infoOpt) {
+    std::string valueText = formatIntegerLiteralValue(value, true);
+    std::string message = "Integer literal " + valueText + " is out of range";
+    if (!clean.empty())
+      message += " for target type " + clean;
+    return message;
+  }
+
+  const IntegerRangeInfo &info = *infoOpt;
+  std::string valueText = formatIntegerLiteralValue(value, info.isSigned);
+  return valueText + " exceeds " + info.typeName + " range [" +
+         info.minText + "-" + info.maxText + "]";
+}
+
+static bool integerLiteralFitsRange(const llvm::APInt &value,
+                                    const IntegerRangeInfo &info) {
+  if (info.isSigned) {
+    long long v = value.getSExtValue();
+    return v >= info.minSigned && v <= info.maxSigned;
+  }
+  unsigned long long v = value.getZExtValue();
+  return v <= info.maxUnsigned;
 }
 
 static bool requiresExplicitCastForIntegerConversion(const ExprAST *sourceExpr,
@@ -11892,8 +11989,7 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
       }
       
       if (!inRange) {
-        LogErrorV(("Integer literal " + std::to_string(Val.getSExtValue()) + 
-                   " is out of range for target type").c_str());
+        LogErrorV(buildIntegerRangeError(Val, ""));
         return value;
       }
       
@@ -11990,8 +12086,7 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::s
       }
       
       if (!inRange) {
-        LogErrorV(("Integer literal " + std::to_string(v) + 
-                   " is out of range for target type " + targetTypeName).c_str());
+        LogErrorV(buildIntegerRangeError(Val, targetTypeName));
         return value;
       }
       
@@ -15498,11 +15593,39 @@ llvm::Value *CastExprAST::codegen() {
 
   // Get the source type name from the operand
   std::string sourceTypeName = getOperand()->getTypeName();
+  std::string cleanSource = sanitizeBaseTypeName(sourceTypeName);
+  std::string cleanTarget = sanitizeBaseTypeName(getTargetType());
+  if (cleanTarget.empty())
+    cleanTarget = getTargetType();
 
   // Get the target LLVM type
   llvm::Type *TargetLLVMType = getTypeFromString(getTargetType());
   if (!TargetLLVMType)
     return LogErrorV("Invalid target type for cast");
+
+  auto describeTypeName = [&](const std::string &name,
+                              llvm::Type *type) -> std::string {
+    std::string clean = sanitizeBaseTypeName(name);
+    if (!clean.empty())
+      return clean;
+    if (!name.empty())
+      return name;
+    return describeTypeForDiagnostic(type);
+  };
+
+  std::string sourceLabel = describeTypeName(sourceTypeName, OperandV->getType());
+  std::string targetLabel = describeTypeName(getTargetType(), TargetLLVMType);
+
+  if (cleanTarget == "void")
+    return LogErrorV("Cannot cast to void");
+
+  if (OperandV->getType()->isVoidTy() || cleanSource == "void")
+    return LogErrorV("Cannot cast void to " + targetLabel);
+
+  if ((cleanSource == "bool" || cleanTarget == "bool") &&
+      cleanSource != cleanTarget) {
+    return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
+  }
 
   // Set our type name to the target type
   setTypeName(getTargetType());
@@ -15512,6 +15635,19 @@ llvm::Value *CastExprAST::codegen() {
   // If same type, just return the value
   if (SourceType == TargetLLVMType)
     return OperandV;
+
+  if (SourceType->isIntegerTy() && TargetLLVMType->isIntegerTy() &&
+      !TargetLLVMType->isIntegerTy(1)) {
+    if (auto *literal = dynamic_cast<NumberExprAST *>(getOperand())) {
+      if (literal->isIntegerLiteral()) {
+        const llvm::APInt &literalValue = literal->getLiteral().getIntegerValue();
+        if (auto rangeInfo = getIntegerRangeInfo(cleanTarget)) {
+          if (!integerLiteralFitsRange(literalValue, *rangeInfo))
+            return LogErrorV(buildIntegerRangeError(literalValue, cleanTarget));
+        }
+      }
+    }
+  }
 
   // Integer to integer casts
   if (SourceType->isIntegerTy() && TargetLLVMType->isIntegerTy()) {
@@ -15560,7 +15696,7 @@ llvm::Value *CastExprAST::codegen() {
     }
   }
   
-  return LogErrorV("Invalid cast between incompatible types");
+  return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
 }
 
 // Generate code for ref expressions (returns pointer to variable)
@@ -22296,7 +22432,7 @@ llvm::Value *TernaryExprAST::codegen() {
       CondV = Builder->CreateICmpNE(CondV,
         llvm::ConstantInt::get(CondV->getType(), 0), "ternarycond");
     } else {
-      return LogErrorV("Ternary condition must be a numeric type");
+      return LogErrorV("Ternary condition must be numeric");
     }
   }
 
@@ -22363,7 +22499,7 @@ llvm::Value *TernaryExprAST::codegen() {
       ThenV = llvm::ConstantAggregateZero::get(StructTy);
       ResultType = ElseV->getType();
     } else {
-      return LogErrorV("Ternary expression branches must have compatible types");
+      return LogErrorV("Branches must have compatible types");
     }
   }
 

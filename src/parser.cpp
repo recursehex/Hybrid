@@ -2741,7 +2741,8 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   }
 
   if (CurTok != '=') {
-    LogError("Expected '=' after variable name (all variables must be initialized)");
+    LogError("Variable must be initialized",
+             "Add an initializer, for example: `int count = 0`.");
     return nullptr;
   }
 
@@ -3202,7 +3203,8 @@ std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> 
 
   // Expect 'else'
   if (CurTok != tok_else) {
-    LogError("Expected 'else' after condition in ternary expression");
+    LogError("Expected 'else' after condition",
+             "Ternary expressions require both a true and false branch.");
     return nullptr;
   }
 

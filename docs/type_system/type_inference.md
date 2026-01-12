@@ -115,7 +115,7 @@ byte overflow = 256     // Error: 256 exceeds byte range [0-255]
 
 // Overflow detection in literals
 byte b = 200
-assert b == 256         // Error: 256 out of range for byte
+assert b == 256         // Error: 256 exceeds byte range [0-255]
 
 // Requires explicit casts for converting to smaller types
 short s = 100
