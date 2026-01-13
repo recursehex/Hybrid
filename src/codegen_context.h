@@ -56,6 +56,20 @@ struct FunctionOverload {
   bool isGenericInstantiation = false;
 };
 
+struct DelegateTypeInfo {
+  std::string name;
+  TypeInfo returnType;
+  bool returnsByRef = false;
+  std::vector<TypeInfo> parameterTypes;
+  std::vector<bool> parameterIsRef;
+  std::vector<bool> parameterIsParams;
+  std::vector<std::string> parameterNames;
+  std::vector<DefaultArgInfo> parameterDefaults;
+  std::vector<SourceLocation> parameterDefaultLocations;
+  llvm::StructType *structType = nullptr;
+  llvm::FunctionType *functionType = nullptr;
+};
+
 struct CompositeMemberInfo {
   MemberModifiers modifiers;
   std::string signature;
@@ -220,6 +234,7 @@ struct CodegenContext {
   std::map<std::string, TypeInfo> globalTypes;
   std::map<std::string, TypeInfo> localTypes;
   std::map<std::string, llvm::StructType *> structTypes;
+  std::map<std::string, DelegateTypeInfo> delegateTypes;
   std::map<std::string, std::vector<int64_t>> arraySizes;
   std::map<std::string, std::vector<std::pair<std::string, unsigned>>> structFieldIndices;
   std::map<std::string, std::map<std::string, std::string>> structFieldTypes;
@@ -260,6 +275,7 @@ inline void CodegenContext::reset() {
   globalTypes.clear();
   localTypes.clear();
   structTypes.clear();
+  delegateTypes.clear();
   arraySizes.clear();
   structFieldIndices.clear();
   structFieldTypes.clear();

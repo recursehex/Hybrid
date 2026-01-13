@@ -75,6 +75,28 @@ int add(int x, int y)
 add(5, 3)
 ```
 
+## Delegates
+
+Delegates are named function pointer types with explicit signatures. They can be declared at the top level or inside a type body for grouping, and then used anywhere a type is allowed.
+
+```cs
+class Box
+{
+    delegate int Transformer(int value)
+
+    int Apply(Transformer op, int value)
+    {
+        return op(value)
+    }
+}
+```
+
+- Delegate names are module-wide; refer to them by name without a type prefix.
+- Nullable delegates use `?` and must be checked before calling.
+- Instance method references require a receiver (`counter.Add`, not `Counter.Add`).
+
+See the [Functions guide](functions.md#delegates) for detailed rules and examples.
+
 ## Keywords
 
 The following keywords are reserved:
@@ -89,7 +111,7 @@ The following keywords are reserved:
   - While loops: `while`
   - Loop control: `break`, `skip`
   - Switch statements and expressions: `switch`, `case`, `default`
-- Function keywords: `return`, `extern`
+- Function keywords: `return`, `extern`, `delegate`
 - Structure keywords: `use`, `struct`, `this`
 - Class keywords: `class`, `inherits`, `base`, `interface`, `abstract`, `virtual`, `override`
 - Access modifiers: `public`, `private`, `protected`, `const`, `static`

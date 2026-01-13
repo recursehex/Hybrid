@@ -15,6 +15,7 @@ enum Token {
   tok_use = -2,             // import statement
   tok_extern = -3,          // external function declaration
   tok_return = -4,          // return statement
+  tok_delegate = -114,      // delegate keyword
   
   // control flow
   tok_for = -5,             // for loop

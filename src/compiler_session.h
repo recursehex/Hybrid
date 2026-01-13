@@ -70,6 +70,7 @@ struct ParserContext {
   std::set<std::string> structNames;
   std::vector<std::string> structDefinitionStack;
   std::set<std::string> classNames;
+  std::set<std::string> delegateNames;
   std::vector<std::string> classDefinitionStack;
   int loopNestingDepth = 0;
   int unsafeContextLevel = 0;

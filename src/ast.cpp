@@ -887,8 +887,11 @@ static void collectInterfaceAncestors(const std::string &interfaceName,
                                       std::set<std::string> &out);
 llvm::Value *castToType(llvm::Value *value, llvm::Type *targetType,
                         const std::string &targetTypeName);
+static llvm::FunctionType *ensureDelegateFunctionType(DelegateTypeInfo &info);
+static llvm::StructType *ensureDelegateStructType(DelegateTypeInfo &info);
 static std::string describeAggregateKind(AggregateKind kind);
 static std::string baseCompositeName(const std::string &typeName);
+static bool expressionIsNullable(const ExprAST *expr);
 
 llvm::Value *LogErrorV(const char *Str, std::string_view hint = {});
 llvm::Value *LogErrorV(const std::string &Str, std::string_view hint = {});
@@ -1478,6 +1481,72 @@ static std::string formatTemplateDescribeSummary(const std::string &typeName,
                                emptyBindings, emptyMethods);
 }
 
+static DelegateTypeInfo *lookupDelegateInfoMutable(const std::string &name) {
+  if (name.empty())
+    return nullptr;
+  std::string key = stripNullableAnnotations(name);
+  auto it = CG.delegateTypes.find(key);
+  if (it == CG.delegateTypes.end())
+    return nullptr;
+  return &it->second;
+}
+
+static const DelegateTypeInfo *lookupDelegateInfo(const std::string &name) {
+  return lookupDelegateInfoMutable(name);
+}
+
+static const DelegateTypeInfo *lookupDelegateInfo(const TypeInfo &info) {
+  std::string typeName = typeNameFromInfo(info);
+  if (typeName.empty())
+    typeName = info.typeName;
+  return lookupDelegateInfo(typeName);
+}
+
+static const DelegateTypeInfo *lookupDelegateInfo(llvm::Type *type) {
+  if (!type)
+    return nullptr;
+  auto *structTy = llvm::dyn_cast<llvm::StructType>(type);
+  if (!structTy)
+    return nullptr;
+  for (const auto &entry : CG.delegateTypes) {
+    if (entry.second.structType == structTy)
+      return &entry.second;
+  }
+  return nullptr;
+}
+
+static std::string formatDelegateSignature(const DelegateTypeInfo &info,
+                                           bool includeName) {
+  std::string signature;
+  if (includeName) {
+    signature = "delegate " + info.name + " ";
+  }
+  if (info.returnsByRef)
+    signature += "ref ";
+  signature += stripNullableAnnotations(typeNameFromInfo(info.returnType));
+  signature += "(";
+  for (size_t idx = 0; idx < info.parameterTypes.size(); ++idx) {
+    if (idx)
+      signature += ", ";
+    if (idx < info.parameterIsParams.size() && info.parameterIsParams[idx])
+      signature += "params ";
+    if (idx < info.parameterIsRef.size() && info.parameterIsRef[idx])
+      signature += "ref ";
+    signature += stripNullableAnnotations(
+        typeNameFromInfo(info.parameterTypes[idx]));
+  }
+  signature += ")";
+  return signature;
+}
+
+static std::string formatDelegateDescribeSummary(const DelegateTypeInfo &info,
+                                                 const std::string &typeName) {
+  std::string summary = "type:" + typeName;
+  summary += "|kind:delegate";
+  summary += "|signature:" + formatDelegateSignature(info, false);
+  return summary;
+}
+
 static std::optional<std::string>
 buildSmartPointerDescribeSummary(const TypeInfo &requested,
                                  const std::string &sanitized) {
@@ -1524,6 +1593,10 @@ buildDescribeTypeSummary(const std::string &typeSpelling) {
         sanitized, info->kind, info->interfaces, info->baseClass,
         info->genericParameters, info->typeArgumentBindings,
         info->genericMethodInstantiations);
+  }
+
+  if (const DelegateTypeInfo *delegateInfo = lookupDelegateInfo(sanitized)) {
+    return formatDelegateDescribeSummary(*delegateInfo, sanitized);
   }
 
   if (auto smartSummary =
@@ -4506,6 +4579,12 @@ static ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
 
 enum class AccessIntent : uint8_t { Read, Write, Call };
 
+static std::optional<TypeInfo> resolveExprTypeInfo(const ExprAST *expr);
+static bool ensureMemberAccessAllowed(const MemberModifiers &modifiers,
+                                      AccessIntent intent,
+                                      const std::string &ownerName,
+                                      const std::string &memberName);
+
 static std::string describeAggregateKind(AggregateKind kind) {
   switch (kind) {
   case AggregateKind::Struct:
@@ -4652,12 +4731,932 @@ static std::string makeMemberKey(const std::string &owner, const std::string &me
   return owner + "." + member;
 }
 
+static bool delegateSignatureMatches(const DelegateTypeInfo &delegateInfo,
+                                     const TypeInfo &returnType,
+                                     bool returnsByRef,
+                                     const std::vector<TypeInfo> &paramTypes,
+                                     const std::vector<bool> &paramIsRef,
+                                     const std::vector<bool> &paramIsParams,
+                                     size_t paramOffset) {
+  if (returnsByRef != delegateInfo.returnsByRef)
+    return false;
+  if (!typeInfoEquals(returnType, delegateInfo.returnType))
+    return false;
+  if (paramTypes.size() < paramOffset)
+    return false;
+  if (paramTypes.size() - paramOffset != delegateInfo.parameterTypes.size())
+    return false;
+
+  for (size_t idx = 0; idx < delegateInfo.parameterTypes.size(); ++idx) {
+    size_t paramIndex = paramOffset + idx;
+    if (paramIndex >= paramTypes.size())
+      return false;
+    bool expectedRef = paramIndex < paramIsRef.size() ? paramIsRef[paramIndex] : false;
+    bool expectedParams =
+        paramIndex < paramIsParams.size() ? paramIsParams[paramIndex] : false;
+    bool delegateRef =
+        idx < delegateInfo.parameterIsRef.size() ? delegateInfo.parameterIsRef[idx] : false;
+    bool delegateParams =
+        idx < delegateInfo.parameterIsParams.size() ? delegateInfo.parameterIsParams[idx] : false;
+    if (expectedRef != delegateRef || expectedParams != delegateParams)
+      return false;
+    if (!typeInfoEquals(paramTypes[paramIndex], delegateInfo.parameterTypes[idx]))
+      return false;
+  }
+
+  return true;
+}
+
+static FunctionOverload *selectOverloadForDelegate(
+    const std::string &calleeBase, const DelegateTypeInfo &delegateInfo,
+    bool reportErrors) {
+  auto it = CG.functionOverloads.find(calleeBase);
+  if (it == CG.functionOverloads.end()) {
+    if (reportErrors) {
+      reportCompilerError("Unknown function '" + calleeBase +
+                          "' for delegate '" + delegateInfo.name + "'");
+    }
+    return nullptr;
+  }
+
+  FunctionOverload *match = nullptr;
+  for (auto &overload : it->second) {
+    if (!delegateSignatureMatches(delegateInfo, overload.returnType,
+                                  overload.returnsByRef,
+                                  overload.parameterTypes,
+                                  overload.parameterIsRef,
+                                  overload.parameterIsParams, 0)) {
+      continue;
+    }
+    if (match) {
+      if (reportErrors) {
+        reportCompilerError("Ambiguous reference to function '" + calleeBase +
+                            "' for delegate '" + delegateInfo.name + "'");
+      }
+      return nullptr;
+    }
+    match = &overload;
+  }
+
+  if (!match && reportErrors) {
+    reportCompilerError("No overload of function '" + calleeBase +
+                        "' matches delegate '" + delegateInfo.name + "'");
+  }
+  return match;
+}
+
+static llvm::Value *buildDelegateValue(const DelegateTypeInfo &delegateInfo,
+                                       llvm::Value *fnPtr,
+                                       llvm::Value *receiver) {
+  DelegateTypeInfo *mutableInfo = lookupDelegateInfoMutable(delegateInfo.name);
+  DelegateTypeInfo localInfo = delegateInfo;
+  DelegateTypeInfo &info = mutableInfo ? *mutableInfo : localInfo;
+
+  llvm::StructType *structTy = ensureDelegateStructType(info);
+  if (!structTy)
+    return nullptr;
+  llvm::FunctionType *fnType = ensureDelegateFunctionType(info);
+  if (!fnType)
+    return nullptr;
+
+  llvm::Type *expectedFnPtrTy = pointerType(fnType);
+  if (!fnPtr || !fnPtr->getType()->isPointerTy())
+    return LogErrorV("Delegate target must be a function pointer");
+  if (fnPtr->getType() != expectedFnPtrTy)
+    fnPtr = Builder->CreateBitCast(fnPtr, expectedFnPtrTy, "delegate.fn.cast");
+
+  llvm::Type *expectedRecvTy = pointerType();
+  if (!receiver) {
+    receiver = llvm::ConstantPointerNull::get(
+        llvm::cast<llvm::PointerType>(expectedRecvTy));
+  } else if (receiver->getType() != expectedRecvTy) {
+    if (!receiver->getType()->isPointerTy())
+      return LogErrorV("Delegate receiver must be a pointer");
+    receiver = Builder->CreateBitCast(receiver, expectedRecvTy,
+                                      "delegate.recv.cast");
+  }
+
+  llvm::Value *delegateValue = llvm::UndefValue::get(structTy);
+  delegateValue = Builder->CreateInsertValue(delegateValue, fnPtr, 0,
+                                             "delegate.fn");
+  delegateValue = Builder->CreateInsertValue(delegateValue, receiver, 1,
+                                             "delegate.recv");
+  return delegateValue;
+}
+
+static std::string buildDelegateWrapperKey(const llvm::Function *target,
+                                           const DelegateTypeInfo &delegateInfo) {
+  std::string key;
+  if (target)
+    key = target->getName().str();
+  key += "|";
+  key += formatDelegateSignature(delegateInfo, false);
+  return key;
+}
+
+static llvm::Function *ensureDelegateWrapper(llvm::Function *target,
+                                             const DelegateTypeInfo &delegateInfo) {
+  if (!target)
+    return nullptr;
+
+  static std::map<std::string, llvm::Function *> wrapperCache;
+  std::string cacheKey = buildDelegateWrapperKey(target, delegateInfo);
+  auto cached = wrapperCache.find(cacheKey);
+  if (cached != wrapperCache.end())
+    return cached->second;
+
+  DelegateTypeInfo *mutableInfo = lookupDelegateInfoMutable(delegateInfo.name);
+  DelegateTypeInfo localInfo = delegateInfo;
+  DelegateTypeInfo &info = mutableInfo ? *mutableInfo : localInfo;
+  llvm::FunctionType *delegateFnType = ensureDelegateFunctionType(info);
+  if (!delegateFnType)
+    return nullptr;
+
+  std::string wrapperName = "__hybrid_delegate_wrap$" +
+                            sanitizeForMangle(target->getName().str()) +
+                            "$" +
+                            sanitizeForMangle(formatDelegateSignature(info, false));
+
+  llvm::Function *wrapper =
+      llvm::Function::Create(delegateFnType, llvm::Function::InternalLinkage,
+                             wrapperName, TheModule.get());
+
+  llvm::BasicBlock *entry =
+      llvm::BasicBlock::Create(*TheContext, "entry", wrapper);
+  llvm::IRBuilder<> tmpBuilder(*TheContext);
+  tmpBuilder.SetInsertPoint(entry);
+
+  std::vector<llvm::Value *> callArgs;
+  callArgs.reserve(wrapper->arg_size() > 0 ? wrapper->arg_size() - 1 : 0);
+  auto it = wrapper->arg_begin();
+  if (it != wrapper->arg_end())
+    ++it; // skip receiver
+  for (; it != wrapper->arg_end(); ++it)
+    callArgs.push_back(&*it);
+
+  llvm::Value *callValue = nullptr;
+  if (target->getReturnType()->isVoidTy()) {
+    tmpBuilder.CreateCall(target, callArgs);
+    tmpBuilder.CreateRetVoid();
+  } else {
+    callValue = tmpBuilder.CreateCall(target, callArgs);
+    tmpBuilder.CreateRet(callValue);
+  }
+
+  wrapperCache[cacheKey] = wrapper;
+  return wrapper;
+}
+
+static bool isDelegateFunctionReference(const VariableExprAST &var) {
+  if (lookupTypeInfo(var.getName()))
+    return false;
+  return CG.functionOverloads.contains(var.getName());
+}
+
+static const CompositeTypeInfo *resolveMemberOwnerInfo(const MemberAccessExprAST &member,
+                                                       std::string &ownerName,
+                                                       bool &isTypeReference) {
+  isTypeReference = false;
+  if (auto *varObj = dynamic_cast<VariableExprAST *>(member.getObject())) {
+    ownerName = varObj->getName();
+    if (const CompositeTypeInfo *info = lookupCompositeInfo(ownerName)) {
+      isTypeReference = true;
+      return info;
+    }
+  }
+
+  if (auto infoOpt = resolveExprTypeInfo(member.getObject())) {
+    ownerName = sanitizeCompositeLookupName(typeNameFromInfo(*infoOpt));
+    if (!ownerName.empty())
+      return lookupCompositeInfo(ownerName);
+  }
+
+  return nullptr;
+}
+
+static bool isDelegateMethodReference(const MemberAccessExprAST &member) {
+  std::string ownerName;
+  bool isTypeReference = false;
+  const CompositeTypeInfo *info =
+      resolveMemberOwnerInfo(member, ownerName, isTypeReference);
+  if (!info)
+    return false;
+  return info->methodInfo.contains(member.getMemberName());
+}
+
+static bool canBindDelegateReference(const DelegateTypeInfo &delegateInfo,
+                                     const ExprAST *expr) {
+  if (!expr)
+    return false;
+
+  const ExprAST *coreExpr = unwrapRefExpr(expr);
+  if (auto *var = dynamic_cast<const VariableExprAST *>(coreExpr)) {
+    if (lookupTypeInfo(var->getName()))
+      return false;
+    if (var->getName().find('<') != std::string::npos)
+      return false;
+    FunctionOverload *match =
+        selectOverloadForDelegate(var->getName(), delegateInfo, false);
+    return match != nullptr;
+  }
+
+  auto *member = dynamic_cast<const MemberAccessExprAST *>(coreExpr);
+  if (!member)
+    return false;
+
+  if (member->hasExplicitGenerics())
+    return false;
+
+  std::string ownerName;
+  bool isTypeReference = false;
+  const CompositeTypeInfo *ownerInfo =
+      resolveMemberOwnerInfo(*member, ownerName, isTypeReference);
+  if (!ownerInfo)
+    return false;
+
+  auto methodIt = ownerInfo->methodInfo.find(member->getMemberName());
+  if (methodIt == ownerInfo->methodInfo.end())
+    return false;
+
+  const CompositeMemberInfo &memberInfo = methodIt->second;
+  bool isStaticMethod =
+      static_cast<uint8_t>(memberInfo.modifiers.storage & StorageFlag::Static) != 0;
+  size_t paramOffset = isStaticMethod ? 0 : 1;
+  if (!delegateSignatureMatches(delegateInfo, memberInfo.returnType,
+                                memberInfo.returnsByRef,
+                                memberInfo.parameterTypes,
+                                memberInfo.parameterIsRef,
+                                memberInfo.parameterIsParams, paramOffset)) {
+    return false;
+  }
+  if (!isStaticMethod && isTypeReference)
+    return false;
+  if (ownerInfo->kind == AggregateKind::Interface && !isStaticMethod)
+    return false;
+  return true;
+}
+
+static llvm::Value *emitDelegateValueForTarget(
+    const DelegateTypeInfo &delegateInfo, ExprAST *expr,
+    std::string_view contextDescription, bool &handled) {
+  handled = false;
+  if (!expr)
+    return nullptr;
+  (void)contextDescription;
+
+  ExprAST *coreExpr = const_cast<ExprAST *>(unwrapRefExpr(expr));
+  if (auto *var = dynamic_cast<VariableExprAST *>(coreExpr)) {
+    if (const TypeInfo *sym = lookupTypeInfo(var->getName())) {
+      if (lookupDelegateInfo(*sym)) {
+        handled = true;
+        return expr->codegen();
+      }
+      return nullptr;
+    }
+
+    handled = true;
+    if (var->getName().find('<') != std::string::npos) {
+      reportCompilerError("Generic function references are not supported for delegates");
+      return nullptr;
+    }
+
+    FunctionOverload *match =
+        selectOverloadForDelegate(var->getName(), delegateInfo, true);
+    if (!match)
+      return nullptr;
+
+    llvm::Function *targetFn = match->function;
+    if (!targetFn)
+      targetFn = TheModule->getFunction(match->mangledName);
+    if (!targetFn) {
+      reportCompilerError("Internal error: missing function for delegate target '" +
+                          var->getName() + "'");
+      return nullptr;
+    }
+
+    llvm::Function *wrapper = ensureDelegateWrapper(targetFn, delegateInfo);
+    if (!wrapper)
+      return nullptr;
+    llvm::Value *receiver = llvm::ConstantPointerNull::get(pointerType());
+    return buildDelegateValue(delegateInfo, wrapper, receiver);
+  }
+
+  auto *member = dynamic_cast<MemberAccessExprAST *>(coreExpr);
+  if (!member)
+    return nullptr;
+
+  if (!isDelegateMethodReference(*member))
+    return nullptr;
+
+  handled = true;
+  if (member->hasExplicitGenerics()) {
+    reportCompilerError("Explicit method type arguments are not supported for delegates");
+    return nullptr;
+  }
+
+  std::string ownerName;
+  bool isTypeReference = false;
+  const CompositeTypeInfo *ownerInfo =
+      resolveMemberOwnerInfo(*member, ownerName, isTypeReference);
+  if (!ownerInfo) {
+    reportCompilerError("Unable to resolve type for delegate target '" +
+                        member->getMemberName() + "'");
+    return nullptr;
+  }
+
+  auto methodIt = ownerInfo->methodInfo.find(member->getMemberName());
+  if (methodIt == ownerInfo->methodInfo.end()) {
+    reportCompilerError("Member '" + member->getMemberName() +
+                        "' of type '" + ownerName +
+                        "' is not a method");
+    return nullptr;
+  }
+
+  const CompositeMemberInfo &memberInfo = methodIt->second;
+  if (!ensureMemberAccessAllowed(memberInfo.modifiers, AccessIntent::Call,
+                                 ownerName, member->getMemberName()))
+    return nullptr;
+
+  bool isStaticMethod =
+      static_cast<uint8_t>(memberInfo.modifiers.storage & StorageFlag::Static) != 0;
+  size_t paramOffset = isStaticMethod ? 0 : 1;
+
+  if (!delegateSignatureMatches(delegateInfo, memberInfo.returnType,
+                                memberInfo.returnsByRef,
+                                memberInfo.parameterTypes,
+                                memberInfo.parameterIsRef,
+                                memberInfo.parameterIsParams, paramOffset)) {
+    reportCompilerError("Method '" + memberInfo.signature +
+                        "' does not match delegate '" + delegateInfo.name + "'");
+    return nullptr;
+  }
+
+  if (!isStaticMethod && isTypeReference) {
+    reportCompilerError("Instance method '" + memberInfo.signature +
+                        "' requires an instance receiver");
+    return nullptr;
+  }
+
+  llvm::Function *targetFn = memberInfo.directFunction;
+  if (!targetFn && !memberInfo.mangledName.empty())
+    targetFn = TheModule->getFunction(memberInfo.mangledName);
+  if (!targetFn) {
+    reportCompilerError("Method '" + memberInfo.signature +
+                        "' is unavailable for delegate binding");
+    return nullptr;
+  }
+
+  if (ownerInfo->kind == AggregateKind::Interface && !isStaticMethod) {
+    reportCompilerError("Cannot bind interface method '" + memberInfo.signature +
+                        "' to a delegate");
+    return nullptr;
+  }
+
+  if (isStaticMethod) {
+    llvm::Function *wrapper = ensureDelegateWrapper(targetFn, delegateInfo);
+    if (!wrapper)
+      return nullptr;
+    llvm::Value *receiver = llvm::ConstantPointerNull::get(pointerType());
+    return buildDelegateValue(delegateInfo, wrapper, receiver);
+  }
+
+  if (expressionIsNullable(member->getObject())) {
+    reportCompilerError("Cannot bind nullable receiver to delegate target '" +
+                        memberInfo.signature + "'",
+                        "Ensure the receiver is non-null before creating the delegate.");
+    return nullptr;
+  }
+
+  llvm::Value *instancePtr = member->getObject()->codegen_ptr();
+  llvm::Value *instanceValue = nullptr;
+  if (!instancePtr) {
+    instanceValue = member->getObject()->codegen();
+    if (!instanceValue)
+      return nullptr;
+    if (instanceValue->getType()->isPointerTy()) {
+      instancePtr = instanceValue;
+    } else {
+      llvm::AllocaInst *Tmp =
+          Builder->CreateAlloca(instanceValue->getType(), nullptr,
+                                "delegate.recv");
+      Builder->CreateStore(instanceValue, Tmp);
+      instancePtr = Tmp;
+    }
+  }
+
+  return buildDelegateValue(delegateInfo, targetFn, instancePtr);
+}
+
+static const DelegateTypeInfo *resolveDelegateInfoForExpr(const ExprAST *expr) {
+  if (!expr)
+    return nullptr;
+  if (auto infoOpt = resolveExprTypeInfo(expr))
+    return lookupDelegateInfo(*infoOpt);
+  std::string typeName = expr->getTypeName();
+  if (!typeName.empty())
+    return lookupDelegateInfo(typeName);
+  return nullptr;
+}
+
+static llvm::Value *emitDelegateCall(CallExprAST &call,
+                                     llvm::Value *calleeValue,
+                                     const DelegateTypeInfo &delegateInfo,
+                                     ExprAST *calleeExpr) {
+  if (!calleeValue)
+    return nullptr;
+
+  if (calleeExpr && expressionIsNullable(calleeExpr)) {
+    reportCompilerError("Cannot call nullable delegate '" + delegateInfo.name +
+                        "' without a null check",
+                        "Guard the call with 'if <delegate> != null'.");
+    return nullptr;
+  }
+
+  DelegateTypeInfo *mutableInfo = lookupDelegateInfoMutable(delegateInfo.name);
+  DelegateTypeInfo localInfo = delegateInfo;
+  DelegateTypeInfo &info = mutableInfo ? *mutableInfo : localInfo;
+  llvm::StructType *structTy = ensureDelegateStructType(info);
+  llvm::FunctionType *fnType = ensureDelegateFunctionType(info);
+  if (!structTy || !fnType)
+    return nullptr;
+
+  llvm::Value *delegateValue = calleeValue;
+  if (delegateValue->getType()->isPointerTy()) {
+    delegateValue =
+        Builder->CreateLoad(structTy, delegateValue, "delegate.load");
+  } else if (delegateValue->getType() != structTy) {
+    delegateValue = castToType(delegateValue, structTy, info.name);
+  }
+  if (!delegateValue)
+    return nullptr;
+
+  llvm::Value *fnPtr =
+      Builder->CreateExtractValue(delegateValue, 0, "delegate.fn");
+  llvm::Value *receiver =
+      Builder->CreateExtractValue(delegateValue, 1, "delegate.recv");
+  llvm::Value *fnPtrCast =
+      Builder->CreateBitCast(fnPtr, pointerType(fnType), "delegate.fn.cast");
+
+  std::vector<ProvidedArgument> provided;
+  provided.reserve(call.getArgs().size());
+  for (size_t i = 0; i < call.getArgs().size(); ++i) {
+    ProvidedArgument arg;
+    arg.expr = call.getArgs()[i].get();
+    arg.isRef = dynamic_cast<const RefExprAST *>(arg.expr) != nullptr;
+    if (i < call.getArgNames().size())
+      arg.name = call.getArgNames()[i];
+    if (i < call.getArgNameLocations().size())
+      arg.nameLoc = call.getArgNameLocations()[i];
+    if (i < call.getArgEqualsLocations().size())
+      arg.equalsLoc = call.getArgEqualsLocations()[i];
+
+    const ExprAST *coreArg = unwrapRefExpr(arg.expr);
+    bool deferred = false;
+    if (auto *var = dynamic_cast<const VariableExprAST *>(coreArg)) {
+      if (isDelegateFunctionReference(*var))
+        deferred = true;
+    } else if (auto *member = dynamic_cast<const MemberAccessExprAST *>(coreArg)) {
+      if (isDelegateMethodReference(*member))
+        deferred = true;
+    }
+
+    if (deferred) {
+      arg.value = nullptr;
+      provided.push_back(std::move(arg));
+      continue;
+    }
+
+    llvm::Value *value = call.getArgs()[i]->codegen();
+    if (!value)
+      return nullptr;
+    arg.value = value;
+    provided.push_back(std::move(arg));
+  }
+
+  auto findParamsIndex = [](const std::vector<bool> &flags) -> int {
+    for (size_t i = 0; i < flags.size(); ++i) {
+      if (flags[i])
+        return static_cast<int>(i);
+    }
+    return -1;
+  };
+
+  const bool hasNamedArguments = std::ranges::any_of(
+      provided, [](const ProvidedArgument &arg) { return !arg.name.empty(); });
+
+  if (hasNamedArguments) {
+    std::set<std::string> seenNames;
+    for (const auto &arg : provided) {
+      if (arg.name.empty())
+        continue;
+      if (!seenNames.insert(arg.name).second) {
+        ScopedErrorLocation scoped(arg.nameLoc);
+        reportCompilerError("Duplicate argument for parameter '" + arg.name +
+                            "'");
+        return nullptr;
+      }
+    }
+
+    std::set<std::string> knownNames;
+    for (const auto &name : info.parameterNames) {
+      if (!name.empty())
+        knownNames.insert(name);
+    }
+    for (const auto &arg : provided) {
+      if (arg.name.empty())
+        continue;
+      if (!knownNames.contains(arg.name)) {
+        ScopedErrorLocation scoped(arg.nameLoc);
+        reportCompilerError("Unknown parameter name '" + arg.name +
+                            "' for delegate '" + info.name + "'");
+        return nullptr;
+      }
+    }
+  }
+
+  const size_t paramCount = info.parameterTypes.size();
+  std::vector<int> binding(paramCount, -1);
+  std::vector<int> paramsBinding;
+  const int paramsIndex = findParamsIndex(info.parameterIsParams);
+  size_t nextPositional = 0;
+  bool failed = false;
+  bool paramsNamed = false;
+
+  for (size_t i = 0; i < provided.size(); ++i) {
+    const auto &arg = provided[i];
+    if (arg.name.empty()) {
+      while (nextPositional < paramCount && binding[nextPositional] != -1)
+        ++nextPositional;
+      if (paramsIndex >= 0 &&
+          nextPositional == static_cast<size_t>(paramsIndex)) {
+        if (paramsNamed) {
+          failed = true;
+          break;
+        }
+        for (size_t j = i; j < provided.size(); ++j) {
+          if (!provided[j].name.empty()) {
+            failed = true;
+            break;
+          }
+          paramsBinding.push_back(static_cast<int>(j));
+        }
+        nextPositional = paramCount;
+        break;
+      }
+      if (nextPositional >= paramCount) {
+        failed = true;
+        break;
+      }
+      binding[nextPositional] = static_cast<int>(i);
+      ++nextPositional;
+      continue;
+    }
+
+    auto nameIt = std::find(info.parameterNames.begin(),
+                            info.parameterNames.end(), arg.name);
+    if (nameIt == info.parameterNames.end()) {
+      failed = true;
+      break;
+    }
+    size_t paramIndex =
+        static_cast<size_t>(nameIt - info.parameterNames.begin());
+    if (paramsIndex >= 0 &&
+        paramIndex == static_cast<size_t>(paramsIndex)) {
+      if (paramsNamed || !paramsBinding.empty()) {
+        failed = true;
+        break;
+      }
+      paramsNamed = true;
+      paramsBinding.push_back(static_cast<int>(i));
+      continue;
+    }
+    if (binding[paramIndex] != -1) {
+      failed = true;
+      break;
+    }
+    binding[paramIndex] = static_cast<int>(i);
+  }
+
+  if (failed) {
+    reportCompilerError("Invalid argument binding for delegate '" +
+                        info.name + "'");
+    return nullptr;
+  }
+
+  for (size_t idx = 0; idx < paramCount; ++idx) {
+    if (paramsIndex >= 0 &&
+        idx == static_cast<size_t>(paramsIndex)) {
+      continue;
+    }
+    if (binding[idx] != -1)
+      continue;
+    const bool hasDefault =
+        idx < info.parameterDefaults.size() &&
+        info.parameterDefaults[idx].isSet();
+    if (!hasDefault) {
+      reportCompilerError(
+          "Missing argument for parameter '" +
+              (idx < info.parameterNames.size()
+                   ? info.parameterNames[idx]
+                   : std::to_string(idx)) +
+              "' in call to delegate '" + info.name + "'");
+      return nullptr;
+    }
+  }
+
+  auto checkCompatibility = [&](const ExprAST *argExpr,
+                                llvm::Value *argValue,
+                                const TypeInfo &expectedInfo,
+                                llvm::Type *expectedType) -> bool {
+    if (!argValue) {
+      const DelegateTypeInfo *delegateInfo = lookupDelegateInfo(expectedInfo);
+      if (!delegateInfo)
+        return false;
+      return canBindDelegateReference(*delegateInfo, argExpr);
+    }
+    const ExprAST *coreArg = unwrapRefExpr(argExpr);
+    if (coreArg && !coreArg->getTypeName().empty()) {
+      TypeInfo actualInfo =
+          applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+      const bool expectedIsArray =
+          expectedInfo.isArray || expectedInfo.arrayDepth > 0;
+      const bool actualIsArray =
+          actualInfo.isArray || actualInfo.arrayDepth > 0;
+      if ((expectedIsArray || actualIsArray) &&
+          !typeInfoEquals(expectedInfo, actualInfo)) {
+        return false;
+      }
+      const bool expectedHasGenerics = !expectedInfo.typeArguments.empty();
+      const bool actualHasGenerics = !actualInfo.typeArguments.empty();
+      if ((expectedHasGenerics || actualHasGenerics) &&
+          !typeInfoEquals(expectedInfo, actualInfo)) {
+        return false;
+      }
+    }
+
+    llvm::Type *actualType = argValue->getType();
+    if (actualType == expectedType)
+      return true;
+    if (actualType && expectedType && actualType->isPointerTy() &&
+        expectedType->isPointerTy())
+      return true;
+    if (actualType && expectedType &&
+        areTypesCompatible(actualType, expectedType))
+      return true;
+    return false;
+  };
+
+  for (size_t idx = 0; idx < paramCount; ++idx) {
+    if (paramsIndex >= 0 &&
+        idx == static_cast<size_t>(paramsIndex))
+      continue;
+    bool argIsRef = binding[idx] >= 0
+                        ? provided[static_cast<size_t>(binding[idx])].isRef
+                        : info.parameterIsRef[idx];
+    if (info.parameterIsRef[idx] != argIsRef) {
+      reportCompilerError("Argument for parameter '" +
+                          (idx < info.parameterNames.size()
+                               ? info.parameterNames[idx]
+                               : std::to_string(idx)) +
+                          "' must match ref usage");
+      return nullptr;
+    }
+    if (binding[idx] >= 0) {
+      const auto &arg = provided[static_cast<size_t>(binding[idx])];
+      llvm::Type *expectedType =
+          fnType->getParamType(idx + 1);
+      if (!checkCompatibility(arg.expr, arg.value,
+                              info.parameterTypes[idx], expectedType)) {
+        reportCompilerError("Argument for parameter '" +
+                            (idx < info.parameterNames.size()
+                                 ? info.parameterNames[idx]
+                                 : std::to_string(idx)) +
+                            "' is incompatible with delegate '" +
+                            info.name + "'");
+        return nullptr;
+      }
+    }
+  }
+
+  bool paramsDirect = false;
+  if (paramsIndex >= 0 && !paramsBinding.empty()) {
+    TypeInfo arrayInfo = info.parameterTypes[static_cast<size_t>(paramsIndex)];
+    llvm::Type *expectedArrayType = fnType->getParamType(paramsIndex + 1);
+    bool directAllowed = paramsBinding.size() == 1;
+    if (directAllowed) {
+      const auto &arg = provided[static_cast<size_t>(paramsBinding.front())];
+      if (arg.isRef)
+        directAllowed = false;
+      const ExprAST *coreArg = unwrapRefExpr(arg.expr);
+      if (directAllowed && coreArg && !coreArg->getTypeName().empty()) {
+        TypeInfo actualInfo =
+            applyActiveTypeBindings(makeTypeInfo(coreArg->getTypeName()));
+        if (!typeInfoEquals(arrayInfo, actualInfo))
+          directAllowed = false;
+      }
+      llvm::Type *actualType =
+          arg.value ? arg.value->getType() : nullptr;
+      if (!actualType || actualType != expectedArrayType)
+        directAllowed = false;
+    }
+    if (directAllowed) {
+      paramsDirect = true;
+    } else {
+      auto elementInfo = extractElementTypeInfo(arrayInfo);
+      if (!elementInfo) {
+        reportCompilerError("Unable to determine params element type for delegate '" +
+                            info.name + "'");
+        return nullptr;
+      }
+      std::string elementTypeName = typeNameFromInfo(*elementInfo);
+      llvm::Type *expectedElementType = getTypeFromString(elementTypeName);
+      if (!expectedElementType) {
+        reportCompilerError("Unknown params element type '" + elementTypeName +
+                            "' in delegate '" + info.name + "'");
+        return nullptr;
+      }
+      for (int argIndex : paramsBinding) {
+        const auto &arg = provided[static_cast<size_t>(argIndex)];
+        if (arg.isRef) {
+          reportCompilerError("params arguments cannot be passed by ref");
+          return nullptr;
+        }
+        if (!checkCompatibility(arg.expr, arg.value, *elementInfo,
+                                expectedElementType)) {
+          reportCompilerError("params argument is incompatible with delegate '" +
+                              info.name + "'");
+          return nullptr;
+        }
+      }
+    }
+  }
+
+  auto ensureDelegateBindingValue = [&](const DelegateTypeInfo &delegateInfo,
+                                        int bindingIndex,
+                                        std::string_view usageLabel) -> bool {
+    if (bindingIndex < 0 ||
+        static_cast<size_t>(bindingIndex) >= provided.size())
+      return true;
+    ProvidedArgument &arg = provided[static_cast<size_t>(bindingIndex)];
+    if (arg.value)
+      return true;
+    if (!arg.expr)
+      return false;
+    bool handled = false;
+    llvm::Value *value = emitDelegateValueForTarget(
+        delegateInfo, const_cast<ExprAST *>(arg.expr), usageLabel, handled);
+    if (!handled || !value)
+      return false;
+    arg.value = value;
+    arg.isRef = false;
+    return true;
+  };
+
+  if (paramsIndex >= 0 && !paramsDirect &&
+      paramsIndex < static_cast<int>(info.parameterTypes.size())) {
+    TypeInfo paramsInfo = info.parameterTypes[static_cast<size_t>(paramsIndex)];
+    finalizeTypeInfoMetadata(paramsInfo);
+    if (auto elementInfoOpt = extractElementTypeInfo(paramsInfo)) {
+      if (const DelegateTypeInfo *delegateInfo =
+              lookupDelegateInfo(*elementInfoOpt)) {
+        for (int bindingIndex : paramsBinding) {
+          if (!ensureDelegateBindingValue(*delegateInfo, bindingIndex,
+                                          "params argument"))
+            return nullptr;
+        }
+      }
+    }
+  }
+
+  for (size_t idx = 0; idx < binding.size(); ++idx) {
+    if (paramsIndex >= 0 &&
+        idx == static_cast<size_t>(paramsIndex))
+      continue;
+    int bindingIndex = binding[idx];
+    if (bindingIndex < 0)
+      continue;
+    if (const DelegateTypeInfo *delegateInfo =
+            lookupDelegateInfo(info.parameterTypes[idx])) {
+      if (!ensureDelegateBindingValue(*delegateInfo, bindingIndex, "argument"))
+        return nullptr;
+    }
+  }
+
+  std::vector<llvm::Value *> CallArgs;
+  CallArgs.reserve(binding.size());
+  std::vector<std::unique_ptr<ExprAST>> ownedDefaultExprs;
+
+  for (size_t idx = 0; idx < binding.size(); ++idx) {
+    if (paramsIndex >= 0 &&
+        idx == static_cast<size_t>(paramsIndex)) {
+      if (paramsDirect) {
+        const auto &arg =
+            provided[static_cast<size_t>(paramsBinding.front())];
+        CallArgs.push_back(arg.value);
+      } else {
+        llvm::Value *packed =
+            emitPackedParamsArray(paramsBinding, provided,
+                                  info.parameterTypes[idx], info.name);
+        if (!packed)
+          return nullptr;
+        CallArgs.push_back(packed);
+      }
+      continue;
+    }
+    int bindingIndex = binding[idx];
+    if (bindingIndex >= 0) {
+      const auto &arg = provided[static_cast<size_t>(bindingIndex)];
+      CallArgs.push_back(arg.value);
+    } else {
+      ScopedErrorLocation scoped(
+          idx < info.parameterDefaultLocations.size()
+              ? info.parameterDefaultLocations[idx]
+              : SourceLocation{});
+      std::unique_ptr<ExprAST> defaultExpr =
+          instantiateDefaultExpr(idx < info.parameterDefaults.size()
+                                     ? info.parameterDefaults[idx]
+                                     : DefaultArgInfo{});
+      if (!defaultExpr) {
+        reportCompilerError("Default value unavailable for parameter '" +
+                            (idx < info.parameterNames.size()
+                                 ? info.parameterNames[idx]
+                                 : std::to_string(idx)) +
+                            "'");
+        return nullptr;
+      }
+      std::string targetTypeName =
+          typeNameFromInfo(info.parameterTypes[idx]);
+      defaultExpr->setTypeName(targetTypeName);
+      defaultExpr->markTemporary();
+      llvm::Value *value = defaultExpr->codegen();
+      if (!value)
+        return nullptr;
+      CallArgs.push_back(value);
+      ownedDefaultExprs.push_back(std::move(defaultExpr));
+    }
+  }
+
+  std::vector<llvm::Value *> FinalArgs;
+  FinalArgs.reserve(CallArgs.size() + 1);
+  llvm::Value *receiverArg = receiver;
+  llvm::Type *expectedReceiverType = fnType->getParamType(0);
+  if (receiverArg->getType() != expectedReceiverType)
+    receiverArg = Builder->CreateBitCast(receiverArg, expectedReceiverType,
+                                         "delegate.recv.cast");
+  FinalArgs.push_back(receiverArg);
+
+  for (size_t idx = 0; idx < CallArgs.size(); ++idx) {
+    llvm::Value *ArgVal = CallArgs[idx];
+    llvm::Type *ExpectedType =
+        fnType->getParamType(idx + 1);
+    if (info.parameterIsRef[idx]) {
+      if (ExpectedType && ExpectedType->isPointerTy() &&
+          !ArgVal->getType()->isPointerTy()) {
+        llvm::AllocaInst *tmp = Builder->CreateAlloca(
+            ArgVal->getType(), nullptr, "delegate.ref.arg");
+        Builder->CreateStore(ArgVal, tmp);
+        ArgVal = tmp;
+      }
+      if (ExpectedType && ExpectedType->isPointerTy() &&
+          ArgVal->getType() != ExpectedType) {
+        ArgVal = Builder->CreateBitCast(
+            ArgVal, ExpectedType, "delegate.ref.cast");
+      }
+    } else {
+      const std::string targetTypeName =
+          typeNameFromInfo(info.parameterTypes[idx]);
+      ArgVal = castToType(ArgVal, ExpectedType, targetTypeName);
+    }
+    FinalArgs.push_back(ArgVal);
+  }
+
+  llvm::Value *CallValue = nullptr;
+  if (fnType->getReturnType()->isVoidTy()) {
+    CallValue = Builder->CreateCall(fnType, fnPtrCast, FinalArgs);
+    call.setTypeName("void");
+  } else {
+    CallValue =
+        Builder->CreateCall(fnType, fnPtrCast, FinalArgs, "delegate.call");
+    call.setTypeInfo(info.returnType);
+    if (info.returnsByRef) {
+      llvm::Type *valueType =
+          getTypeFromString(typeNameFromInfo(info.returnType));
+      if (!valueType)
+        return LogErrorV("Unable to determine delegate ref return type");
+      CallValue = Builder->CreateLoad(valueType, CallValue,
+                                      "delegate.refload");
+    }
+  }
+
+  return CallValue;
+}
+
 static llvm::Value *emitResolvedCallInternal(
     const std::string &calleeBase, std::vector<llvm::Value *> ArgValues,
     const std::vector<bool> &ArgIsRef,
     const std::vector<std::unique_ptr<ExprAST>> *originalArgs,
     bool preferGeneric, FunctionOverload *forced, ExprAST *typeOwner,
-    const std::vector<ProvidedArgument> *providedArgs = nullptr);
+    std::vector<ProvidedArgument> *providedArgs = nullptr);
 
 static void markStaticFieldInitialized(const std::string &owner, const std::string &member) {
   currentCodegen().initializedStaticFields.insert(makeMemberKey(owner, member));
@@ -5287,28 +6286,44 @@ resolveStaticFieldOwnerInCurrentContext(const std::string &memberName) {
 static std::optional<std::string>
 resolveInstanceMemberOwnerInCurrentContext(const std::string &memberName) {
   const ActiveCompositeContext *ctx = currentCompositeContext();
-  if (!ctx || ctx->isStatic)
+  auto resolveInType = [&](const std::string &typeName)
+      -> std::optional<std::string> {
+    if (typeName.empty())
+      return std::nullopt;
+
+    std::set<std::string> visited;
+    std::string lookupName = typeName;
+
+    while (!lookupName.empty() && visited.insert(lookupName).second) {
+      const CompositeTypeInfo *info = lookupCompositeInfo(lookupName);
+      if (!info)
+        break;
+
+      if (info->fieldModifiers.count(memberName) != 0)
+        return lookupName;
+
+      auto propIt = info->properties.find(memberName);
+      if (propIt != info->properties.end() && !propIt->second.isStatic)
+        return lookupName;
+
+      if (info->baseClass)
+        lookupName = *info->baseClass;
+      else
+        break;
+    }
+
     return std::nullopt;
+  };
 
-  std::set<std::string> visited;
-  std::string lookupName = ctx->name;
+  if (ctx && !ctx->isStatic) {
+    if (auto resolved = resolveInType(ctx->name))
+      return resolved;
+  }
 
-  while (!lookupName.empty() && visited.insert(lookupName).second) {
-    const CompositeTypeInfo *info = lookupCompositeInfo(lookupName);
-    if (!info)
-      break;
-
-    if (info->fieldModifiers.count(memberName) != 0)
-      return lookupName;
-
-    auto propIt = info->properties.find(memberName);
-    if (propIt != info->properties.end() && !propIt->second.isStatic)
-      return lookupName;
-
-    if (info->baseClass)
-      lookupName = *info->baseClass;
-    else
-      break;
+  if (const TypeInfo *thisInfo = lookupLocalTypeInfo("this")) {
+    std::string typeName = sanitizeCompositeLookupName(typeNameFromInfo(*thisInfo));
+    if (auto resolved = resolveInType(typeName))
+      return resolved;
   }
 
   return std::nullopt;
@@ -8923,6 +9938,10 @@ static std::string describeTypeForDiagnostic(llvm::Type *type) {
   if (!type)
     return "value";
 
+  if (const DelegateTypeInfo *delegateInfo = lookupDelegateInfo(type)) {
+    return "delegate '" + delegateInfo->name + "'";
+  }
+
   if (type->isIntegerTy()) {
     const unsigned bits = type->getIntegerBitWidth();
     if (bits == 1)
@@ -9106,6 +10125,53 @@ static bool diagnoseDisallowedImplicitIntegerConversion(const ExprAST *sourceExp
   return true;
 }
 
+static llvm::FunctionType *ensureDelegateFunctionType(DelegateTypeInfo &info) {
+  if (info.functionType)
+    return info.functionType;
+
+  std::vector<llvm::Type *> paramTypes;
+  paramTypes.reserve(info.parameterTypes.size() + 1);
+  paramTypes.push_back(pointerType());
+
+  for (size_t idx = 0; idx < info.parameterTypes.size(); ++idx) {
+    std::string paramTypeName = typeNameFromInfo(info.parameterTypes[idx]);
+    llvm::Type *paramType = getTypeFromString(paramTypeName);
+    if (!paramType) {
+      reportCompilerError("Unknown parameter type '" + paramTypeName +
+                          "' in delegate '" + info.name + "'");
+      return nullptr;
+    }
+    if (idx < info.parameterIsRef.size() && info.parameterIsRef[idx])
+      paramType = pointerType();
+    paramTypes.push_back(paramType);
+  }
+
+  std::string returnTypeName = typeNameFromInfo(info.returnType);
+  llvm::Type *retType = getTypeFromString(returnTypeName);
+  if (!retType) {
+    reportCompilerError("Unknown return type '" + returnTypeName +
+                        "' in delegate '" + info.name + "'");
+    return nullptr;
+  }
+  if (info.returnsByRef)
+    retType = pointerType();
+
+  info.functionType = llvm::FunctionType::get(retType, paramTypes, false);
+  return info.functionType;
+}
+
+static llvm::StructType *ensureDelegateStructType(DelegateTypeInfo &info) {
+  if (info.structType)
+    return info.structType;
+  llvm::FunctionType *fnType = ensureDelegateFunctionType(info);
+  if (!fnType)
+    return nullptr;
+  std::string structName = "delegate." + info.name;
+  info.structType = llvm::StructType::create(
+      *TheContext, {pointerType(fnType), pointerType()}, structName);
+  return info.structType;
+}
+
 // Type conversion helper
 llvm::Type *getTypeFromString(const std::string &TypeStr) {
   std::string CleanType = stripNullableAnnotations(TypeStr);
@@ -9186,6 +10252,11 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     }
 
     return Result;
+  }
+
+  if (auto *delegateInfo = lookupDelegateInfoMutable(CleanType)) {
+    llvm::StructType *structTy = ensureDelegateStructType(*delegateInfo);
+    return structTy;
   }
 
   // Check if it's a struct type
@@ -12523,6 +13594,20 @@ llvm::Value *BinaryExprAST::codegen() {
         }
       }
 
+      if (targetInfo) {
+        if (const DelegateTypeInfo *delegateInfo =
+                lookupDelegateInfo(*targetInfo)) {
+          bool handled = false;
+          llvm::Value *delegateValue = emitDelegateValueForTarget(
+              *delegateInfo, getRHS(), "assignment", handled);
+          if (handled) {
+            rhsVal = delegateValue;
+            R = rhsVal;
+            return rhsVal;
+          }
+        }
+      }
+
       if (!rhsVal)
         rhsVal = getRHS()->codegen();
 
@@ -13287,6 +14372,114 @@ llvm::Value *BinaryExprAST::codegen() {
 
   if (Op == "+=" || Op == "-=" || Op == "*=" || Op == "/=" || Op == "%=") {
     // Compound assignment operators: a += b is equivalent to a = a + b
+    auto emitMemberCompoundAssignment =
+        [&](MemberAccessExprAST &member) -> llvm::Value * {
+          if (!ensureMemberInitializedForMutation(member))
+            return nullptr;
+
+          auto fieldInfoOpt = collectMemberFieldAssignmentInfo(member);
+          if (!fieldInfoOpt)
+            return nullptr;
+          auto &fieldInfo = *fieldInfoOpt;
+
+          llvm::Value *CurrentVal =
+              Builder->CreateLoad(fieldInfo.fieldType, fieldInfo.fieldPtr, "memberload");
+
+          if (CurrentVal->getType()->isPointerTy()) {
+            if (Op != "+=" && Op != "-=")
+              return LogErrorV("Pointer compound assignment only supports '+=' and '-='");
+
+            std::string pointerTypeName =
+                !fieldInfo.rawFieldTypeName.empty() ? fieldInfo.rawFieldTypeName
+                                                    : member.getTypeName();
+            llvm::Value *NewPtr =
+                emitPointerOffset(CurrentVal, R, pointerTypeName,
+                                  getRHS()->getTypeName(), Op == "-=",
+                                  "ptrarith");
+            if (!NewPtr)
+              return nullptr;
+
+            Builder->CreateStore(NewPtr, fieldInfo.fieldPtr);
+            noteMemberAssignment(fieldInfo.structName, member.getMemberName(),
+                                 fieldInfo.isStatic);
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+          }
+
+          std::string lhsPromoteType =
+              fieldInfo.sanitizedFieldTypeName.empty()
+                  ? sanitizeBaseTypeName(member.getTypeName())
+                  : fieldInfo.sanitizedFieldTypeName;
+          std::string rhsPromoteType = getRHS()->getTypeName();
+
+          auto [PromotedCurrent, PromotedR] =
+              promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+          bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
+          auto lhsUnsigned =
+              unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
+          auto rhsUnsigned =
+              unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
+          bool compoundUnsigned =
+              lhsUnsigned.value_or(false) || rhsUnsigned.value_or(false);
+          if (!compoundUnsigned) {
+            compoundUnsigned = unsignedHintFromTypeName(
+                                   sanitizeBaseTypeName(member.getTypeName()))
+                                   .value_or(false);
+          }
+
+          llvm::Value *Result;
+          char baseOp = Op[0];
+
+          switch (baseOp) {
+          case '+':
+            Result = isFloat ? Builder->CreateFAdd(PromotedCurrent, PromotedR, "addtmp")
+                             : Builder->CreateAdd(PromotedCurrent, PromotedR, "addtmp");
+            break;
+          case '-':
+            Result = isFloat ? Builder->CreateFSub(PromotedCurrent, PromotedR, "subtmp")
+                             : Builder->CreateSub(PromotedCurrent, PromotedR, "subtmp");
+            break;
+          case '*':
+            Result = isFloat ? Builder->CreateFMul(PromotedCurrent, PromotedR, "multmp")
+                             : Builder->CreateMul(PromotedCurrent, PromotedR, "multmp");
+            break;
+          case '/':
+            if (isFloat)
+              Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
+            else if (compoundUnsigned)
+              Result = Builder->CreateUDiv(PromotedCurrent, PromotedR, "divtmp");
+            else
+              Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
+            break;
+          case '%':
+            if (isFloat)
+              Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
+            else if (compoundUnsigned)
+              Result = Builder->CreateURem(PromotedCurrent, PromotedR, "modtmp");
+            else
+              Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
+            break;
+          default:
+            return LogErrorV("Unknown compound assignment operator");
+          }
+
+          llvm::Value *ResultToStore = Result;
+          if (ResultToStore->getType() != fieldInfo.fieldType) {
+            std::string castTargetName =
+                !lhsPromoteType.empty() ? lhsPromoteType : member.getTypeName();
+            ResultToStore =
+                castToType(ResultToStore, fieldInfo.fieldType, castTargetName);
+            if (!ResultToStore)
+              return nullptr;
+          }
+
+          Builder->CreateStore(ResultToStore, fieldInfo.fieldPtr);
+          noteMemberAssignment(fieldInfo.structName, member.getMemberName(),
+                               fieldInfo.isStatic);
+          setTypeName("void");
+          return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+        };
+
     if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
       // Simple variable compound assignment
       const std::string &varName = LHSE->getName();
@@ -13295,8 +14488,19 @@ llvm::Value *BinaryExprAST::codegen() {
       if (!Variable) {
         Variable = GlobalValues[varName];
         isLocal = false;
-        if (!Variable)
+        if (!Variable) {
+          if (resolveInstanceMemberOwnerInCurrentContext(varName)) {
+            auto object = std::make_unique<ThisExprAST>();
+            MemberAccessExprAST synthetic(std::move(object), varName);
+            return emitMemberCompoundAssignment(synthetic);
+          }
+          if (auto owner = resolveStaticFieldOwnerInCurrentContext(varName)) {
+            auto object = std::make_unique<VariableExprAST>(*owner);
+            MemberAccessExprAST synthetic(std::move(object), varName);
+            return emitMemberCompoundAssignment(synthetic);
+          }
           return LogErrorV("Unknown variable name for compound assignment");
+        }
       }
 
       const TypeInfo *info = lookupTypeInfo(varName);
@@ -13544,107 +14748,7 @@ llvm::Value *BinaryExprAST::codegen() {
       setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
     } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
-      if (!ensureMemberInitializedForMutation(*LHSMA))
-        return nullptr;
-
-      auto fieldInfoOpt = collectMemberFieldAssignmentInfo(*LHSMA);
-      if (!fieldInfoOpt)
-        return nullptr;
-      auto &fieldInfo = *fieldInfoOpt;
-
-      llvm::Value *CurrentVal =
-          Builder->CreateLoad(fieldInfo.fieldType, fieldInfo.fieldPtr, "memberload");
-
-      if (CurrentVal->getType()->isPointerTy()) {
-        if (Op != "+=" && Op != "-=")
-          return LogErrorV("Pointer compound assignment only supports '+=' and '-='");
-
-        std::string pointerTypeName =
-            !fieldInfo.rawFieldTypeName.empty() ? fieldInfo.rawFieldTypeName
-                                                : LHSMA->getTypeName();
-        llvm::Value *NewPtr =
-            emitPointerOffset(CurrentVal, R, pointerTypeName, getRHS()->getTypeName(),
-                              Op == "-=", "ptrarith");
-        if (!NewPtr)
-          return nullptr;
-
-        Builder->CreateStore(NewPtr, fieldInfo.fieldPtr);
-        noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(), fieldInfo.isStatic);
-        setTypeName("void");
-        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
-      }
-
-      std::string lhsPromoteType = fieldInfo.sanitizedFieldTypeName.empty()
-                                       ? sanitizeBaseTypeName(LHSMA->getTypeName())
-                                       : fieldInfo.sanitizedFieldTypeName;
-      std::string rhsPromoteType = getRHS()->getTypeName();
-
-      auto [PromotedCurrent, PromotedR] =
-          promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
-      bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
-      auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
-      auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
-      bool compoundUnsigned = lhsUnsigned.value_or(false) || rhsUnsigned.value_or(false);
-      if (!compoundUnsigned) {
-        compoundUnsigned =
-            unsignedHintFromTypeName(sanitizeBaseTypeName(LHSMA->getTypeName())).value_or(false);
-      }
-
-      llvm::Value *Result;
-      char baseOp = Op[0];
-
-      switch (baseOp) {
-        case '+':
-          if (isFloat)
-            Result = Builder->CreateFAdd(PromotedCurrent, PromotedR, "addtmp");
-          else
-            Result = Builder->CreateAdd(PromotedCurrent, PromotedR, "addtmp");
-          break;
-        case '-':
-          if (isFloat)
-            Result = Builder->CreateFSub(PromotedCurrent, PromotedR, "subtmp");
-          else
-            Result = Builder->CreateSub(PromotedCurrent, PromotedR, "subtmp");
-          break;
-        case '*':
-          if (isFloat)
-            Result = Builder->CreateFMul(PromotedCurrent, PromotedR, "multmp");
-          else
-            Result = Builder->CreateMul(PromotedCurrent, PromotedR, "multmp");
-          break;
-        case '/':
-          if (isFloat)
-            Result = Builder->CreateFDiv(PromotedCurrent, PromotedR, "divtmp");
-          else if (compoundUnsigned)
-            Result = Builder->CreateUDiv(PromotedCurrent, PromotedR, "divtmp");
-          else
-            Result = Builder->CreateSDiv(PromotedCurrent, PromotedR, "divtmp");
-          break;
-        case '%':
-          if (isFloat)
-            Result = Builder->CreateFRem(PromotedCurrent, PromotedR, "modtmp");
-          else if (compoundUnsigned)
-            Result = Builder->CreateURem(PromotedCurrent, PromotedR, "modtmp");
-          else
-            Result = Builder->CreateSRem(PromotedCurrent, PromotedR, "modtmp");
-          break;
-        default:
-          return LogErrorV("Unknown compound assignment operator");
-      }
-
-      llvm::Value *ResultToStore = Result;
-      if (ResultToStore->getType() != fieldInfo.fieldType) {
-        std::string castTargetName =
-            !lhsPromoteType.empty() ? lhsPromoteType : LHSMA->getTypeName();
-        ResultToStore = castToType(ResultToStore, fieldInfo.fieldType, castTargetName);
-        if (!ResultToStore)
-          return nullptr;
-      }
-
-      Builder->CreateStore(ResultToStore, fieldInfo.fieldPtr);
-      noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(), fieldInfo.isStatic);
-      setTypeName("void");
-      return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+      return emitMemberCompoundAssignment(*LHSMA);
     } else {
       return LogErrorV("destination of compound assignment must be a variable, array element, or public struct/class member");
     }
@@ -13826,12 +14930,161 @@ llvm::Value *BinaryExprAST::codegen() {
             }
           }
 
+          if (targetInfo) {
+            if (const DelegateTypeInfo *delegateInfo =
+                    lookupDelegateInfo(*targetInfo)) {
+              bool handled = false;
+              llvm::Value *delegateValue = emitDelegateValueForTarget(
+                  *delegateInfo, getRHS(), "assignment", handled);
+              if (handled) {
+                rhsVal = delegateValue;
+                R = rhsVal;
+                return rhsVal;
+              }
+            }
+          }
+
           if (!rhsVal)
             rhsVal = getRHS()->codegen();
 
           R = rhsVal;
           return rhsVal;
         };
+
+        auto emitMemberAssignment =
+            [&](MemberAccessExprAST &member) -> llvm::Value * {
+              auto fieldInfoOpt = collectMemberFieldAssignmentInfo(member);
+              if (!fieldInfoOpt)
+                return nullptr;
+              auto &fieldInfo = *fieldInfoOpt;
+
+              if (!validateInvariantAssignment(fieldInfo.declaredFieldType, getRHS(),
+                                               "assignment to field '" +
+                                                   member.getMemberName() +
+                                                   "'"))
+                return nullptr;
+
+              if (rhsIsNullable && !fieldInfo.allowsNull) {
+                return LogErrorV(
+                    ("Cannot assign nullable value to non-nullable field '" +
+                     member.getMemberName() + "'")
+                        .c_str());
+              }
+
+              if (fieldInfo.declaredFieldType.isArray) {
+                if (auto *newExpr = extractNewArrayExpr(getRHS())) {
+                  if (!emitArrayResizeAssignment(fieldInfo.fieldPtr,
+                                                 fieldInfo.declaredFieldType,
+                                                 *newExpr,
+                                                 member.getMemberName(),
+                                                 nullptr))
+                    return nullptr;
+                  setTypeName("void");
+                  return llvm::UndefValue::get(
+                      llvm::Type::getVoidTy(*TheContext));
+                }
+              }
+
+              std::string diagFieldTypeName =
+                  fieldInfo.sanitizedFieldTypeName;
+
+              llvm::Value *rhsValue =
+                  emitAssignmentRHS(&fieldInfo.declaredFieldType);
+              if (!rhsValue)
+                return nullptr;
+
+              std::string contextDescription =
+                  "assignment to field '" + member.getMemberName() + "'";
+              if (diagnoseDisallowedImplicitIntegerConversion(
+                      getRHS(), rhsValue, fieldInfo.fieldType,
+                      diagFieldTypeName, contextDescription))
+                return nullptr;
+
+              if (!diagFieldTypeName.empty())
+                rhsValue = castToType(rhsValue, fieldInfo.fieldType,
+                                      diagFieldTypeName);
+              else
+                rhsValue = castToType(rhsValue, fieldInfo.fieldType);
+
+              if (fieldInfo.declaredFieldType.isSmartPointer()) {
+                const std::string constructedName =
+                    stripNullableAnnotations(
+                        typeNameFromInfo(fieldInfo.declaredFieldType));
+                auto structIt = StructTypes.find(constructedName);
+                llvm::StructType *structTy =
+                    structIt != StructTypes.end() ? structIt->second : nullptr;
+                const CompositeTypeInfo *metadata =
+                    resolveSmartPointerMetadata(fieldInfo.declaredFieldType);
+                if (!structTy || !metadata) {
+                  reportCompilerError(
+                      "Initializer for '" + member.getMemberName() +
+                      "' has incompatible smart pointer representation");
+                  return nullptr;
+                }
+
+                if (rhsVarExpr) {
+                  if (emitSmartPointerInitFromVariable(
+                          fieldInfo.declaredFieldType, fieldInfo.fieldPtr,
+                          *rhsVarExpr, member.getMemberName())) {
+                    noteMemberAssignment(fieldInfo.structName,
+                                         member.getMemberName(),
+                                         fieldInfo.isStatic);
+                    setTypeName("void");
+                    return llvm::UndefValue::get(
+                        llvm::Type::getVoidTy(*TheContext));
+                  }
+                }
+
+                if (!metadata->smartPointerDestroyHelper.empty()) {
+                  llvm::Function *destroyFn = TheModule->getFunction(
+                      metadata->smartPointerDestroyHelper);
+                  if (!destroyFn) {
+                    reportCompilerError(
+                        "Internal error: missing smart pointer destroy helper '" +
+                        metadata->smartPointerDestroyHelper + "'");
+                    return nullptr;
+                  }
+                  llvm::Value *destroyArg = fieldInfo.fieldPtr;
+                  llvm::Type *expectedTy =
+                      destroyFn->getFunctionType()->getParamType(0);
+                  if (expectedTy && destroyArg->getType() != expectedTy) {
+                    destroyArg = Builder->CreateBitCast(
+                        destroyArg, expectedTy,
+                        buildArcOpLabel(member.getMemberName(),
+                                        "smart.destroy.cast"));
+                  }
+                  Builder->CreateCall(destroyFn, {destroyArg});
+                }
+
+                llvm::Value *stored = rhsValue;
+                if (stored->getType()->isPointerTy()) {
+                  stored = Builder->CreateLoad(
+                      structTy, stored,
+                      buildArcOpLabel(member.getMemberName(),
+                                      "smart.assign.load"));
+                }
+                if (stored->getType() != structTy) {
+                  reportCompilerError(
+                      "Initializer for '" + member.getMemberName() +
+                      "' has incompatible smart pointer representation");
+                  return nullptr;
+                }
+
+                Builder->CreateStore(stored, fieldInfo.fieldPtr);
+              } else if (fieldInfo.declaredFieldType.requiresARC()) {
+                emitManagedStore(fieldInfo.fieldPtr, rhsValue,
+                                 fieldInfo.declaredFieldType,
+                                 member.getMemberName(), rhsIsTemporary);
+              } else {
+                Builder->CreateStore(rhsValue, fieldInfo.fieldPtr);
+              }
+              noteMemberAssignment(fieldInfo.structName, member.getMemberName(),
+                                   fieldInfo.isStatic);
+              setTypeName("void");
+              return llvm::UndefValue::get(
+                  llvm::Type::getVoidTy(*TheContext));
+            };
+
       if (VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(getLHS())) {
         // Simple variable assignment - check local first, then global
         llvm::Value *Variable = NamedValues[LHSE->getName()];
@@ -14235,6 +15488,17 @@ llvm::Value *BinaryExprAST::codegen() {
           return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
         }
 
+        const std::string &memberName = LHSE->getName();
+        if (resolveInstanceMemberOwnerInCurrentContext(memberName)) {
+          auto object = std::make_unique<ThisExprAST>();
+          MemberAccessExprAST synthetic(std::move(object), memberName);
+          return emitMemberAssignment(synthetic);
+        }
+        if (auto owner = resolveStaticFieldOwnerInCurrentContext(memberName)) {
+          auto object = std::make_unique<VariableExprAST>(*owner);
+          MemberAccessExprAST synthetic(std::move(object), memberName);
+          return emitMemberAssignment(synthetic);
+        }
         return LogErrorV(("Unknown variable name: " + LHSE->getName()).c_str());
       } else if (ArrayIndexExprAST *LHSAI = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
         // Array or tuple element assignment
@@ -14378,122 +15642,7 @@ llvm::Value *BinaryExprAST::codegen() {
         setTypeName("void");
         return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
       } else if (MemberAccessExprAST *LHSMA = dynamic_cast<MemberAccessExprAST*>(getLHS())) {
-        // Member access assignment (e.g. this.x = value)
-        auto fieldInfoOpt = collectMemberFieldAssignmentInfo(*LHSMA);
-        if (!fieldInfoOpt)
-          return nullptr;
-        auto &fieldInfo = *fieldInfoOpt;
-
-        if (!validateInvariantAssignment(fieldInfo.declaredFieldType, getRHS(),
-                                         "assignment to field '" + LHSMA->getMemberName() + "'"))
-          return nullptr;
-
-        if (rhsIsNullable && !fieldInfo.allowsNull) {
-          return LogErrorV(("Cannot assign nullable value to non-nullable field '" + LHSMA->getMemberName() + "'").c_str());
-        }
-
-        if (fieldInfo.declaredFieldType.isArray) {
-          if (auto *newExpr = extractNewArrayExpr(getRHS())) {
-            if (!emitArrayResizeAssignment(fieldInfo.fieldPtr,
-                                           fieldInfo.declaredFieldType,
-                                           *newExpr, LHSMA->getMemberName(),
-                                           nullptr))
-              return nullptr;
-            setTypeName("void");
-            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
-          }
-        }
-
-        std::string diagFieldTypeName = fieldInfo.sanitizedFieldTypeName;
-
-        llvm::Value *rhsValue =
-            emitAssignmentRHS(&fieldInfo.declaredFieldType);
-        if (!rhsValue)
-          return nullptr;
-
-        std::string contextDescription = "assignment to field '" + LHSMA->getMemberName() + "'";
-        if (diagnoseDisallowedImplicitIntegerConversion(getRHS(), rhsValue, fieldInfo.fieldType, diagFieldTypeName, contextDescription))
-          return nullptr;
-
-        if (!diagFieldTypeName.empty())
-          rhsValue = castToType(rhsValue, fieldInfo.fieldType, diagFieldTypeName);
-        else
-          rhsValue = castToType(rhsValue, fieldInfo.fieldType);
-
-        if (fieldInfo.declaredFieldType.isSmartPointer()) {
-          const std::string constructedName =
-              stripNullableAnnotations(
-                  typeNameFromInfo(fieldInfo.declaredFieldType));
-          auto structIt = StructTypes.find(constructedName);
-          llvm::StructType *structTy =
-              structIt != StructTypes.end() ? structIt->second : nullptr;
-          const CompositeTypeInfo *metadata =
-              resolveSmartPointerMetadata(fieldInfo.declaredFieldType);
-          if (!structTy || !metadata) {
-            reportCompilerError(
-                "Initializer for '" + LHSMA->getMemberName() +
-                "' has incompatible smart pointer representation");
-            return nullptr;
-          }
-
-          if (rhsVarExpr) {
-            if (emitSmartPointerInitFromVariable(
-                    fieldInfo.declaredFieldType, fieldInfo.fieldPtr, *rhsVarExpr,
-                    LHSMA->getMemberName())) {
-              noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(),
-                                   fieldInfo.isStatic);
-              setTypeName("void");
-              return llvm::UndefValue::get(
-                  llvm::Type::getVoidTy(*TheContext));
-            }
-          }
-
-          if (!metadata->smartPointerDestroyHelper.empty()) {
-            llvm::Function *destroyFn = TheModule->getFunction(
-                metadata->smartPointerDestroyHelper);
-            if (!destroyFn) {
-              reportCompilerError(
-                  "Internal error: missing smart pointer destroy helper '" +
-                  metadata->smartPointerDestroyHelper + "'");
-              return nullptr;
-            }
-            llvm::Value *destroyArg = fieldInfo.fieldPtr;
-            llvm::Type *expectedTy =
-                destroyFn->getFunctionType()->getParamType(0);
-            if (expectedTy && destroyArg->getType() != expectedTy) {
-              destroyArg = Builder->CreateBitCast(
-                  destroyArg, expectedTy,
-                  buildArcOpLabel(LHSMA->getMemberName(),
-                                  "smart.destroy.cast"));
-            }
-            Builder->CreateCall(destroyFn, {destroyArg});
-          }
-
-          llvm::Value *stored = rhsValue;
-          if (stored->getType()->isPointerTy()) {
-            stored = Builder->CreateLoad(
-                structTy, stored,
-                buildArcOpLabel(LHSMA->getMemberName(), "smart.assign.load"));
-          }
-          if (stored->getType() != structTy) {
-            reportCompilerError(
-                "Initializer for '" + LHSMA->getMemberName() +
-                "' has incompatible smart pointer representation");
-            return nullptr;
-          }
-
-          Builder->CreateStore(stored, fieldInfo.fieldPtr);
-        } else if (fieldInfo.declaredFieldType.requiresARC()) {
-          emitManagedStore(fieldInfo.fieldPtr, rhsValue, fieldInfo.declaredFieldType,
-                           LHSMA->getMemberName(), rhsIsTemporary);
-        } else {
-          Builder->CreateStore(rhsValue, fieldInfo.fieldPtr);
-        }
-        noteMemberAssignment(fieldInfo.structName, LHSMA->getMemberName(),
-                             fieldInfo.isStatic);
-        // Return a void value to indicate this is a statement, not an expression
-        setTypeName("void");
-        return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+        return emitMemberAssignment(*LHSMA);
       } else if (UnaryExprAST *LHSU = dynamic_cast<UnaryExprAST*>(getLHS())) {
         // Check if it's a dereference operator (pointer assignment)
         if (LHSU->getOp() == "@") {
@@ -16270,7 +17419,27 @@ llvm::Value *CallExprAST::codegen() {
       return emitBaseConstructorInitialization(ctx->name, structIt->second,
                                                structPtr, *metadata, getArgs());
     }
-    return LogErrorV("Unsupported call target expression");
+    llvm::Value *calleeValue = getCalleeExpr()->codegen();
+    if (!calleeValue)
+      return nullptr;
+    const DelegateTypeInfo *delegateInfo =
+        resolveDelegateInfoForExpr(getCalleeExpr());
+    if (!delegateInfo)
+      return LogErrorV("Call target is not a function or delegate");
+    return emitDelegateCall(*this, calleeValue, *delegateInfo,
+                            getCalleeExpr());
+  }
+
+  if (const TypeInfo *symInfo = lookupTypeInfo(baseCallee)) {
+    if (const DelegateTypeInfo *delegateInfo =
+            lookupDelegateInfo(*symInfo)) {
+      VariableExprAST delegateExpr(baseCallee);
+      llvm::Value *calleeValue = delegateExpr.codegen();
+      if (!calleeValue)
+        return nullptr;
+      return emitDelegateCall(*this, calleeValue, *delegateInfo,
+                              &delegateExpr);
+    }
   }
 
   std::vector<bool> ArgIsRef;
@@ -16331,6 +17500,21 @@ llvm::Value *CallExprAST::codegen() {
 
     if (handled)
       continue;
+
+    const ExprAST *coreArg = unwrapRefExpr(ArgExpr.get());
+    if (auto *var = dynamic_cast<const VariableExprAST *>(coreArg)) {
+      if (isDelegateFunctionReference(*var)) {
+        ArgIsRef.push_back(false);
+        ArgValues.push_back(nullptr);
+        continue;
+      }
+    } else if (auto *member = dynamic_cast<const MemberAccessExprAST *>(coreArg)) {
+      if (isDelegateMethodReference(*member)) {
+        ArgIsRef.push_back(false);
+        ArgValues.push_back(nullptr);
+        continue;
+      }
+    }
 
     llvm::Value *Value = ArgExpr->codegen();
     if (!Value)
@@ -16422,7 +17606,7 @@ static llvm::Value *emitResolvedCallInternal(
     const std::vector<bool> &ArgIsRef,
     const std::vector<std::unique_ptr<ExprAST>> *originalArgs,
     bool preferGeneric, FunctionOverload *forced, ExprAST *typeOwner,
-    const std::vector<ProvidedArgument> *providedArgs) {
+    std::vector<ProvidedArgument> *providedArgs) {
   struct CandidateCall {
     FunctionOverload *overload = nullptr;
     llvm::Function *function = nullptr;
@@ -16461,7 +17645,7 @@ static llvm::Value *emitResolvedCallInternal(
   }
 
   std::vector<ProvidedArgument> providedStorage;
-  const std::vector<ProvidedArgument> *provided = providedArgs;
+  std::vector<ProvidedArgument> *provided = providedArgs;
   if (!provided) {
     providedStorage.reserve(ArgValues.size());
     for (size_t i = 0; i < ArgValues.size(); ++i) {
@@ -16626,6 +17810,13 @@ static llvm::Value *emitResolvedCallInternal(
                                   const TypeInfo &expectedInfo,
                                   llvm::Type *expectedType,
                                   unsigned &conversionCount) -> bool {
+      if (!argValue) {
+        const DelegateTypeInfo *delegateInfo = lookupDelegateInfo(expectedInfo);
+        if (!delegateInfo)
+          return false;
+        return canBindDelegateReference(*delegateInfo, argExpr);
+      }
+
       const ExprAST *coreArg = unwrapRefExpr(argExpr);
       if (coreArg && !coreArg->getTypeName().empty()) {
         TypeInfo actualInfo =
@@ -16671,6 +17862,9 @@ static llvm::Value *emitResolvedCallInternal(
     for (size_t idx = 0; idx < paramCount; ++idx) {
       if (paramsIndex >= 0 &&
           idx == static_cast<size_t>(paramsIndex))
+        continue;
+
+      if (binding[idx] < 0)
         continue;
 
       bool argIsRef = binding[idx] >= 0
@@ -16833,6 +18027,58 @@ static llvm::Value *emitResolvedCallInternal(
   std::vector<std::unique_ptr<ExprAST>> ownedDefaultExprs;
   const int paramsIndex = findParamsIndex(chosen->parameterIsParams);
 
+  auto ensureDelegateBindingValue = [&](const DelegateTypeInfo &delegateInfo,
+                                        int bindingIndex,
+                                        std::string_view usageLabel) -> bool {
+    if (bindingIndex < 0 ||
+        static_cast<size_t>(bindingIndex) >= provided->size())
+      return true;
+    ProvidedArgument &arg = (*provided)[static_cast<size_t>(bindingIndex)];
+    if (arg.value)
+      return true;
+    if (!arg.expr)
+      return false;
+    bool handled = false;
+    llvm::Value *value = emitDelegateValueForTarget(
+        delegateInfo, const_cast<ExprAST *>(arg.expr), usageLabel, handled);
+    if (!handled || !value)
+      return false;
+    arg.value = value;
+    arg.isRef = false;
+    return true;
+  };
+
+  if (paramsIndex >= 0 && !selected->paramsDirect &&
+      paramsIndex < static_cast<int>(chosen->parameterTypes.size())) {
+    TypeInfo paramsInfo = chosen->parameterTypes[static_cast<size_t>(paramsIndex)];
+    finalizeTypeInfoMetadata(paramsInfo);
+    if (auto elementInfoOpt = extractElementTypeInfo(paramsInfo)) {
+      if (const DelegateTypeInfo *delegateInfo =
+              lookupDelegateInfo(*elementInfoOpt)) {
+        for (int bindingIndex : selected->paramsBinding) {
+          if (!ensureDelegateBindingValue(*delegateInfo, bindingIndex,
+                                          "params argument"))
+            return nullptr;
+        }
+      }
+    }
+  }
+
+  for (size_t idx = 0; idx < selected->binding.size(); ++idx) {
+    if (paramsIndex >= 0 &&
+        idx == static_cast<size_t>(paramsIndex))
+      continue;
+    int bindingIndex = selected->binding[idx];
+    if (bindingIndex < 0)
+      continue;
+    if (const DelegateTypeInfo *delegateInfo =
+            lookupDelegateInfo(chosen->parameterTypes[idx])) {
+      if (!ensureDelegateBindingValue(*delegateInfo, bindingIndex,
+                                      "argument"))
+        return nullptr;
+    }
+  }
+
   for (size_t idx = 0; idx < selected->binding.size(); ++idx) {
     if (paramsIndex >= 0 &&
         idx == static_cast<size_t>(paramsIndex)) {
@@ -16967,26 +18213,32 @@ llvm::Value *CallExprAST::emitResolvedCall(
 llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   llvm::Value *instancePtr = nullptr;
   llvm::Value *instanceValue = nullptr;
+  bool objectEvaluated = false;
+  bool isTypeReference = false;
 
   std::string ownerName =
       sanitizeCompositeLookupName(member.getObject()->getTypeName());
 
-  if (ownerName.empty()) {
-    instancePtr = member.getObject()->codegen_ptr();
-    if (!instancePtr) {
-      instanceValue = member.getObject()->codegen();
-      if (!instanceValue)
-        return nullptr;
-      if (instanceValue->getType()->isPointerTy()) {
-        instancePtr = instanceValue;
-      } else {
-        llvm::AllocaInst *Tmp =
-            Builder->CreateAlloca(instanceValue->getType(), nullptr,
-                                  "method.recv");
-        Builder->CreateStore(instanceValue, Tmp);
-        instancePtr = Tmp;
-      }
+  if (auto *varObj = dynamic_cast<VariableExprAST *>(member.getObject())) {
+    if (lookupCompositeInfo(varObj->getName())) {
+      ownerName = varObj->getName();
+      isTypeReference = true;
     }
+  }
+
+  if (ownerName.empty()) {
+    if (auto infoOpt = resolveExprTypeInfo(member.getObject())) {
+      ownerName = sanitizeCompositeLookupName(typeNameFromInfo(*infoOpt));
+    }
+  }
+
+  if (ownerName.empty() && !isTypeReference) {
+    instanceValue = member.getObject()->codegen();
+    if (!instanceValue)
+      return nullptr;
+    objectEvaluated = true;
+    if (instanceValue->getType()->isPointerTy())
+      instancePtr = instanceValue;
     ownerName = resolveCompositeName(member.getObject());
   }
 
@@ -17006,20 +18258,20 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   auto ensureInstancePointer = [&]() -> llvm::Value * {
     if (instancePtr)
       return instancePtr;
-    instancePtr = member.getObject()->codegen_ptr();
-    if (!instancePtr) {
+    if (!instanceValue) {
       instanceValue = member.getObject()->codegen();
       if (!instanceValue)
         return nullptr;
-      if (instanceValue->getType()->isPointerTy()) {
-        instancePtr = instanceValue;
-      } else {
-        llvm::AllocaInst *Tmp =
-            Builder->CreateAlloca(instanceValue->getType(), nullptr,
-                                  "method.recv");
-        Builder->CreateStore(instanceValue, Tmp);
-        instancePtr = Tmp;
-      }
+      objectEvaluated = true;
+    }
+    if (instanceValue->getType()->isPointerTy()) {
+      instancePtr = instanceValue;
+    } else {
+      llvm::AllocaInst *Tmp =
+          Builder->CreateAlloca(instanceValue->getType(), nullptr,
+                                "method.recv");
+      Builder->CreateStore(instanceValue, Tmp);
+      instancePtr = Tmp;
     }
     return instancePtr;
   };
@@ -17249,9 +18501,50 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   auto methodIt = info->methodInfo.find(member.getMemberName());
-  if (methodIt == info->methodInfo.end())
-    return LogErrorV(("Member '" + member.getMemberName() + "' of type '" +
-                      ownerName + "' is not a method").c_str());
+  if (methodIt == info->methodInfo.end()) {
+    llvm::Value *delegateValue = nullptr;
+    const DelegateTypeInfo *delegateInfo = nullptr;
+
+    if (objectEvaluated) {
+      std::string objectTypeName = member.getObject()->getTypeName();
+      if (objectTypeName.empty()) {
+        if (auto infoOpt = resolveExprTypeInfo(member.getObject()))
+          objectTypeName = typeNameFromInfo(*infoOpt);
+      }
+      if (objectTypeName.empty())
+        objectTypeName = ownerName;
+
+      bool objectTemporary = member.getObject()->isTemporary();
+      auto injectedObject = std::make_unique<InjectedValueExprAST>(
+          instanceValue, objectTypeName, objectTemporary);
+      MemberAccessExprAST injectedMember(
+          std::move(injectedObject), member.getMemberName(),
+          member.getGenericArguments(), member.isDestructorAccess(),
+          member.isSafeSmartArrow());
+      delegateValue = injectedMember.codegen();
+      if (!delegateValue)
+        return nullptr;
+      delegateInfo = resolveDelegateInfoForExpr(&injectedMember);
+      if (!delegateInfo) {
+        return LogErrorV(("Member '" + member.getMemberName() + "' of type '" +
+                          ownerName + "' is not a method")
+                             .c_str());
+      }
+      return emitDelegateCall(*this, delegateValue, *delegateInfo,
+                              &injectedMember);
+    }
+
+    delegateValue = member.codegen();
+    if (!delegateValue)
+      return nullptr;
+    delegateInfo = resolveDelegateInfoForExpr(&member);
+    if (!delegateInfo) {
+      return LogErrorV(("Member '" + member.getMemberName() + "' of type '" +
+                        ownerName + "' is not a method")
+                           .c_str());
+    }
+    return emitDelegateCall(*this, delegateValue, *delegateInfo, &member);
+  }
 
   if (!ensureMemberAccessAllowed(methodIt->second.modifiers,
                                  AccessIntent::Call, ownerName,
@@ -17277,6 +18570,22 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   }
 
   for (const auto &ArgExpr : getArgs()) {
+    const ExprAST *coreArg = unwrapRefExpr(ArgExpr.get());
+    if (auto *var = dynamic_cast<const VariableExprAST *>(coreArg)) {
+      if (isDelegateFunctionReference(*var)) {
+        ArgIsRef.push_back(false);
+        ArgValues.push_back(nullptr);
+        continue;
+      }
+    } else if (auto *memberRef =
+                   dynamic_cast<const MemberAccessExprAST *>(coreArg)) {
+      if (isDelegateMethodReference(*memberRef)) {
+        ArgIsRef.push_back(false);
+        ArgValues.push_back(nullptr);
+        continue;
+      }
+    }
+
     bool isRef = dynamic_cast<RefExprAST *>(ArgExpr.get()) != nullptr;
     ArgIsRef.push_back(isRef);
     llvm::Value *Value = ArgExpr->codegen();
@@ -17481,7 +18790,10 @@ llvm::Value *CallExprAST::codegenMemberCall(MemberAccessExprAST &member) {
   const bool hasParamsParam = std::ranges::any_of(
       memberInfo.parameterIsParams,
       [](bool isParams) { return isParams; });
-  if (memberInfo.directFunction &&
+  const bool hasDeferredArg =
+      std::ranges::any_of(ArgValues,
+                          [](llvm::Value *argValue) { return argValue == nullptr; });
+  if (memberInfo.directFunction && !hasDeferredArg &&
       ArgValues.size() == memberInfo.parameterTypes.size() &&
       !hasParamsParam) {
     llvm::Function *DirectFunc = memberInfo.directFunction;
@@ -18198,6 +19510,16 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
           trackedArraySizes = explicitArrayDims;
         return value;
       }
+    }
+
+    if (const DelegateTypeInfo *delegateInfo =
+            lookupDelegateInfo(declaredInfo)) {
+      bool handled = false;
+      llvm::Value *delegateValue = emitDelegateValueForTarget(
+          *delegateInfo, expr,
+          "initializer for '" + getName() + "'", handled);
+      if (handled)
+        return delegateValue;
     }
 
     llvm::Value *value = expr->codegen();
@@ -19988,6 +21310,54 @@ const std::string &PrototypeAST::getMangledName() const {
   return MangledName;
 }
 
+llvm::Type *DelegateDeclAST::codegen() {
+  if (!resolveParameterDefaults(Params, Name))
+    return nullptr;
+
+  std::string cleanName = stripNullableAnnotations(Name);
+  if (lookupDelegateInfo(cleanName)) {
+    reportCompilerError("Delegate '" + cleanName + "' is already defined");
+    return nullptr;
+  }
+
+  if (lookupCompositeInfo(cleanName, /*countHit=*/false)) {
+    reportCompilerError("Delegate '" + cleanName + "' conflicts with existing type");
+    return nullptr;
+  }
+
+  DelegateTypeInfo info;
+  info.name = cleanName;
+  info.returnType = applyActiveTypeBindings(ReturnTypeInfo);
+  info.returnsByRef = ReturnsByRef;
+  info.parameterTypes = gatherParamTypes(Params);
+  info.parameterIsRef = gatherParamRefFlags(Params);
+  info.parameterIsParams = gatherParamParamsFlags(Params);
+  info.parameterNames.reserve(Params.size());
+  info.parameterDefaults.reserve(Params.size());
+  info.parameterDefaultLocations.reserve(Params.size());
+
+  if (!validateTypeForGenerics(info.returnType,
+                               "return type of delegate '" + cleanName + "'"))
+    return nullptr;
+
+  for (const auto &param : Params) {
+    TypeInfo boundParam = applyActiveTypeBindings(param.DeclaredType);
+    if (!validateTypeForGenerics(boundParam,
+                                 "parameter '" + param.Name +
+                                     "' of delegate '" + cleanName + "'"))
+      return nullptr;
+    info.parameterNames.push_back(param.Name);
+    info.parameterDefaults.push_back(param.ResolvedDefault);
+    info.parameterDefaultLocations.push_back(param.DefaultEqualsLocation);
+  }
+
+  if (!ensureDelegateStructType(info))
+    return nullptr;
+
+  CG.delegateTypes[cleanName] = std::move(info);
+  return CG.delegateTypes[cleanName].structType;
+}
+
 // Generate code for function prototypes
 llvm::Function *PrototypeAST::codegen() {
   if (!ensureNoDuplicateGenericParameters(getGenericParameters(),
@@ -20339,6 +21709,19 @@ llvm::Type *StructAST::codegen() {
   SemanticGenericParameterScope typeGenericScope(GenericParameters);
   GenericDefinitionInfo currentTypeDefinition{definitionKey, &GenericParameters};
   GenericDefinitionScope definitionScope(&currentTypeDefinition);
+
+  if (!Delegates.empty() && isGenericTemplate()) {
+    reportCompilerError("Delegates inside generic types are not supported yet");
+    abandonStructDefinition();
+    return nullptr;
+  }
+
+  for (const auto &delegateDecl : Delegates) {
+    if (!delegateDecl || !delegateDecl->codegen()) {
+      abandonStructDefinition();
+      return nullptr;
+    }
+  }
 
   std::vector<TypeInfo> effectiveBaseTypeInfos =
       applyActiveTypeBindingsToInfos(BaseTypeInfos);

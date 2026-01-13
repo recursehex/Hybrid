@@ -18,6 +18,7 @@ static bool gInteractiveMode = true;
 
 #define CurTok (currentParser().curTok)
 #define StructNames (currentParser().structNames)
+#define DelegateNames (currentParser().delegateNames)
 #define IdentifierStr (currentLexer().identifierStr)
 
 void SetInteractiveMode(bool enabled) {
@@ -216,6 +217,15 @@ void HandleInterfaceDefinition(bool isAbstract = false) {
   }
 }
 
+void HandleDelegateDefinition() {
+  if (auto DelegateAST = ParseDelegateDefinition()) {
+    if (!DelegateAST->codegen())
+      reportCompilerError("Failed to register delegate type");
+  } else {
+    getNextToken();
+  }
+}
+
 void HandleAbstractComposite() {
   getNextToken(); // eat 'abstract'
   while (CurTok == tok_newline)
@@ -317,6 +327,9 @@ void MainLoop() {
     case tok_interface:
       HandleInterfaceDefinition();
       break;
+    case tok_delegate:
+      HandleDelegateDefinition();
+      break;
     case tok_abstract:
       HandleAbstractComposite();
       break;
@@ -358,7 +371,8 @@ void MainLoop() {
       break;
     case tok_identifier:
       {
-        if (StructNames.contains(IdentifierStr)) {
+        if (StructNames.contains(IdentifierStr) ||
+            DelegateNames.contains(IdentifierStr)) {
           if (!ParseTypeIdentifier()) {
             // If parsing as a type-prefixed declaration failed,
             // consume the current token to avoid stalling
@@ -380,4 +394,5 @@ void MainLoop() {
 
 #undef IdentifierStr
 #undef StructNames
+#undef DelegateNames
 #undef CurTok

@@ -19,6 +19,7 @@
 #define BinopPrecedence (currentParser().binopPrecedence)
 #define StructNames (currentParser().structNames)
 #define ClassNames (currentParser().classNames)
+#define DelegateNames (currentParser().delegateNames)
 #define StructDefinitionStack (currentParser().structDefinitionStack)
 #define ClassDefinitionStack (currentParser().classDefinitionStack)
 #define LoopNestingDepth (currentParser().loopNestingDepth)
@@ -515,6 +516,7 @@ bool IsValidType()
 
   return StructNames.contains(IdentifierStr) ||
          ClassNames.contains(IdentifierStr) ||
+         DelegateNames.contains(IdentifierStr) ||
          IsActiveStructName(IdentifierStr) ||
          IsActiveClassName(IdentifierStr) ||
          currentParser().isGenericParameter(IdentifierStr);
@@ -2688,6 +2690,141 @@ std::unique_ptr<PrototypeAST> ParseExtern() {
   return Proto;
 }
 
+/// delegate ::= 'delegate' ['ref'] type identifier '(' params? ')'
+std::unique_ptr<DelegateDeclAST> ParseDelegateDefinition() {
+  getNextToken(); // eat 'delegate'
+  SkipNewlines();
+
+  bool returnsByRef = false;
+  if (CurTok == tok_ref) {
+    returnsByRef = true;
+    getNextToken(); // eat 'ref'
+    SkipNewlines();
+  }
+
+  if (!IsValidType() && CurTok != '(') {
+    reportCompilerError("Expected return type in delegate declaration");
+    return nullptr;
+  }
+
+  TypeInfo returnTypeInfo;
+  if (!ParseCompleteTypeInfo(returnTypeInfo, returnsByRef)) {
+    reportCompilerError("Failed to parse delegate return type");
+    return nullptr;
+  }
+
+  if (CurTok != tok_identifier) {
+    reportCompilerError("Expected delegate name after return type");
+    return nullptr;
+  }
+
+  std::string delegateName = IdentifierStr;
+  SourceLocation nameLoc = currentParser().currentTokenLocation;
+  getNextToken();
+
+  if (StructNames.contains(delegateName) || ClassNames.contains(delegateName) ||
+      DelegateNames.contains(delegateName)) {
+    reportCompilerError("Type '" + delegateName + "' is already defined");
+    return nullptr;
+  }
+
+  SkipNewlines();
+  if (CurTok != '(') {
+    reportCompilerError("Expected '(' in delegate declaration");
+    return nullptr;
+  }
+
+  std::vector<Parameter> params;
+  getNextToken(); // eat '('
+  SkipNewlines();
+
+  if (CurTok != ')') {
+    while (true) {
+      SkipNewlines();
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
+      bool paramIsRef = false;
+      if (CurTok == tok_ref) {
+        paramIsRef = true;
+        getNextToken(); // eat 'ref'
+        SkipNewlines();
+      }
+
+      if (!IsValidType() && CurTok != '(') {
+        reportCompilerError("Expected parameter type");
+        return nullptr;
+      }
+
+      TypeInfo paramTypeInfo;
+      if (!ParseCompleteTypeInfo(paramTypeInfo, paramIsRef)) {
+        reportCompilerError("Failed to parse parameter type");
+        return nullptr;
+      }
+
+      if (CurTok != tok_identifier) {
+        reportCompilerError("Expected parameter name");
+        return nullptr;
+      }
+
+      std::string paramName = IdentifierStr;
+      SourceLocation paramNameLoc = currentParser().currentTokenLocation;
+      getNextToken();
+
+      Parameter param;
+      param.Type = typeNameFromInfo(paramTypeInfo);
+      param.Name = paramName;
+      param.IsRef = paramIsRef;
+      param.IsParams = paramIsParams;
+      param.DeclaredType = std::move(paramTypeInfo);
+      param.NameLocation = paramNameLoc;
+      param.ParamsLocation = paramsLoc;
+
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return nullptr;
+      }
+
+      params.push_back(std::move(param));
+
+      if (CurTok == ')') {
+        getNextToken(); // eat ')'
+        break;
+      }
+
+      if (CurTok != ',') {
+        reportCompilerError("Expected ',' or ')' in delegate parameter list");
+        return nullptr;
+      }
+
+      getNextToken(); // eat ','
+      SkipNewlines();
+    }
+  } else {
+    getNextToken(); // eat ')'
+  }
+
+  if (!ValidateParameterDefaults(params))
+    return nullptr;
+
+  DelegateNames.insert(delegateName);
+  return std::make_unique<DelegateDeclAST>(
+      std::move(returnTypeInfo), delegateName, std::move(params),
+      returnsByRef, nameLoc);
+}
+
 /// returnstmt ::= 'return' ['ref'] expression?
 std::unique_ptr<ReturnStmtAST> ParseReturnStatement() {
   getNextToken(); // eat 'return'
@@ -4067,6 +4204,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   std::vector<std::unique_ptr<FieldAST>> Fields;
   std::vector<std::unique_ptr<PropertyAST>> Properties;
   std::vector<MethodDefinition> Methods;
+  std::vector<std::unique_ptr<DelegateDeclAST>> Delegates;
   bool seenThisOverride = false;
   bool hasConstructor = false;
   bool hasDestructor = false;
@@ -4539,6 +4677,17 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     return true;
   };
 
+  auto validateDelegateModifiers =
+      [&](const PendingMemberModifiers &pending) -> bool {
+        if (pending.hasExplicitAccess || pending.isStatic || pending.isConst ||
+            pending.isAbstract || pending.isVirtual || pending.isOverride) {
+          reportCompilerError(
+              "Delegate declarations cannot use member modifiers");
+          return false;
+        }
+        return true;
+      };
+
   while (CurTok != '}' && CurTok != tok_eof) {
     SkipNewlines();
     if (CurTok == '}')
@@ -4547,6 +4696,22 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     PendingMemberModifiers pendingMods;
     if (!ParsePendingMemberModifiers(pendingMods))
       return nullptr;
+
+    if (CurTok == tok_delegate) {
+      if (!validateDelegateModifiers(pendingMods))
+        return nullptr;
+      auto delegateDecl = ParseDelegateDefinition();
+      if (!delegateDecl)
+        return nullptr;
+      if (delegateDecl->getName() == compositeName) {
+        reportCompilerError("Delegate '" + delegateDecl->getName() +
+                            "' conflicts with enclosing type '" +
+                            compositeName + "'");
+        return nullptr;
+      }
+      Delegates.push_back(std::move(delegateDecl));
+      continue;
+    }
 
     if (CurTok == tok_tilde_identifier) {
       if (kind == AggregateKind::Interface) {
@@ -4985,7 +5150,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   }
 
   auto Result = std::make_unique<StructAST>(
-      kind, compositeName, std::move(Fields), std::move(Properties),
+      kind, compositeName, std::move(Delegates), std::move(Fields),
+      std::move(Properties),
       std::move(Methods),
       std::move(baseTypes), std::move(genericParameters));
   Result->setBaseClass(std::move(baseClass));
@@ -5300,6 +5466,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result,
 #undef LoopNestingDepth
 #undef StructNames
 #undef ClassNames
+#undef DelegateNames
 #undef StructDefinitionStack
 #undef ClassDefinitionStack
 #undef BinopPrecedence

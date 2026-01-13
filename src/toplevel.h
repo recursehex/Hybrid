@@ -8,6 +8,7 @@ void HandleTopLevelExpression();
 void HandleVariableDeclaration();
 void HandleStructDefinition();
 void HandleClassDefinition(bool isAbstract = false);
+void HandleDelegateDefinition();
 void HandleUnsafe();
 void HandleSwitchStatement();
 void HandleAssertStatement();

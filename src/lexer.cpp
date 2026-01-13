@@ -398,6 +398,8 @@ int gettok() {
       return tok_extern;
     if (lex.identifierStr == "return")
       return tok_return;
+    if (lex.identifierStr == "delegate")
+      return tok_delegate;
     if (lex.identifierStr == "for")
       return tok_for;
     if (lex.identifierStr == "in")

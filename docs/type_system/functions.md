@@ -147,6 +147,142 @@ log("startup", append = false)   // skips writeToFile, overrides append
 - Named arguments can target required parameters but only parameters with defaults may be omitted.
 - Duplicate or unknown names are rejected at compile time.
 
+## Delegates
+
+Delegates are named function pointer types with explicit signatures. Declare them wherever a type is allowed and use them in variables, parameters, and return types.
+
+```c
+delegate int Transform(int value)
+```
+
+- Delegate parameters follow the same rules as function parameters, including defaults and `params`.
+- Delegate types are non-nullable by default. Append `?` to allow `null`.
+- Assigning a function or method reference requires an exact signature match. Overload selection uses the delegate signature.
+- Instance method references capture the receiver: `Accumulator inc = counter.Add`.
+- Invoke delegates with the usual call syntax: `inc(5)`. Nullable delegates must be checked before calling.
+
+### Delegate Scope and Placement
+
+Delegates can appear at the top level or inside type bodies for grouping:
+
+```cs
+class Box
+{
+    delegate int Transformer(int value)
+
+    int Apply(Transformer op, int value)
+    {
+        return op(value)
+    }
+}
+
+int square(int x)
+{
+    return x * x
+}
+
+int main()
+{
+    Box b = Box()
+    int result = b.Apply(square, 6)
+    return result
+}
+```
+
+- Delegates declared inside a type body still use a module-wide name. Refer to them by name without a type prefix.
+- Delegate names must be unique within the module and cannot match the enclosing type name.
+- Member modifiers (`public`, `static`, `abstract`, etc.) are not allowed on delegate declarations.
+- Delegates declared inside generic types are not supported yet.
+
+### Method References
+
+Use instance or static method references when the signatures match:
+
+```cs
+class Counter
+{
+    int total
+
+    Counter(int start)
+    {
+        total = start
+    }
+
+    int Add(int amount)
+    {
+        total += amount
+        return total
+    }
+}
+
+delegate int Accumulator(int amount)
+
+int main()
+{
+    Counter counter = Counter(10)
+    Accumulator inc = counter.Add
+    return inc(5)
+}
+```
+
+- Instance method references require a receiver. `Counter.Add` is not valid without an instance.
+
+### Nullable Delegates
+
+Nullable delegates use `?` and must be checked before calling:
+
+```cs
+delegate int Transform(int value)
+
+int square(int x)
+{
+    return x * x
+}
+
+int main()
+{
+    Transform? op = null
+    if op != null
+    {
+        return op(3)
+    }
+
+    op = square
+    if op != null
+    {
+        return op(4)
+    }
+    return 0
+}
+```
+
+### Defaults and Params
+
+Delegates can carry default arguments and `params`:
+
+```cs
+delegate int Compute(int start, int step = 1, params int[] extras)
+
+int sum(int start, int step = 1, params int[] extras)
+{
+    int total = start
+    total += step
+    for int value in extras
+    {
+        total += value
+    }
+    return total
+}
+
+int main()
+{
+    Compute op = sum
+    int a = op(10)
+    int b = op(10, 2, 3, 4)
+    return a + b
+}
+```
+
 ### Style Guidance
 
 - Prefer positional calls for the common path; reach for named arguments when skipping earlier defaults or clarifying boolean/sentinel parameters.

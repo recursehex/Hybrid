@@ -42,6 +42,81 @@ calculate(1, 10, 5)     // 15 (addition)
 calculate(3, 4, 7)      // 28 (multiplication)
 ```
 
+### Delegate Callbacks
+
+```c
+// delegate_callbacks.hy
+delegate int Transform(int value)
+
+int square(int x) { return x * x }
+
+int apply(Transform op, int value)
+{
+    return op(value)
+}
+
+apply(square, 5)     // Returns 25
+```
+
+### Delegates in Classes
+
+```cs
+// delegate_in_class.hy
+class Box
+{
+    delegate int Transformer(int value)
+
+    int Apply(Transformer op, int value)
+    {
+        return op(value)
+    }
+}
+
+int square(int x)
+{
+    return x * x
+}
+
+int main()
+{
+    Box box = Box()
+    return box.Apply(square, 6)
+}
+```
+
+### Nullable Delegates and Params
+
+```cs
+// delegate_nullable_params.hy
+delegate int Compute(int start, int step = 1, params int[] extras)
+
+int sum(int start, int step = 1, params int[] extras)
+{
+    int total = start + step
+    for int value in extras
+    {
+        total += value
+    }
+    return total
+}
+
+int main()
+{
+    Compute? op = null
+    if op != null
+    {
+        return 0
+    }
+
+    op = sum
+    if op != null
+    {
+        return op(10, 2, 3, 4)
+    }
+    return 0
+}
+```
+
 ## Mathematical Functions
 
 ### Factorial

@@ -1148,6 +1148,31 @@ public:
   llvm::Function *codegen();
 };
 
+class DelegateDeclAST {
+  TypeInfo ReturnTypeInfo;
+  std::string Name;
+  std::vector<Parameter> Params;
+  bool ReturnsByRef = false;
+  SourceLocation NameLocation{};
+
+public:
+  DelegateDeclAST(TypeInfo ReturnTypeInfo, std::string Name,
+                  std::vector<Parameter> Params, bool ReturnsByRef,
+                  SourceLocation NameLocation)
+      : ReturnTypeInfo(std::move(ReturnTypeInfo)),
+        Name(std::move(Name)),
+        Params(std::move(Params)),
+        ReturnsByRef(ReturnsByRef),
+        NameLocation(NameLocation) {}
+
+  llvm::Type *codegen();
+  const std::string &getName() const { return Name; }
+  const TypeInfo &getReturnTypeInfo() const { return ReturnTypeInfo; }
+  const std::vector<Parameter> &getParams() const { return Params; }
+  bool returnsByRef() const { return ReturnsByRef; }
+  SourceLocation getNameLocation() const { return NameLocation; }
+};
+
 /// FunctionAST - Represents a function definition itself.
 class FunctionAST {
   std::unique_ptr<PrototypeAST> Proto;
@@ -1442,6 +1467,7 @@ struct MethodDefinition {
 class StructAST {
   AggregateKind Kind = AggregateKind::Struct;
   std::string Name;
+  std::vector<std::unique_ptr<DelegateDeclAST>> Delegates;
   std::vector<std::unique_ptr<FieldAST>> Fields;
   std::vector<std::unique_ptr<PropertyAST>> Properties;
   std::vector<MethodDefinition> Methods;
@@ -1461,12 +1487,14 @@ class StructAST {
 public:
   StructAST(AggregateKind Kind,
             std::string Name,
+            std::vector<std::unique_ptr<DelegateDeclAST>> Delegates,
             std::vector<std::unique_ptr<FieldAST>> Fields,
             std::vector<std::unique_ptr<PropertyAST>> Properties,
             std::vector<MethodDefinition> Methods,
             std::vector<std::string> BaseTypes = {},
             std::vector<std::string> GenericParameters = {})
-      : Kind(Kind), Name(std::move(Name)), Fields(std::move(Fields)),
+      : Kind(Kind), Name(std::move(Name)),
+        Delegates(std::move(Delegates)), Fields(std::move(Fields)),
         Properties(std::move(Properties)), Methods(std::move(Methods)),
         BaseTypes(std::move(BaseTypes)),
         GenericParameters(std::move(GenericParameters)) {}
@@ -1475,6 +1503,9 @@ public:
   
   AggregateKind getKind() const { return Kind; }
   [[nodiscard]] const std::string &getName() const { return Name; }
+  const std::vector<std::unique_ptr<DelegateDeclAST>> &getDelegates() const {
+    return Delegates;
+  }
   const std::vector<std::unique_ptr<FieldAST>> &getFields() const { return Fields; }
   const std::vector<std::unique_ptr<PropertyAST>> &getProperties() const {
     return Properties;

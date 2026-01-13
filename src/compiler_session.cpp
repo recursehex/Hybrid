@@ -176,6 +176,8 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("extern");
     case tok_return:
       return makeKeyword("return");
+    case tok_delegate:
+      return makeKeyword("delegate");
     case tok_for:
       return makeKeyword("for");
     case tok_in:
@@ -452,6 +454,8 @@ void ParserContext::reset(bool clearSymbols) {
     structNames.clear();
   if (clearSymbols)
     classNames.clear();
+  if (clearSymbols)
+    delegateNames.clear();
 }
 
 void ParserContext::clearPrecedence() {
