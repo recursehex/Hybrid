@@ -343,7 +343,6 @@ void *__hybrid_shared_control_lock(HybridSharedControlBlock *control) {
   if (!ctrl->payload)
     return NULL;
   ctrl->strong += 1;
-  hybrid_retain(ctrl->payload);
   return ctrl->payload;
 }
 

@@ -660,7 +660,6 @@ void *__hybrid_shared_control_lock(HybridSharedControlBlock *control) {
     if (control->strongCount.compare_exchange_weak(
             observed, observed + 1, HYBRID_ACQ_REL,
             HYBRID_ACQUIRE)) {
-      hybrid_retain(control->payload);
       return control->payload;
     }
   }
