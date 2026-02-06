@@ -16,6 +16,9 @@ The primary way to run tests is using the platform-specific test runner:
 # Run all tests
 ./run_tests.sh
 
+# Run single-file tests in parallel (compact failures-only mode)
+./run_tests.sh -j 4
+
 # Run tests with verbose output
 ./run_tests.sh -v
 
@@ -30,6 +33,9 @@ The primary way to run tests is using the platform-specific test runner:
 # Show help
 ./run_tests.sh -h
 ```
+
+> [!NOTE]
+> `-j/--jobs` parallelizes single-file tests and is currently intended for compact failures-only runs. If you also pass `-v` or `-f`, the runner falls back to serial execution to preserve readable output ordering.
 
 #### Windows
 
@@ -78,8 +84,9 @@ build\hybrid.exe < test\fail.hy 2>&1
 
 ## ARC runtime and diagnostics
 
-- When `clang` is available the harness builds a lightweight stub runtime (`runtime/test_runtime_stub.c`) for tests that do not emit ARC/smart-pointer symbols, keeping quick suites fast.
-- If the generated IR references ARC helpers (`hybrid_retain`, `__hybrid_shared_control`, smart pointer shims) or any of `HYBRID_ARC_DEBUG`, `HYBRID_ARC_TRACE_RUNTIME`, `HYBRID_ARC_LEAK_DETECT`, or `HYBRID_ARC_VERIFY_RUNTIME` are set, the runner links the real runtime (`src/runtime_support.cpp`, `src/runtime/arc.cpp`, `src/runtime/weak_table.cpp`, `src/memory/ref_count.cpp`) instead. Set one of those env vars in CI to force the full runtime for ARC suites.
+- The CMake build now emits reusable runtime archives in `build/`: `libhybrid_test_stub.a` and `libhybrid_runtime_test.a`.
+- The test harness prefers those archives for runtime linking. If they are missing, it falls back to on-the-fly runtime compilation so local workflows still work.
+- For non-ARC runtime tests, the harness links the lightweight stub runtime. If generated IR references ARC/smart-pointer helpers (`hybrid_retain`, `__hybrid_shared_control`, smart pointer shims) or any of `HYBRID_ARC_DEBUG`, `HYBRID_ARC_TRACE_RUNTIME`, `HYBRID_ARC_LEAK_DETECT`, or `HYBRID_ARC_VERIFY_RUNTIME` are set, it links the full ARC runtime archive instead.
 - Toggle ARC lowering with `./run_tests.sh -a on|off` or `// RUN_OPTS: --arc-enabled=false`; with ARC disabled the compiler omits retain/release insertion and ARC-specific diagnostics so fixtures can demonstrate the difference between ARC-on and ARC-off behavior.
 
 ## Test Suite Features
@@ -106,13 +113,19 @@ The test runner automatically finds all `.hy` files in the `test/` directory:
 
 The test suite compiles and executes generated LLVM IR:
 
+- **Direct IR emission for runtime tests**: For tests that require runtime execution, the harness invokes `hybrid <test.hy> -o <temp>.ll` and links the emitted IR directly. This avoids scraping IR from interactive stderr output on the fast path.
 - **Automatic compilation**: If `clang` is available, tests are compiled to native binaries
-- **Runtime library**: A temporary runtime library is created with support functions (e.g. `print()`)
+- **Runtime library selection**: The harness links either the stub archive or the full ARC runtime archive depending on referenced symbols/options
 - **Execution verification**: Tests are run and exit codes are checked. A Hybrid program that returns a non-zero status from `int main()` is reported as a failing test.
 - **Assert detection**: Runtime aborts (exit code 134/SIGABRT) are detected as test failures
 - **Cleanup**: All temporary files are automatically removed
 
 This ensures that generated code not only compiles but also executes correctly.
+
+### Performance Notes
+
+- `./run_tests.sh -j N` can reduce wall-clock time significantly by running single-file tests concurrently.
+- The `Timing (runtime tests only)` summary is aggregated per-test runtime duration, not wall-clock elapsed for the whole suite. In parallel mode this number can be higher than actual end-to-end time because multiple tests run at once.
 
 ### Error Detection
 

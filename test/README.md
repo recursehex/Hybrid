@@ -90,6 +90,9 @@ Use the `run_tests.sh` script in the project root:
 # Run with full pass/fail output (shows every test's pass or fail status)
 ./run_tests.sh -f
 ./run_tests.sh -f structs
+
+# Run single-file tests in parallel (compact failures-only mode)
+./run_tests.sh -j 4
 ```
 
 ## Writing New Tests

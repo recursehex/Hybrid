@@ -90,6 +90,7 @@ mark_test_completed() {
 # Initialize command line option variables early to avoid unset variable errors
 VERBOSE_MODE=0
 FAILURES_ONLY=1
+JOBS=1
 TEST_PATTERN=""
 RUN_MULTI_UNIT_TESTS=1
 MULTI_UNIT_FILTER=""
@@ -122,6 +123,9 @@ else
 fi
 
 echo "Using executable: $HYBRID_EXEC"
+HYBRID_BIN_DIR=$(dirname "$HYBRID_EXEC")
+PREBUILT_RUNTIME_STUB_LIB="${HYBRID_BIN_DIR}/libhybrid_test_stub.a"
+PREBUILT_ARC_RUNTIME_LIB="${HYBRID_BIN_DIR}/libhybrid_runtime_test.a"
 
 if [[ -n "${HYBRID_SHOW_GENERIC_METRICS+x}" ]]; then
     value=$(printf "%s" "$HYBRID_SHOW_GENERIC_METRICS" | tr -d '[:space:]')
@@ -171,12 +175,17 @@ fi
 
 # Create runtime library for test execution if clang is available
 RUNTIME_LIB=""
-if command -v clang &> /dev/null; then
+RUNTIME_LIB_IS_TEMP=0
+if [ -f "$PREBUILT_RUNTIME_STUB_LIB" ]; then
+    RUNTIME_LIB="$PREBUILT_RUNTIME_STUB_LIB"
+elif command -v clang &> /dev/null; then
     RUNTIME_LIB=$(mktemp /tmp/hybrid_runtime.XXXXXX)
     mv "$RUNTIME_LIB" "${RUNTIME_LIB}.o"
     RUNTIME_LIB="${RUNTIME_LIB}.o"
     if ! clang -c runtime/test_runtime_stub.c -o "$RUNTIME_LIB" 2>/dev/null; then
         RUNTIME_LIB=""
+    else
+        RUNTIME_LIB_IS_TEMP=1
     fi
 fi
 
@@ -191,6 +200,10 @@ ensure_arc_runtime_objects() {
     ARC_RUNTIME_PREPARED=1
 
     if ! command -v clang++ &> /dev/null; then
+        return
+    fi
+    if [ -f "$PREBUILT_ARC_RUNTIME_LIB" ]; then
+        ARC_RUNTIME_OBJS=("$PREBUILT_ARC_RUNTIME_LIB")
         return
     fi
 
@@ -221,7 +234,7 @@ ensure_arc_runtime_objects() {
 
 # Cleanup runtime library on exit
 cleanup_runtime() {
-    if [ -n "$RUNTIME_LIB" ]; then
+    if [ $RUNTIME_LIB_IS_TEMP -eq 1 ] && [ -n "$RUNTIME_LIB" ]; then
         rm -f "$RUNTIME_LIB"
     fi
     if [ -n "$ARC_RUNTIME_DIR" ]; then
@@ -277,6 +290,10 @@ echo
 run_test() {
     local test_file="$1"
     local test_name=$(basename "$test_file" .hy)
+    local machine_mode=0
+    if [ -n "${RESULT_FILE:-}" ]; then
+        machine_mode=1
+    fi
     local test_wall_start=""
     local counts_for_timing=1
     local expected_mode="pass"
@@ -341,21 +358,6 @@ run_test() {
             run_opts+=("${parts[@]}")
         fi
     done < <(grep -E "^// RUN_OPTS:" "$test_file" || true)
-    
-    # Run the test and capture both output and exit code
-    local output
-    local exit_code
-    output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" < "$test_file" 2>&1)
-    exit_code=$?
-    
-    # Check for error patterns in output
-    local compile_failed=0
-    if [ $exit_code -ne 0 ]; then
-        compile_failed=1
-    fi
-    if grep -E -q "Error at line|Error:|Failed to generate|Unknown function|Unknown variable|invalid binary operator|Binary operator|Expected.*after" <<< "$output" 2>/dev/null; then
-        compile_failed=1
-    fi
 
     local expected_output=()
     while IFS= read -r line; do
@@ -382,6 +384,48 @@ run_test() {
             expected_exit="$line"
         fi
     done < <(grep -E "^// EXPECT_EXIT:" "$test_file" || true)
+    
+    # Run the test and capture both output and exit code
+    local output
+    local exit_code
+    local emitted_ir_file=""
+    local used_direct_ir_file=0
+    local may_need_runtime=0
+    local run_opts_override_output=0
+    if [ "$expected_mode" = "pass" ]; then
+        may_need_runtime=1
+    elif [ "$expected_fail_kind" != "compile" ]; then
+        may_need_runtime=1
+    elif [ ${#expected_runtime[@]} -gt 0 ] || [ -n "$expected_exit" ]; then
+        may_need_runtime=1
+    fi
+    for opt in "${run_opts[@]}"; do
+        if [ "$opt" = "-o" ] || [ "$opt" = "--emit-llvm" ] || [[ "$opt" == -o=* ]]; then
+            run_opts_override_output=1
+            break
+        fi
+    done
+
+    if [ $may_need_runtime -eq 1 ] && [ $run_opts_override_output -eq 0 ]; then
+        emitted_ir_file=$(mktemp /tmp/hybrid_test.XXXXXX)
+        mv "$emitted_ir_file" "${emitted_ir_file}.ll"
+        emitted_ir_file="${emitted_ir_file}.ll"
+        output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" "$test_file" -o "$emitted_ir_file" 2>&1)
+        exit_code=$?
+        used_direct_ir_file=1
+    else
+        output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" < "$test_file" 2>&1)
+        exit_code=$?
+    fi
+    
+    # Check for error patterns in output
+    local compile_failed=0
+    if [ $exit_code -ne 0 ]; then
+        compile_failed=1
+    fi
+    if grep -E -q "Error at line|Error:|Failed to generate|Unknown function|Unknown variable|invalid binary operator|Binary operator|Expected.*after" <<< "$output" 2>/dev/null; then
+        compile_failed=1
+    fi
 
     local compiler_expectation_failed=0
     for expected in "${expected_output[@]}"; do
@@ -397,6 +441,7 @@ run_test() {
     local runtime_failed=0
     local runtime_failure_kind=""
     local should_run_runtime=0
+    local runtime_ir_file="$emitted_ir_file"
 
     if [ $compile_failed -eq 0 ] && [ $exit_code -eq 0 ]; then
         if [ "$expected_mode" = "pass" ]; then
@@ -412,23 +457,28 @@ run_test() {
 
     if [ $should_run_runtime -eq 1 ]; then
         if command -v clang &> /dev/null && [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
-            # Extract the final complete LLVM module (after "=== Final Generated LLVM IR ===")
-            local module_marker=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
-            local module_start=""
-            if [ -n "$module_marker" ]; then
-                module_start=$((module_marker + 1))
+            if [ -z "$runtime_ir_file" ] || [ ! -f "$runtime_ir_file" ]; then
+                # Fallback path: extract the final complete LLVM module from stdin mode output.
+                local module_marker=$(echo "$output" | grep -n "^=== Final Generated" | tail -1 | cut -d: -f1)
+                local module_start=""
+                if [ -n "$module_marker" ]; then
+                    module_start=$((module_marker + 1))
+                fi
+
+                if [ -n "$module_start" ]; then
+                    local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]" | grep -v "^\\[arc-escape\\]")
+
+                    runtime_ir_file=$(mktemp /tmp/hybrid_test.XXXXXX)
+                    mv "$runtime_ir_file" "${runtime_ir_file}.ll"
+                    runtime_ir_file="${runtime_ir_file}.ll"
+                    echo "$clean_ir" > "$runtime_ir_file"
+                fi
             fi
 
-            if [ -n "$module_start" ]; then
-                local clean_ir=$(echo "$output" | tail -n +$module_start | grep -v "^ready>" | grep -v "^Parsed" | grep -v "^Generated" | grep -v "^\\[generics" | grep -v "^\\[arc-trace\\]" | grep -v "^\\[arc-escape\\]")
-
-                local temp_ir=$(mktemp /tmp/hybrid_test.XXXXXX)
-                mv "$temp_ir" "${temp_ir}.ll"
-                temp_ir="${temp_ir}.ll"
+            if [ -n "$runtime_ir_file" ] && [ -f "$runtime_ir_file" ]; then
                 local temp_bin=$(mktemp /tmp/hybrid_bin.XXXXXX)
-                echo "$clean_ir" > "$temp_ir"
 
-                if grep -q "define i32 @main" "$temp_ir"; then
+                if grep -q "define i32 @main" "$runtime_ir_file"; then
                     # Check if smart pointer runtime is needed
                     local needs_smart_ptr_runtime=$ARC_RUNTIME_REQUIRED
                     for opt in "${run_opts[@]}"; do
@@ -438,9 +488,9 @@ run_test() {
                                 ;;
                         esac
                     done
-                    if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$temp_ir"; then
+                    if grep -q "__hybrid_shared_control\|__hybrid_smart_" "$runtime_ir_file"; then
                         needs_smart_ptr_runtime=1
-                    elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease\|hybrid_alloc_array\|hybrid_alloc_object" "$temp_ir"; then
+                    elif grep -q "hybrid_release\|hybrid_retain\|hybrid_autorelease\|hybrid_alloc_array\|hybrid_alloc_object" "$runtime_ir_file"; then
                         needs_smart_ptr_runtime=1
                     fi
 
@@ -448,17 +498,17 @@ run_test() {
                     if [ $needs_smart_ptr_runtime -eq 1 ]; then
                         ensure_arc_runtime_objects
                         if [ ${#ARC_RUNTIME_OBJS[@]} -gt 0 ]; then
-                            if clang++ "$temp_ir" "${ARC_RUNTIME_OBJS[@]}" -o "$temp_bin" 2>/dev/null; then
+                            if clang++ "$runtime_ir_file" "${ARC_RUNTIME_OBJS[@]}" -o "$temp_bin" 2>/dev/null; then
                                 clang_success=1
                             fi
                         else
                             # Fallback when precompiled runtime objects are unavailable.
-                            if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                            if clang++ "$runtime_ir_file" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
                                 clang_success=1
                             fi
                         fi
                     else
-                        if clang++ "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                        if clang++ "$runtime_ir_file" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
                             clang_success=1
                         fi
                     fi
@@ -481,10 +531,10 @@ run_test() {
                 fi
 
                 if [ $runtime_failed -ne 0 ] && [ -n "$temp_bin" ]; then
-                    cp "$temp_ir" /tmp/hybrid_fail.ll 2>/dev/null || true
+                    cp "$runtime_ir_file" /tmp/hybrid_fail.ll 2>/dev/null || true
                     cp "$temp_bin" /tmp/hybrid_fail.bin 2>/dev/null || true
                 fi
-                rm -f "$temp_ir" "$temp_bin"
+                rm -f "$temp_bin"
             fi
         fi
     fi
@@ -575,10 +625,12 @@ run_test() {
         fi
     fi
 
-    if [ $test_passed -eq 1 ]; then
-        PASSED_TESTS=$((PASSED_TESTS + 1))
-    else
-        FAILED_TESTS=$((FAILED_TESTS + 1))
+    if [ $machine_mode -eq 0 ]; then
+        if [ $test_passed -eq 1 ]; then
+            PASSED_TESTS=$((PASSED_TESTS + 1))
+        else
+            FAILED_TESTS=$((FAILED_TESTS + 1))
+        fi
     fi
     
     local expected_label="expected to pass"
@@ -594,9 +646,14 @@ run_test() {
     if [ $FAILURES_ONLY -eq 0 ] || [ $test_passed -eq 0 ]; then
         should_show_output=1
     fi
+    if [ $machine_mode -eq 1 ] && [ $test_passed -eq 1 ]; then
+        should_show_output=0
+    fi
 
     if [ $VERBOSE_MODE -eq 1 ] && [ $should_show_output -eq 1 ]; then
-        ensure_progress_newline
+        if [ $machine_mode -eq 0 ]; then
+            ensure_progress_newline
+        fi
         echo -e "${BLUE}=== Test: $test_name ===${NC}"
         echo "File: $test_file"
         echo "Content:"
@@ -660,7 +717,9 @@ run_test() {
         echo "========================================"
         echo
     elif [ $should_show_output -eq 1 ]; then
-        ensure_progress_newline
+        if [ $machine_mode -eq 0 ]; then
+            ensure_progress_newline
+        fi
         echo -e "${YELLOW}Running test: $test_name${NC}"
         echo "----------------------------------------"
         
@@ -713,14 +772,143 @@ run_test() {
         echo
     fi
     
-    mark_test_completed
+    if [ $machine_mode -eq 0 ]; then
+        mark_test_completed
+    fi
 
+    local test_elapsed=""
     if [ $counts_for_timing -eq 1 ]; then
         local test_wall_end=$(now_time)
-        local test_elapsed=$(diff_durations "$test_wall_start" "$test_wall_end")
-        TIMED_DURATION=$(sum_durations "$TIMED_DURATION" "$test_elapsed")
+        test_elapsed=$(diff_durations "$test_wall_start" "$test_wall_end")
+        if [ $machine_mode -eq 0 ]; then
+            TIMED_DURATION=$(sum_durations "$TIMED_DURATION" "$test_elapsed")
+            TIMED_TESTS=$((TIMED_TESTS + 1))
+        fi
+    fi
+
+    if [ $machine_mode -eq 1 ] && [ -n "${RESULT_FILE:-}" ]; then
+        {
+            printf "test_file=%s\n" "$test_file"
+            printf "test_name=%s\n" "$test_name"
+            printf "test_passed=%d\n" "$test_passed"
+            printf "counts_for_timing=%d\n" "$counts_for_timing"
+            printf "test_elapsed=%s\n" "$test_elapsed"
+        } > "$RESULT_FILE"
+    fi
+
+    if [ -n "$runtime_ir_file" ] && [ -f "$runtime_ir_file" ] && [ $used_direct_ir_file -eq 0 ]; then
+        rm -f "$runtime_ir_file"
+    fi
+    if [ -n "$emitted_ir_file" ] && [ -f "$emitted_ir_file" ]; then
+        rm -f "$emitted_ir_file"
+    fi
+}
+
+process_parallel_result() {
+    local result_file="$1"
+    local output_file="$2"
+
+    local result_test_name=""
+    local result_passed="0"
+    local result_counts_for_timing="0"
+    local result_elapsed=""
+
+    if [ -f "$result_file" ]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                test_name) result_test_name="$value" ;;
+                test_passed) result_passed="$value" ;;
+                counts_for_timing) result_counts_for_timing="$value" ;;
+                test_elapsed) result_elapsed="$value" ;;
+            esac
+        done < "$result_file"
+    fi
+
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    if [ "$result_passed" = "1" ]; then
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+    else
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+        ensure_progress_newline
+        if [ -s "$output_file" ]; then
+            cat "$output_file"
+        else
+            if [ -n "$result_test_name" ]; then
+                echo -e "${RED}✗ FAILED: $result_test_name${NC}"
+            else
+                echo -e "${RED}✗ FAILED: test worker did not return results${NC}"
+            fi
+        fi
+    fi
+
+    if [ "$result_counts_for_timing" = "1" ] && [ -n "$result_elapsed" ]; then
+        TIMED_DURATION=$(sum_durations "$TIMED_DURATION" "$result_elapsed")
         TIMED_TESTS=$((TIMED_TESTS + 1))
     fi
+
+    if [ $FAILURES_ONLY -eq 1 ]; then
+        PROGRESS_COUNT=$((PROGRESS_COUNT + 1))
+        update_progress_display
+    fi
+}
+
+run_single_tests_parallel() {
+    local temp_dir
+    temp_dir=$(mktemp -d /tmp/hybrid_parallel.XXXXXX)
+    local batch_size=0
+    local batch_test_files=()
+    local batch_result_files=()
+    local batch_output_files=()
+    local batch_pids=()
+    local sequence=0
+
+    while IFS= read -r test_file; do
+        if [ -z "$test_file" ]; then
+            continue
+        fi
+
+        sequence=$((sequence + 1))
+        local result_file="${temp_dir}/result.${sequence}"
+        local output_file="${temp_dir}/output.${sequence}"
+
+        (
+            RESULT_FILE="$result_file" run_test "$test_file"
+        ) >"$output_file" 2>&1 &
+
+        batch_test_files+=("$test_file")
+        batch_result_files+=("$result_file")
+        batch_output_files+=("$output_file")
+        batch_pids+=("$!")
+        batch_size=$((batch_size + 1))
+
+        if [ $batch_size -lt $JOBS ]; then
+            continue
+        fi
+
+        for pid in "${batch_pids[@]}"; do
+            wait "$pid" || true
+        done
+        for i in "${!batch_test_files[@]}"; do
+            process_parallel_result "${batch_result_files[$i]}" "${batch_output_files[$i]}"
+        done
+
+        batch_size=0
+        batch_test_files=()
+        batch_result_files=()
+        batch_output_files=()
+        batch_pids=()
+    done < <(printf "%s\n" "$TEST_FILES")
+
+    if [ $batch_size -gt 0 ]; then
+        for pid in "${batch_pids[@]}"; do
+            wait "$pid" || true
+        done
+        for i in "${!batch_test_files[@]}"; do
+            process_parallel_result "${batch_result_files[$i]}" "${batch_output_files[$i]}"
+        done
+    fi
+
+    rm -rf "$temp_dir"
 }
 
 run_multi_unit_tests() {
@@ -856,6 +1044,27 @@ while [[ $# -gt 0 ]]; do
             FAILURES_ONLY=0
             shift
             ;;
+        -j|--jobs)
+            if [ $# -lt 2 ]; then
+                echo -e "${RED}Error: -j requires a positive integer${NC}"
+                exit 1
+            fi
+            if ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -le 0 ]; then
+                echo -e "${RED}Error: -j requires a positive integer${NC}"
+                exit 1
+            fi
+            JOBS="$2"
+            shift 2
+            ;;
+        --jobs=*)
+            value="${1#--jobs=}"
+            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
+                echo -e "${RED}Error: --jobs requires a positive integer${NC}"
+                exit 1
+            fi
+            JOBS="$value"
+            shift
+            ;;
         -a)
             if [ $# -lt 2 ]; then
                 echo -e "${RED}Error: -a requires a value (on/off)${NC}"
@@ -886,6 +1095,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  -v, --verbose       Show detailed output for each test"
             echo "  -f, --full          Show full output for each test"
+            echo "  -j, --jobs N        Run up to N single-file tests in parallel"
             echo "  -a on|off           Toggle ARC lowering (--arc-enabled) for this run"
             echo "      --failures-only Show only failing tests (default)"
             echo "  -h, --help          Show this help message"
@@ -898,6 +1108,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 -v               # Run all tests with verbose output"
             echo "  $0 -f               # Run all tests with full output"
             echo "  $0 -f -v            # Full output with verbose details"
+            echo "  $0 -j 8             # Run tests with 8 workers"
             echo "  $0 --failures-only  # Explicitly run in compact mode (default)"
             echo "  $0 structs          # Run all tests in structs category"
             echo "  $0 operators        # Run all tests in operators category"
@@ -931,6 +1142,11 @@ fi
 
 if [ -n "$ARC_ENABLED_OVERRIDE" ]; then
     EXTRA_COMPILER_ARGS+=("--arc-enabled=$ARC_ENABLED_OVERRIDE")
+fi
+
+if [ $JOBS -gt 1 ] && { [ $VERBOSE_MODE -eq 1 ] || [ $FAILURES_ONLY -eq 0 ]; }; then
+    echo -e "${YELLOW}Note: parallel mode currently supports failures-only compact output; using serial mode.${NC}"
+    JOBS=1
 fi
 
 # Filter tests if pattern provided
@@ -997,9 +1213,13 @@ if [ $VERBOSE_MODE -eq 1 ]; then
     echo
 fi
 
-for test_file in $TEST_FILES; do
-    run_test "$test_file"
-done
+if [ $JOBS -gt 1 ] && [ -n "$TEST_FILES" ]; then
+    run_single_tests_parallel
+else
+    for test_file in $TEST_FILES; do
+        run_test "$test_file"
+    done
+fi
 
 if [ $RUN_MULTI_UNIT_TESTS -eq 1 ]; then
     run_multi_unit_tests

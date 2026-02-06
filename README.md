@@ -135,6 +135,7 @@ Run a program:
 ./run_tests.sh
 ./run_tests.sh multi_unit   # Only the multi-file directory tests
 ./run_tests.sh -v           # Verbose mode
+./run_tests.sh -j 4         # Parallel single-file tests (compact mode)
 ```
 
 #### Windows

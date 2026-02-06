@@ -31,6 +31,34 @@ set(HYBRID_HEADERS
 # Create the executable
 add_executable(hybrid ${HYBRID_SOURCES} ${HYBRID_HEADERS})
 
+# Build reusable runtime archives for test execution.
+add_library(hybrid_runtime_test STATIC
+    runtime_support.cpp
+    runtime/arc.cpp
+    runtime/weak_table.cpp
+    memory/ref_count.cpp
+)
+
+add_library(hybrid_test_stub STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/test_runtime_stub.c
+)
+
+target_include_directories(hybrid_runtime_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include)
+target_include_directories(hybrid_test_stub PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include)
+
+target_compile_features(hybrid_runtime_test PRIVATE cxx_std_17)
+
+set_target_properties(hybrid_runtime_test PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_target_properties(hybrid_test_stub PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 target_compile_definitions(hybrid PRIVATE
     HYBRID_RUNTIME_SUPPORT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/runtime_support.cpp"
     HYBRID_ARC_RUNTIME_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/runtime/arc.cpp"
