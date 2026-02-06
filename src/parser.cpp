@@ -2907,6 +2907,22 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   return std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 }
 
+static bool TryParseForTypeHeader(TypeInfo &outInfo, bool declaredRef) {
+  ParserContext parserBackup = currentParser();
+  LexerContext lexerBackup = currentLexer();
+
+  TypeInfo speculativeType;
+  if (ParseCompleteTypeInfo(speculativeType, declaredRef) &&
+      CurTok == tok_identifier) {
+    outInfo = std::move(speculativeType);
+    return true;
+  }
+
+  currentParser() = parserBackup;
+  currentLexer() = lexerBackup;
+  return false;
+}
+
 /// foreachstmt ::= 'for' type identifier 'in' expression block
 std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   getNextToken(); // eat 'for'
@@ -2923,17 +2939,14 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
       getNextToken();
   }
 
-  if (!IsValidType() && CurTok != '(') {
+  TypeInfo declInfo;
+  if (!TryParseForTypeHeader(declInfo, isRef)) {
     if (isRef)
       LogError("Expected type after 'ref' in foreach loop");
     else
       LogError("Expected type after 'for'");
     return nullptr;
   }
-
-  TypeInfo declInfo;
-  if (!ParseCompleteTypeInfo(declInfo, isRef))
-    return nullptr;
   
   // Parse variable name
   if (CurTok != tok_identifier) {
@@ -3469,24 +3482,8 @@ std::unique_ptr<StmtAST> ParseForStatement() {
   TypeInfo declInfo;
   bool parsedTypeHeader = false;
 
-  if (isRef || IsBuiltInType() || CurTok == tok_unique || CurTok == tok_shared ||
-      CurTok == tok_weak) {
-    if (!ParseCompleteTypeInfo(declInfo, isRef))
-      return nullptr;
-    parsedTypeHeader = true;
-  } else if (CurTok == tok_identifier && IsValidType()) {
-    ParserContext parserBackup = currentParser();
-    LexerContext lexerBackup = currentLexer();
-
-    TypeInfo speculativeType;
-    if (ParseCompleteTypeInfo(speculativeType, false) && CurTok == tok_identifier) {
-      declInfo = std::move(speculativeType);
-      parsedTypeHeader = true;
-    } else {
-      currentParser() = parserBackup;
-      currentLexer() = lexerBackup;
-    }
-  }
+  if (isRef || IsValidType())
+    parsedTypeHeader = TryParseForTypeHeader(declInfo, isRef);
 
   if (isRef && !parsedTypeHeader) {
     LogError("Expected type after 'ref' in for loop");
