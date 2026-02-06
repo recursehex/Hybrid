@@ -19,12 +19,14 @@
 #include <system_error>
 #include <vector>
 #include <limits>
+#include <optional>
 #include <unistd.h>
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace {
@@ -687,37 +689,72 @@ int main(int argc, char **argv) {
                   codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
 
 #ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
-            const char *linker = "clang++";
-            std::string command = std::string(linker) + " \"" + tempPathStr + "\" \"" +
-                                  std::string(HYBRID_RUNTIME_SUPPORT_SOURCE) + "\"";
+            const char *linkerName = "clang++";
+#else
+            const char *linkerName = "clang";
+#endif
+            auto linkerPath = llvm::sys::findProgramByName(linkerName);
+            if (!linkerPath) {
+              fprintf(stderr, "Error: failed to find '%s': %s\n", linkerName,
+                      linkerPath.getError().message().c_str());
+              hadFailure = true;
+            } else {
+              std::vector<std::string> linkerArgs;
+              linkerArgs.push_back(linkerPath.get());
+              linkerArgs.push_back(tempPathStr);
+#ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
+              linkerArgs.push_back(HYBRID_RUNTIME_SUPPORT_SOURCE);
 #ifdef HYBRID_ARC_RUNTIME_SOURCE
-            command += " \"" + std::string(HYBRID_ARC_RUNTIME_SOURCE) + "\"";
+              linkerArgs.push_back(HYBRID_ARC_RUNTIME_SOURCE);
 #endif
 #ifdef HYBRID_REFCOUNT_SOURCE
-            command += " \"" + std::string(HYBRID_REFCOUNT_SOURCE) + "\"";
+              linkerArgs.push_back(HYBRID_REFCOUNT_SOURCE);
 #endif
 #ifdef HYBRID_WEAK_TABLE_SOURCE
-            command += " \"" + std::string(HYBRID_WEAK_TABLE_SOURCE) + "\"";
+              linkerArgs.push_back(HYBRID_WEAK_TABLE_SOURCE);
 #endif
 #ifdef HYBRID_SOURCE_DIR
-            command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "\"";
+              linkerArgs.push_back("-I");
+              linkerArgs.push_back(HYBRID_SOURCE_DIR);
 #endif
 #ifdef HYBRID_RUNTIME_INCLUDE_DIR
-            command += " -I\"" + std::string(HYBRID_RUNTIME_INCLUDE_DIR) + "\"";
+              linkerArgs.push_back("-I");
+              linkerArgs.push_back(HYBRID_RUNTIME_INCLUDE_DIR);
 #else
 #ifdef HYBRID_SOURCE_DIR
-            command += " -I\"" + std::string(HYBRID_SOURCE_DIR) + "/../runtime/include\"";
+              linkerArgs.push_back("-I");
+              linkerArgs.push_back(std::string(HYBRID_SOURCE_DIR) +
+                                   "/../runtime/include");
 #endif
 #endif
-            command += " -std=c++17 -o \"" + targetOutput + "\"";
-#else
-            std::string command = "clang \"" + tempPathStr + "\" -o \"" + targetOutput + "\"";
+              linkerArgs.push_back("-std=c++17");
 #endif
-            int status = std::system(command.c_str());
-            if (status != 0) {
-              fprintf(stderr, "Error: clang failed when generating '%s' (exit code %d)\n",
-                      targetOutput.c_str(), status);
-              hadFailure = true;
+              linkerArgs.push_back("-o");
+              linkerArgs.push_back(targetOutput);
+
+              std::vector<llvm::StringRef> linkerArgRefs;
+              linkerArgRefs.reserve(linkerArgs.size());
+              for (const auto &arg : linkerArgs)
+                linkerArgRefs.emplace_back(arg);
+
+              std::string execError;
+              bool executionFailed = false;
+              int status = llvm::sys::ExecuteAndWait(
+                  linkerPath.get(), linkerArgRefs, std::nullopt, {}, 0, 0,
+                  &execError, &executionFailed);
+              if (status != 0 || executionFailed) {
+                if (!execError.empty()) {
+                  fprintf(stderr,
+                          "Error: %s failed when generating '%s' (status %d): %s\n",
+                          linkerName, targetOutput.c_str(), status,
+                          execError.c_str());
+                } else {
+                  fprintf(stderr,
+                          "Error: %s failed when generating '%s' (status %d)\n",
+                          linkerName, targetOutput.c_str(), status);
+                }
+                hadFailure = true;
+              }
             }
 
             llvm::sys::fs::remove(tempPath);

@@ -49,11 +49,15 @@ std::map<std::string, const HybridTypeDescriptor *> DescriptorCache;
 std::once_flag LeakAtexitRegistration;
 
 std::mutex &getLeakRegistryMutex() {
+  // Intentionally process-lifetime allocation: leak-dump hooks run during
+  // shutdown, and this avoids static destruction ordering pitfalls.
   static auto *mutexPtr = new std::mutex();
   return *mutexPtr;
 }
 
 std::map<void *, std::thread::id> &getLeakRegistry() {
+  // Intentionally process-lifetime allocation for the same shutdown-order
+  // reason as getLeakRegistryMutex().
   static auto *registryPtr = new std::map<void *, std::thread::id>();
   return *registryPtr;
 }
@@ -175,6 +179,13 @@ void drainPool(AutoreleasePool &pool) {
   pool.objects.clear();
   if (hybrid_debug_reftrace)
     hybrid_arc_trace_flush(nullptr);
+}
+
+bool checkedAddSize(std::size_t lhs, std::size_t rhs, std::size_t &out) {
+  if (lhs > std::numeric_limits<std::size_t>::max() - rhs)
+    return false;
+  out = lhs + rhs;
+  return true;
 }
 
 } // namespace
@@ -372,7 +383,9 @@ void *hybrid_alloc_array(std::size_t elementSize, std::size_t elementCount,
     return nullptr;
 
   const std::size_t payloadSize = elementSize * elementCount;
-  const std::size_t totalSize = sizeof(ArrayHeader) + payloadSize;
+  std::size_t totalSize = 0;
+  if (!checkedAddSize(sizeof(ArrayHeader), payloadSize, totalSize))
+    return nullptr;
 
   void *memory = std::calloc(1, totalSize);
   if (!memory)
@@ -453,6 +466,11 @@ void *hybrid_array_resize(void *obj, std::size_t elementSize,
                           hybrid_array_retain_fn retainFn) {
   if (elementSize == 0)
     return nullptr;
+  if (obj) {
+    auto *oldHeader = static_cast<ArrayHeader *>(obj);
+    if (oldHeader->elementSize != elementSize)
+      return nullptr;
+  }
 
   void *newObj = hybrid_alloc_array(elementSize, elementCount, nullptr);
   if (!newObj)
@@ -469,13 +487,19 @@ void *hybrid_array_resize(void *obj, std::size_t elementSize,
       std::min(oldHeader->length, elementCount);
   if (copyCount == 0)
     return newObj;
+  if (copyCount >
+      std::numeric_limits<std::size_t>::max() / elementSize) {
+    hybrid_release(newObj);
+    return nullptr;
+  }
 
   auto *oldPayload = static_cast<std::byte *>(obj) +
                      static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
   auto *newPayload =
       static_cast<std::byte *>(newObj) +
       static_cast<std::ptrdiff_t>(hybrid_array_payload_offset());
-  std::memcpy(newPayload, oldPayload, copyCount * elementSize);
+  const std::size_t copyBytes = copyCount * elementSize;
+  std::memcpy(newPayload, oldPayload, copyBytes);
 
   if (retainFn) {
     for (std::size_t idx = 0; idx < copyCount; ++idx) {

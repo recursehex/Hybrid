@@ -17,6 +17,13 @@ typedef struct {
   void *payload;
 } HybridSharedControlForTests;
 
+static int checked_add_size(size_t lhs, size_t rhs, size_t *out) {
+  if (lhs > SIZE_MAX - rhs)
+    return 0;
+  *out = lhs + rhs;
+  return 1;
+}
+
 // Descriptor helpers
 const HybridTypeDescriptor *
 hybrid_register_type_descriptor(const HybridTypeDescriptor *descriptor) {
@@ -118,6 +125,11 @@ void *hybrid_array_resize(void *obj, size_t elementSize, size_t elementCount,
                           hybrid_array_retain_fn retainFn) {
   if (elementSize == 0)
     return NULL;
+  if (obj) {
+    hybrid_array_header_t *oldHeader = (hybrid_array_header_t *)obj;
+    if (oldHeader->elementSize != elementSize)
+      return NULL;
+  }
 
   void *newObj = hybrid_alloc_array(elementSize, elementCount, NULL);
   if (!newObj)
@@ -213,7 +225,9 @@ void *hybrid_alloc_array(size_t elementSize, size_t elementCount,
     return NULL;
 
   size_t payloadSize = elementSize * elementCount;
-  size_t totalSize = sizeof(hybrid_array_header_t) + payloadSize;
+  size_t totalSize = 0;
+  if (!checked_add_size(sizeof(hybrid_array_header_t), payloadSize, &totalSize))
+    return NULL;
   hybrid_array_header_t *header =
       (hybrid_array_header_t *)calloc(1, totalSize);
   if (!header)
@@ -434,8 +448,12 @@ static size_t utf16_length_from_utf8(const char *utf8, size_t bytes) {
 static hybrid_string_t *allocate_string_storage(size_t byteLength,
                                                 size_t utf16Length,
                                                 size_t capacity) {
-  size_t inlineBytes = capacity > 0 ? capacity + 1 : 1;
-  size_t totalSize = sizeof(hybrid_string_t) + inlineBytes;
+  size_t inlineBytes = 1;
+  if (capacity > 0 && !checked_add_size(capacity, 1, &inlineBytes))
+    return NULL;
+  size_t totalSize = 0;
+  if (!checked_add_size(sizeof(hybrid_string_t), inlineBytes, &totalSize))
+    return NULL;
   hybrid_string_t *storage = (hybrid_string_t *)hybrid_new_object(
       totalSize, hybrid_string_type_descriptor());
   if (!storage)
@@ -498,8 +516,12 @@ hybrid_string_t *__hybrid_concat_strings(hybrid_string_t **segments,
     hybrid_string_t *seg = segments[i];
     if (!seg)
       continue;
-    totalBytes += seg->byteLength;
-    totalUnits += seg->length;
+    if (seg->byteLength > 0 && !seg->data)
+      return NULL;
+    if (!checked_add_size(totalBytes, seg->byteLength, &totalBytes))
+      return NULL;
+    if (!checked_add_size(totalUnits, seg->length, &totalUnits))
+      return NULL;
   }
 
   hybrid_string_t *result =
@@ -680,8 +702,16 @@ hybrid_string_t *__hybrid_string_append_mut(hybrid_string_t *base,
   size_t baseUnits = base ? base->length : 0;
   size_t suffixBytes = suffix ? suffix->byteLength : 0;
   size_t suffixUnits = suffix ? suffix->length : 0;
-  size_t neededBytes = baseBytes + suffixBytes;
-  size_t neededUnits = baseUnits + suffixUnits;
+  if (baseBytes > 0 && (!base || !base->data))
+    return NULL;
+  if (suffixBytes > 0 && (!suffix || !suffix->data))
+    return NULL;
+  size_t neededBytes = 0;
+  size_t neededUnits = 0;
+  if (!checked_add_size(baseBytes, suffixBytes, &neededBytes))
+    return NULL;
+  if (!checked_add_size(baseUnits, suffixUnits, &neededUnits))
+    return NULL;
 
   int baseIsUnique = base && base->backing == NULL &&
                      hybrid_refcount_strong_count(&base->counts) == 1;

@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <mutex>
 
 extern "C" {
 
@@ -77,15 +79,29 @@ static size_t utf16_length_from_utf8(const char *utf8, size_t bytes) {
   return codeUnits;
 }
 
+static bool checkedAddSize(size_t lhs, size_t rhs, size_t &out) {
+  if (lhs > std::numeric_limits<size_t>::max() - rhs)
+    return false;
+  out = lhs + rhs;
+  return true;
+}
+
+static void string_dealloc(void *obj);
+
 static HybridTypeDescriptor StringDescriptor = {
     "string", nullptr, nullptr, 0, nullptr, 0, nullptr};
+static std::once_flag StringDescriptorInitOnce;
+static const HybridTypeDescriptor *RegisteredStringDescriptor = nullptr;
 
 static const HybridTypeDescriptor *get_string_descriptor() {
-  static const HybridTypeDescriptor *canonical = nullptr;
-  if (!canonical) {
-    canonical = hybrid_register_type_descriptor(&StringDescriptor);
-  }
-  return canonical;
+  std::call_once(StringDescriptorInitOnce, []() {
+    StringDescriptor.dealloc = string_dealloc;
+    RegisteredStringDescriptor =
+        hybrid_register_type_descriptor(&StringDescriptor);
+    if (!RegisteredStringDescriptor)
+      RegisteredStringDescriptor = &StringDescriptor;
+  });
+  return RegisteredStringDescriptor;
 }
 
 static void string_dealloc(void *obj) {
@@ -100,16 +116,18 @@ static void string_dealloc(void *obj) {
 }
 
 const HybridTypeDescriptor *hybrid_string_type_descriptor(void) {
-  if (!StringDescriptor.dealloc)
-    StringDescriptor.dealloc = string_dealloc;
   return get_string_descriptor();
 }
 
 static hybrid_string_t *allocate_string_storage(size_t byteLength,
                                                 size_t utf16Length,
                                                 size_t capacity) {
-  const size_t inlineBytes = capacity > 0 ? capacity + 1 : 1;
-  const size_t totalSize = sizeof(hybrid_string_t) + inlineBytes;
+  size_t inlineBytes = 1;
+  if (capacity > 0 && !checkedAddSize(capacity, 1, inlineBytes))
+    return nullptr;
+  size_t totalSize = 0;
+  if (!checkedAddSize(sizeof(hybrid_string_t), inlineBytes, totalSize))
+    return nullptr;
   auto *storage = static_cast<hybrid_string_t *>(
       hybrid_new_object(totalSize, hybrid_string_type_descriptor()));
   if (!storage)
@@ -133,8 +151,7 @@ static hybrid_string_t *make_string_from_utf8(const char *utf8, size_t bytes) {
   if (!utf8)
     return allocate_string_storage(0, 0, 0);
   const size_t utf16Len = utf16_length_from_utf8(utf8, bytes);
-  auto *storage =
-      allocate_string_storage(bytes, utf16Len, std::max<size_t>(bytes, 0));
+  auto *storage = allocate_string_storage(bytes, utf16Len, bytes);
   if (!storage)
     return nullptr;
   if (bytes > 0)
@@ -234,8 +251,12 @@ hybrid_string_t *__hybrid_concat_strings(hybrid_string_t **segments,
     hybrid_string_t *seg = segments[i];
     if (!seg)
       continue;
-    totalBytes += seg->byteLength;
-    totalUnits += seg->length;
+    if (seg->byteLength > 0 && !seg->data)
+      return nullptr;
+    if (!checkedAddSize(totalBytes, seg->byteLength, totalBytes))
+      return nullptr;
+    if (!checkedAddSize(totalUnits, seg->length, totalUnits))
+      return nullptr;
   }
 
   auto *result =
@@ -403,8 +424,16 @@ hybrid_string_t *__hybrid_string_append_mut(hybrid_string_t *base,
   const size_t baseUnits = base ? base->length : 0;
   const size_t suffixBytes = suffix ? suffix->byteLength : 0;
   const size_t suffixUnits = suffix ? suffix->length : 0;
-  const size_t neededBytes = baseBytes + suffixBytes;
-  const size_t neededUnits = baseUnits + suffixUnits;
+  if (baseBytes > 0 && (!base || !base->data))
+    return nullptr;
+  if (suffixBytes > 0 && (!suffix || !suffix->data))
+    return nullptr;
+  size_t neededBytes = 0;
+  if (!checkedAddSize(baseBytes, suffixBytes, neededBytes))
+    return nullptr;
+  size_t neededUnits = 0;
+  if (!checkedAddSize(baseUnits, suffixUnits, neededUnits))
+    return nullptr;
 
   const bool baseIsUnique =
       base && base->backing == nullptr &&
