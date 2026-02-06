@@ -180,10 +180,52 @@ if command -v clang &> /dev/null; then
     fi
 fi
 
+ARC_RUNTIME_DIR=""
+ARC_RUNTIME_OBJS=()
+ARC_RUNTIME_PREPARED=0
+
+ensure_arc_runtime_objects() {
+    if [ $ARC_RUNTIME_PREPARED -eq 1 ]; then
+        return
+    fi
+    ARC_RUNTIME_PREPARED=1
+
+    if ! command -v clang++ &> /dev/null; then
+        return
+    fi
+
+    ARC_RUNTIME_DIR=$(mktemp -d /tmp/hybrid_arc_runtime.XXXXXX)
+    runtime_sources=(
+        "src/runtime_support.cpp"
+        "src/runtime/arc.cpp"
+        "src/runtime/weak_table.cpp"
+        "src/memory/ref_count.cpp"
+    )
+    runtime_objects=(
+        "${ARC_RUNTIME_DIR}/runtime_support.o"
+        "${ARC_RUNTIME_DIR}/arc.o"
+        "${ARC_RUNTIME_DIR}/weak_table.o"
+        "${ARC_RUNTIME_DIR}/ref_count.o"
+    )
+
+    for i in "${!runtime_sources[@]}"; do
+        if ! clang++ -c "${runtime_sources[$i]}" -Isrc -Iruntime/include -std=c++17 -o "${runtime_objects[$i]}" 2>/dev/null; then
+            rm -rf "$ARC_RUNTIME_DIR"
+            ARC_RUNTIME_DIR=""
+            return
+        fi
+    done
+
+    ARC_RUNTIME_OBJS=("${runtime_objects[@]}")
+}
+
 # Cleanup runtime library on exit
 cleanup_runtime() {
     if [ -n "$RUNTIME_LIB" ]; then
         rm -f "$RUNTIME_LIB"
+    fi
+    if [ -n "$ARC_RUNTIME_DIR" ]; then
+        rm -rf "$ARC_RUNTIME_DIR"
     fi
 }
 trap cleanup_runtime EXIT
@@ -235,7 +277,7 @@ echo
 run_test() {
     local test_file="$1"
     local test_name=$(basename "$test_file" .hy)
-    local test_wall_start=$(now_time)
+    local test_wall_start=""
     local counts_for_timing=1
     local expected_mode="pass"
     local expected_fail_kind=""
@@ -286,6 +328,9 @@ run_test() {
 
     if [ "$expected_mode" = "fail" ]; then
         counts_for_timing=0
+    fi
+    if [ $counts_for_timing -eq 1 ]; then
+        test_wall_start=$(now_time)
     fi
     local run_opts=()
     while IFS= read -r line; do
@@ -401,9 +446,16 @@ run_test() {
 
                     local clang_success=0
                     if [ $needs_smart_ptr_runtime -eq 1 ]; then
-                        # Smart pointer tests use C++ runtime - don't include stub runtime library
-                        if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
-                            clang_success=1
+                        ensure_arc_runtime_objects
+                        if [ ${#ARC_RUNTIME_OBJS[@]} -gt 0 ]; then
+                            if clang++ "$temp_ir" "${ARC_RUNTIME_OBJS[@]}" -o "$temp_bin" 2>/dev/null; then
+                                clang_success=1
+                            fi
+                        else
+                            # Fallback when precompiled runtime objects are unavailable.
+                            if clang++ "$temp_ir" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                                clang_success=1
+                            fi
                         fi
                     else
                         if clang++ "$temp_ir" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
@@ -663,9 +715,9 @@ run_test() {
     
     mark_test_completed
 
-    local test_wall_end=$(now_time)
-    local test_elapsed=$(diff_durations "$test_wall_start" "$test_wall_end")
     if [ $counts_for_timing -eq 1 ]; then
+        local test_wall_end=$(now_time)
+        local test_elapsed=$(diff_durations "$test_wall_start" "$test_wall_end")
         TIMED_DURATION=$(sum_durations "$TIMED_DURATION" "$test_elapsed")
         TIMED_TESTS=$((TIMED_TESTS + 1))
     fi
