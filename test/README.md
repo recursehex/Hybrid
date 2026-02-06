@@ -18,7 +18,6 @@ Basic language features:
 - Comments
 - Brackets and grouping
 - Variable initialization
-- Module usage (use statements)
 
 ### `control_flow/`
 Control flow constructs:

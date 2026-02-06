@@ -170,6 +170,14 @@ void HandleUseStatement() {
   auto Use = ParseUseStatement();
   if (Use) {
     if (gInteractiveMode) fprintf(stderr, "Parsed a use statement: %s\n", Use->getModule().c_str());
+    if (auto UseIR = Use->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) {
+        fprintf(stderr, "Generated use statement IR:\n");
+        UseIR->print(llvm::errs());
+        fprintf(stderr, "\n");
+      }
+    }
   } else {
     // Skip token for error recovery.
     getNextToken();
