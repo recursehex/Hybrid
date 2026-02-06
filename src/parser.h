@@ -41,6 +41,7 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement();
 std::unique_ptr<BlockStmtAST> ParseBlock();
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef = false);
 std::unique_ptr<ForEachStmtAST> ParseForEachStatement();
+std::unique_ptr<StmtAST> ParseForStatement();
 std::unique_ptr<ForLoopStmtAST> ParseForLoopStatement();
 std::unique_ptr<UseStmtAST> ParseUseStatement();
 std::unique_ptr<IfStmtAST> ParseIfStatement();

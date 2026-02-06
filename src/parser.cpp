@@ -2922,26 +2922,18 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
     while (CurTok == tok_newline)
       getNextToken();
   }
-  
-  // Parse type
-  if (!IsBuiltInType()) {
-    LogError("Expected type after 'for'");
+
+  if (!IsValidType() && CurTok != '(') {
+    if (isRef)
+      LogError("Expected type after 'ref' in foreach loop");
+    else
+      LogError("Expected type after 'for'");
     return nullptr;
   }
-  
-  std::string Type = IdentifierStr;
-  getNextToken(); // eat type
-  
-  // Check for array type
-  if (CurTok == '[') {
-    getNextToken(); // eat [
-    if (CurTok != ']') {
-      LogError("Expected ']' after '[' in array type");
-      return nullptr;
-    }
-    getNextToken(); // eat ]
-    Type += "[]"; // Add array indicator to type
-  }
+
+  TypeInfo declInfo;
+  if (!ParseCompleteTypeInfo(declInfo, isRef))
+    return nullptr;
   
   // Parse variable name
   if (CurTok != tok_identifier) {
@@ -2974,8 +2966,6 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
     LogError("Expected block after foreach loop header");
     return nullptr;
   }
-
-  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
 
   return std::make_unique<ForEachStmtAST>(std::move(declInfo), VarName, std::move(Collection), std::move(Body));
 }
@@ -3462,10 +3452,6 @@ std::unique_ptr<CaseAST> ParseCase(bool isExpression) {
 
 /// Helper to determine which type of for loop and parse accordingly
 std::unique_ptr<StmtAST> ParseForStatement() {
-  // Save position to peek ahead
-  int savedTok = CurTok;
-  std::string savedIdentifier = IdentifierStr;
-  
   getNextToken(); // eat 'for'
   
   // Skip newlines after 'for'
@@ -3480,136 +3466,144 @@ std::unique_ptr<StmtAST> ParseForStatement() {
       getNextToken();
   }
 
-  // Check if it's a type or something else
-  bool hasType = IsBuiltInType();
-  if (!hasType && isRef) {
-    LogError("Expected type after 'ref' in foreach loop");
+  TypeInfo declInfo;
+  bool parsedTypeHeader = false;
+
+  if (isRef || IsBuiltInType() || CurTok == tok_unique || CurTok == tok_shared ||
+      CurTok == tok_weak) {
+    if (!ParseCompleteTypeInfo(declInfo, isRef))
+      return nullptr;
+    parsedTypeHeader = true;
+  } else if (CurTok == tok_identifier && IsValidType()) {
+    ParserContext parserBackup = currentParser();
+    LexerContext lexerBackup = currentLexer();
+
+    TypeInfo speculativeType;
+    if (ParseCompleteTypeInfo(speculativeType, false) && CurTok == tok_identifier) {
+      declInfo = std::move(speculativeType);
+      parsedTypeHeader = true;
+    } else {
+      currentParser() = parserBackup;
+      currentLexer() = lexerBackup;
+    }
+  }
+
+  if (isRef && !parsedTypeHeader) {
+    LogError("Expected type after 'ref' in for loop");
     return nullptr;
   }
-  
-  if (hasType) {
-    std::string type = IdentifierStr;
-    getNextToken(); // eat type
-    
-    // Check for array type
-    if (CurTok == '[') {
-      getNextToken(); // eat [
-      if (CurTok == ']') {
-        getNextToken(); // eat ]
-        type += "[]";
-      }
+
+  if (parsedTypeHeader) {
+    if (CurTok != tok_identifier) {
+      LogError("Expected identifier after type in for loop");
+      return nullptr;
     }
-    
-    // Check if it's an identifier
-    if (CurTok == tok_identifier) {
-      std::string varName = IdentifierStr;
-      getNextToken(); // eat identifier
-      
-      // Now check what comes next: 'in' for foreach, '=' for for-to
-      if (CurTok == tok_in) {
-        // Foreach loop, put tokens back and call ParseForEachStatement
-        // Since already consumed tokens, need to continue parsing here
-        getNextToken(); // eat 'in'
-        
-        // Parse collection expression
-        auto Collection = ParseExpression();
-        if (!Collection) {
-          LogError("Expected expression after 'in' in foreach loop");
-          return nullptr;
-        }
-        
-        // Parse body block
-        LoopNestingDepth++;
-        auto Body = ParseBlock();
-        LoopNestingDepth--;
-        if (!Body) {
-          LogError("Expected block after foreach loop header");
-          return nullptr;
-        }
 
-        TypeInfo declInfo = buildDeclaredTypeInfo(type, isRef);
-        return std::make_unique<ForEachStmtAST>(std::move(declInfo), varName,
-                                                std::move(Collection), std::move(Body));
-      } else if (CurTok == '=') {
-        if (isRef) {
-          LogError("ref is not supported for for-to loops");
-          return nullptr;
-        }
+    std::string type = typeNameFromInfo(declInfo);
+    std::string varName = IdentifierStr;
+    getNextToken(); // eat identifier
 
-        // It's a for-to loop, parse it
-        getNextToken(); // eat '='
-        
-        // Parse initialization expression
-        auto InitExpr = ParseExpression();
-        if (!InitExpr) {
-          LogError("Expected initialization expression after '=' in for loop");
-          return nullptr;
-        }
-        
-        // Expect 'to' keyword
-        if (CurTok != tok_to) {
-          LogError("Expected 'to' after initialization in for loop");
-          return nullptr;
-        }
-        getNextToken(); // eat 'to'
-        
-        // Check if next is the loop variable (for condition syntax)
-        std::unique_ptr<ExprAST> LimitExpr = nullptr;
-        std::unique_ptr<ExprAST> CondExpr = nullptr;
-        
-        if (CurTok == tok_identifier && IdentifierStr == varName) {
-          // This is a condition expression like "i < size"
-          // Parse the full condition expression
-          CondExpr = ParseExpression();
-          if (!CondExpr) {
-            LogError("Expected condition expression after 'to' in for loop");
-            return nullptr;
-          }
-        } else {
-          // This is a regular limit expression
-          LimitExpr = ParseExpression();
-          if (!LimitExpr) {
-            LogError("Expected limit expression after 'to' in for loop");
-            return nullptr;
-          }
-        }
-        
-        // Check for optional 'by' clause
-        std::unique_ptr<ExprAST> StepExpr = nullptr;
-        char StepOp = '+';  // Default to addition
-        if (CurTok == tok_by) {
-          getNextToken(); // eat 'by'
-          
-          // Check for optional operator (* / % -)
-          if (CurTok == '*' || CurTok == '/' || CurTok == '%' || CurTok == '-') {
-            StepOp = CurTok;
-            getNextToken(); // eat operator
-          }
-          
-          StepExpr = ParseExpression();
-          if (!StepExpr) {
-            LogError("Expected step expression after 'by' in for loop");
-            return nullptr;
-          }
-        }
-        
-        // Parse body block
-        LoopNestingDepth++;
-        auto Body = ParseBlock();
-        LoopNestingDepth--;
-        if (!Body) {
-          LogError("Expected block after for loop header");
-          return nullptr;
-        }
+    // Now check what comes next: 'in' for foreach, '=' for for-to
+    if (CurTok == tok_in) {
+      getNextToken(); // eat 'in'
 
-        return std::make_unique<ForLoopStmtAST>(type, varName, std::move(InitExpr),
-                                                 std::move(LimitExpr), std::move(Body),
-                                                 std::move(StepExpr), StepOp,
-                                                 std::move(CondExpr));
-      } else {
-        LogError("Expected 'in' or '=' after variable name in for loop");
+      // Parse collection expression
+      auto Collection = ParseExpression();
+      if (!Collection) {
+        LogError("Expected expression after 'in' in foreach loop");
         return nullptr;
       }
+
+      // Parse body block
+      LoopNestingDepth++;
+      auto Body = ParseBlock();
+      LoopNestingDepth--;
+      if (!Body) {
+        LogError("Expected block after foreach loop header");
+        return nullptr;
+      }
+
+      return std::make_unique<ForEachStmtAST>(std::move(declInfo), varName,
+                                              std::move(Collection), std::move(Body));
+    } else if (CurTok == '=') {
+      if (isRef) {
+        LogError("ref is not supported for for-to loops");
+        return nullptr;
+      }
+
+      // It's a for-to loop, parse it
+      getNextToken(); // eat '='
+
+      // Parse initialization expression
+      auto InitExpr = ParseExpression();
+      if (!InitExpr) {
+        LogError("Expected initialization expression after '=' in for loop");
+        return nullptr;
+      }
+
+      // Expect 'to' keyword
+      if (CurTok != tok_to) {
+        LogError("Expected 'to' after initialization in for loop");
+        return nullptr;
+      }
+      getNextToken(); // eat 'to'
+
+      // Check if next is the loop variable (for condition syntax)
+      std::unique_ptr<ExprAST> LimitExpr = nullptr;
+      std::unique_ptr<ExprAST> CondExpr = nullptr;
+
+      if (CurTok == tok_identifier && IdentifierStr == varName) {
+        // This is a condition expression like "i < size"
+        // Parse the full condition expression
+        CondExpr = ParseExpression();
+        if (!CondExpr) {
+          LogError("Expected condition expression after 'to' in for loop");
+          return nullptr;
+        }
+      } else {
+        // This is a regular limit expression
+        LimitExpr = ParseExpression();
+        if (!LimitExpr) {
+          LogError("Expected limit expression after 'to' in for loop");
+          return nullptr;
+        }
+      }
+
+      // Check for optional 'by' clause
+      std::unique_ptr<ExprAST> StepExpr = nullptr;
+      char StepOp = '+';  // Default to addition
+      if (CurTok == tok_by) {
+        getNextToken(); // eat 'by'
+
+        // Check for optional operator (* / % -)
+        if (CurTok == '*' || CurTok == '/' || CurTok == '%' || CurTok == '-') {
+          StepOp = CurTok;
+          getNextToken(); // eat operator
+        }
+
+        StepExpr = ParseExpression();
+        if (!StepExpr) {
+          LogError("Expected step expression after 'by' in for loop");
+          return nullptr;
+        }
+      }
+
+      // Parse body block
+      LoopNestingDepth++;
+      auto Body = ParseBlock();
+      LoopNestingDepth--;
+      if (!Body) {
+        LogError("Expected block after for loop header");
+        return nullptr;
+      }
+
+      return std::make_unique<ForLoopStmtAST>(type, varName, std::move(InitExpr),
+                                               std::move(LimitExpr), std::move(Body),
+                                               std::move(StepExpr), StepOp,
+                                               std::move(CondExpr));
+    } else {
+      LogError("Expected 'in' or '=' after variable name in for loop");
+      return nullptr;
     }
   }
   

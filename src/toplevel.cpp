@@ -99,11 +99,19 @@ void HandleVariableDeclaration() {
   }
 }
 
-void HandleForEachStatement() {
-  auto ForEach = ParseForEachStatement();
-  if (ForEach) {
-    ForEach->print();
+void HandleForStatement() {
+  if (auto ForAST = ParseForStatement()) {
+    if (gInteractiveMode) fprintf(stderr, "Parsed for statement successfully, generating code...\n");
+    if (auto ForIR = ForAST->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) fprintf(stderr, "Generated for statement IR:\n");
+      ForIR->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    } else {
+      reportCompilerError("Failed to generate IR for for statement");
+    }
   } else {
+    reportCompilerError("Failed to parse for statement");
     // Skip token for error recovery.
     getNextToken();
   }
@@ -288,7 +296,7 @@ void HandleSwitchStatement() {
 }
 
 
-/// top ::= definition | external | expression | variabledecl | foreachstmt | usestmt | ';' | '\n'
+/// top ::= definition | external | expression | variabledecl | forstmt | usestmt | ';' | '\n'
 void MainLoop() {
   while (true) {
     if (gInteractiveMode)
@@ -307,7 +315,7 @@ void MainLoop() {
       HandleUseStatement();
       break;
     case tok_for:
-      HandleForEachStatement();
+      HandleForStatement();
       break;
     case tok_if:
       HandleIfStatement();

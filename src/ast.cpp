@@ -982,8 +982,20 @@ static bool builderInTopLevelContext() {
 static void prepareTopLevelStatementContext() {
   llvm::Function *TopFunc = ensureTopLevelExecFunction();
   ensureSyntheticMainCalls(TopFunc);
+
+  // Nested control-flow inside an active top-level statement should preserve
+  // current insertion and local bindings (e.g., loop variables).
   if (Builder && Builder->GetInsertBlock() &&
-      Builder->GetInsertBlock()->getParent() == TopFunc) {
+      Builder->GetInsertBlock()->getParent() == TopFunc &&
+      TopLevelInsertBlock &&
+      Builder->GetInsertBlock() != TopLevelInsertBlock) {
+    return;
+  }
+
+  if (Builder && Builder->GetInsertBlock() &&
+      Builder->GetInsertBlock()->getParent() == TopFunc &&
+      (!TopLevelInsertBlock ||
+       Builder->GetInsertBlock() == TopLevelInsertBlock)) {
     TopLevelInsertBlock = Builder->GetInsertBlock();
   }
   if (!TopLevelInsertBlock || TopLevelInsertBlock->getParent() != TopFunc) {
@@ -20099,6 +20111,9 @@ llvm::Value *AccessorBodyStmtAST::codegen() {
 
 // Generate code for for each statements
 llvm::Value *ForEachStmtAST::codegen() {
+  if (builderInTopLevelContext())
+    prepareTopLevelStatementContext();
+
   // Get the element type from the foreach declaration
   const std::string &TypeName = getTypeName();
   llvm::Type *ElemType = getTypeFromString(TypeName);
@@ -20470,6 +20485,9 @@ inferLoopDirectionFromCondition(const ExprAST *expr,
 
 // Generate code for for loops with 'to' syntax
 llvm::Value *ForLoopStmtAST::codegen() {
+  if (builderInTopLevelContext())
+    prepareTopLevelStatementContext();
+
   // Evaluate the initial value
   llvm::Value *InitVal = InitExpr->codegen();
   if (!InitVal)
