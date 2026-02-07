@@ -17,7 +17,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
 
       - name: Run ARC ASan Suites
         run: ./scripts/run_arc_asan.sh
@@ -31,7 +31,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 valgrind
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 valgrind libc++-dev libc++abi-dev
 
       - name: Run ARC Valgrind Suites
         run: ./scripts/run_arc_valgrind.sh

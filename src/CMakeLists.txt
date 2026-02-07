@@ -67,8 +67,14 @@ target_compile_definitions(hybrid PRIVATE
     HYBRID_RUNTIME_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include"
     HYBRID_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
-# Link LLVM libraries
-target_link_libraries(hybrid PRIVATE ${llvm_libs} c++)
+# Link LLVM libraries.
+# Only force libc++ on Apple toolchains; on Linux, let the selected C++ compiler
+# link its default standard library (typically libstdc++).
+if(APPLE)
+    target_link_libraries(hybrid PRIVATE ${llvm_libs} c++)
+else()
+    target_link_libraries(hybrid PRIVATE ${llvm_libs})
+endif()
 
 # Set compile options
 target_compile_options(hybrid PRIVATE
