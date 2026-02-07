@@ -11,6 +11,7 @@
 // LLVM includes for code generation
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -3214,10 +3215,13 @@ emitArrayBoundsInfo(const std::vector<std::unique_ptr<ExprAST>> &bounds,
   llvm::Type *sizeTy = getSizeType();
   llvm::Value *total = llvm::ConstantInt::get(sizeTy, 1);
   llvm::Value *overflowFlag = nullptr;
-  llvm::FunctionCallee mulWithOverflow =
-      llvm::Intrinsic::getOrInsertDeclaration(TheModule.get(),
-                                              llvm::Intrinsic::umul_with_overflow,
-                                              {sizeTy});
+#if LLVM_VERSION_MAJOR >= 21
+  auto mulWithOverflow = llvm::Intrinsic::getOrInsertDeclaration(
+      TheModule.get(), llvm::Intrinsic::umul_with_overflow, {sizeTy});
+#else
+  auto mulWithOverflow = llvm::Intrinsic::getDeclaration(
+      TheModule.get(), llvm::Intrinsic::umul_with_overflow, {sizeTy});
+#endif
 
   for (llvm::Value *dim32 : info.dims32) {
     llvm::Value *dimSize =
