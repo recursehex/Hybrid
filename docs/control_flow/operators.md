@@ -59,7 +59,7 @@ Boolean operators have the following precedence (lowest to highest):
 
 Assignments cannot be used as conditions in control flow statements. This prevents common bugs where assignment (`=`) is mistakenly used instead of comparison (`==`):
 
-```c
+```cpp
 // Compilation error - assignment in if condition
 if x = 0 {
     print("This won't compile")

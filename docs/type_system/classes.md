@@ -1,8 +1,8 @@
 # Classes
 
-Hybrid supports classes that extend the struct model with member functions (methods), access modifiers, and formatter support for full object-oriented programming. Unlike structs, which are restricted to only member variables and constructors, classes allow you to define instance methods, static methods, and properties to create rich, encapsulated types. Classes continue to use value semantics by default, but add rules around initialization and visibility that mirror familiar behaviour while enforcing safer guarantees.
+Hybrid supports classes that extend the struct model with member functions (methods), access modifiers, and formatter support for full object-oriented programming. Unlike structs, which are restricted to only member variables and constructors, classes allow you to define instance methods, static methods, and properties to create complex, encapsulated types.
 
-**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities. Because member variables do not receive implicit default values, every class must include at least one constructor (empty or otherwise) so instances can initialize their state. Classes may define multiple constructors, but each one must leave every instance field initialized before returning.
+**Key distinction**: Use `struct` for simple data containers with fields and a constructor. Use `class` when you need methods, access control, static members, and full OOP capabilities.
 
 ## Quick Example
 
@@ -19,7 +19,7 @@ class Door
         this.maxOpens = maxOpens
         this.knocks = 0
         this.opens = 0
-        Door.created++  // allowed: static field was initialized at declaration
+        Door.created++
     }
 
     void Knock()
@@ -33,21 +33,133 @@ class Door
 }
 ```
 
+## Properties and Indexers
+
+Properties expose field access through `get` and `set` accessors. The setter
+receives an implicit `value` parameter that is only valid inside the setter
+body. Accessing `obj.prop` calls the getter, and assigning `obj.prop = rhs`
+invokes the setter (compound assignments call getter + setter).
+Properties and indexers that declare a setter default to public read/write
+access, so `public` is optional. Declaring a property as `private` or
+`protected` is rejected because it would block the accessors.
+
+Indexers provide array-like access via `this[...]` and are always instance
+members. `obj[index]` uses the indexer when present; otherwise it falls back to
+native array indexing.
+Indexers may omit `set` for read-only access; indexers that declare a setter
+must also declare a getter.
+
+```cs
+class IntList
+{
+    private int[] items
+
+    int count
+    {
+        get items.size
+    }
+
+    int this[int index]
+    {
+        get items[index]
+        set items[index] = value
+    }
+
+    IntList(int size)
+    {
+        this.items = new int[size]
+    }
+}
+```
+
 ## Value Semantics and Construction
 
 - Class instances follow the same value semantics as structs. `Door d = Door(2)` allocates storage in the surrounding scope.
 - Classes must declare at least one constructor. If you want default construction, explicitly declare an empty constructor; omitting constructors entirely is a compile-time error because members have no default values.
 - All non-`static` members must be assigned in *every* constructor before the constructor returns. The compiler tracks constructor assignments so it can emit diagnostics when a member is skipped.
 - You may omit the type name when calling a constructor in a variable initializer: writing `Door front = (2)` is equivalent to `Door front = Door(2)` and uses the matching class constructor.
+- This shorthand also works for other target-typed contexts:
+  - Arrays: `Widget[] items = [(5), (6)]` calls the `Widget(int)` constructor for each element.
+  - Strings: ``string label = $"Value: `(rect)`"`` or `print(rect)` will call `string this()` when present.
+  - Smart pointers: `shared<Widget> primary = #5` builds the payload with `Widget(5)` and wraps it in a `shared<Widget>`; the same applies to `unique<T>`. For `weak<T>`, the shorthand expects a `shared<T>` value, e.g. `weak<Widget> watcher = #sharedOwner`.
+
+> [!IMPORTANT]
+> The compiler never synthesizes constructors for classes. Declare at least one and initialize every instance member inside each overload, or construction fails with "cannot assign uninitialized member" diagnostics.
 
 ```cs
-Door front = (2)    // shorthand for Door front = Door(2)
-Door copy = (front) // invokes the copy constructor when available
+Door front = (2)            // shorthand for Door front = Door(2)
+Door copy = (front)         // invokes the copy constructor when available
+shared<Door> refDoor = #2   // payload constructed via Door(int)
 ```
+
+### Default Parameters and Named Arguments
+
+- Constructors and methods may declare trailing default parameter values. Defaults must be compile-time constants, cannot appear on `ref` parameters, and once one parameter has a default all following parameters must as well.
+- Overrides and redeclarations must keep those default values identical to the original signature; changing or omitting a default is rejected.
+- Calls can supply arguments by name; positional arguments must come first and the remaining arguments must be named. Named arguments let you override a later default without providing earlier ones.
+
+```cs
+class Logger
+{
+    bool appendNewline
+
+    Logger(bool appendNewline = true)
+    {
+        this.appendNewline = appendNewline
+    }
+}
+
+Logger loud = Logger()                     // uses default
+Logger quiet = Logger(appendNewline=false) // named argument skips earlier defaults
+```
+
+## Smart Pointers and ARC Helpers
+
+- ARC already frees class and struct instances when they leave scope; the smart pointer wrappers are optional conveniences for sharing, exclusivity, and weak observation.
+- Helper builders: `make_unique<T>(args...)`, `make_shared<T>(args...)`, `weak_from_shared<T>(shared<T>)`, and `shared<T>.weak()` construct the payload (or reuse an existing shared handle) and wire the appropriate retain/release or weak control block plumbing.
+- Accessors: `@ptr` yields the payload value for smart pointers (e.g. `@owner == 5` for `shared<int>`). `ptr->member` works only for smart pointers in safe code; raw pointers still require `unsafe` and explicit dereference.
+- Construction shorthand: use `#payload` to build smart pointers from a target type. It accepts payload constructors (`shared<Foo> handle = #5` calls `Foo(int)`), and `weak<T>` expects a `shared<T>` payload (`weak<Foo> watcher = #handle`).
+- Smart pointers and raw references point to the same ARC-managed allocations, so you can pass either to APIs without special conversion functions; pick the wrapper only when you need its ownership semantics.
+- Target-typed `new(...)` also works with smart pointer destinations, constructing the payload from the wrapper’s generic type before wiring the control block; `weak<T>` still expects a `shared<T>` payload.
+- Disabling ARC lowering (`--arc-enabled=false`) keeps these helpers available but they degrade to type-correct stubs: `arcUseCount()` reports `0` and `weak.lock()` returns an empty handle so ARC-on vs ARC-off comparisons do not require source changes.
+
+### Construction syntax
+
+- `#payload` wraps an existing value or builds one with constructor arguments: `shared<int> a = #42`, `unique<Gadget> g = #(1, 2)`.
+- Target-typed payload construction also works without `#`: `shared<WatchTarget> owner = (30)` or `unique<Resource> r = (1)`.
+- `new(...)` can target the wrapper type to build and wrap in one step: `shared<int> n = new(11)` or `shared<int> explicitN = new shared<int>(3)`.
+- Weak handles come from a `shared<T>` owner (`weak<Foo> w = #owner`, `owner.weak()`, or `weak_from_shared(owner)`) and can be cleared with `()` / `#()`; locking an empty weak yields a zero-count `shared<T>`.
+
+### Avoiding reference cycles
+
+- Mark back references `weak<T>` whenever the forward edge holds a strong owner (parent/child trees, UI hierarchies, cache entries) so ARC can reclaim both sides.
+- Observer lists should keep `weak<T>` handles and lock them when dispatching to avoid resurrecting already-destroyed listeners.
+
+```cs
+class Widget
+{
+    shared<Widget>[] children
+    weak<Widget> parent
+
+    Widget(shared<Widget> parent)
+    {
+        this.parent = parent
+        this.children = []
+    }
+}
+```
+
+## Heap Allocation with `new` and `free`
+
+- `new ClassName(args)` allocates a heap instance, runs the class constructor, and returns a strong ARC-managed reference. The type can be inferred from the assignment target using `new(args)`.
+- `new StructName(args)` works the same way for structs when you want a heap-backed instance instead of stack storage.
+- Polymorphic construction is supported: `Shape s = new Rectangle(2, 4)` calls the `Rectangle` constructor while producing a base-typed reference with the correct vtable/descriptor metadata.
+- Manual release is optional. `free instance` schedules an explicit ARC release; destructors still run automatically when the last strong reference is lost.
+- `free` is rejected for stack values, smart pointers, and other non-ARC-managed types.
 
 ## Member Initialization Rules
 
-Hybrid now tracks whether a member has been initialized before allowing mutations.
+Hybrid tracks whether a member has been initialized before allowing mutations.
 
 | Scenario | Requirement | Diagnostic |
 | --- | --- | --- |
@@ -106,7 +218,7 @@ class Ticker
 
 ## Access Modifiers and Mutability
 
-- Members are **read-only outside the class** unless explicitly marked `public`. This behaviour is identical to structs and is documented in detail in [`docs/access_modifiers.md`](access_modifiers.md).
+- Members are **read-only outside the class** unless explicitly marked `public`.
 - `public`, `private`, and `protected` control read/write visibility. For example, `public int opens` allows external code both to read and assign.
 - `const` members may only be assigned in constructors (or at the declaration site for statics). Any later mutation produces `Cannot write to const member ...`.
 
@@ -173,24 +285,24 @@ class Ticker
 
       string this()
       {
-          return $"radius = {this.radius}, location = {this.location}"
+          return $"radius = `this.radius`, location = `this.location`"
       }
   }
   ```
 
-## Diagnostics Summary
+## Destructors and `free`
 
-- **Uninitialized member mutation** - triggered when incrementing/assigning a member that has not been initialized yet. Generated for both static and instance fields.
-- **Const mutation** - writes outside constructors (or inline initializers) for `const` fields continue to emit `Cannot write to const member ...`.
-- The existing access-control diagnostics (`read-only outside definition`, `Cannot call private member`, etc.) remain unchanged.
-
-These rules keep classes aligned with the modern expectations of type and memory safety. Static fields require initialization before use, and instance fields must be handled in every constructor, but Hybrid strengthens them with explicit compiler tracking so that mistakes surface immediately rather than resulting in default-initialized values at runtime.
+- Declare a single destructor per type with `~TypeName() { ... }`; parameters, generics, return types, `static`, and `abstract` are rejected.
+- ARC runs destructors automatically when the last strong reference is released, including when a `shared<T>` control block drops to zero and when scope teardown releases locals.
+- Class destructors are always virtual: dispatch goes through the vtable slot stored in the runtime type descriptor, so `Base b = new Derived(); free b` (or any base reference going out of scope) invokes the derived destructor. This is intentional parity with best practices in C++ while removing the "forgot to mark it virtual" footgun. Struct destructors remain non-virtual as structs do not support inheritance.
+- Manual calls (`value.~TypeName()`) retain and release around the call; they require a strong, non-smart-pointer receiver and must not be repeated on the same value.
+- `free expr` lowers to the same ARC release path that triggers destructors; freeing smart pointer handles or non-ARC/stack values is diagnosed, and mixes of `free` plus manual destructor calls surface as double releases.
 
 ## Inheritance
 
-Classes participate in single inheritance and interface implementation. The language enforces the following rules:
+Classes support single inheritance and multi-interface implementation. The language enforces the following rules:
 
-- A class may inherit from **one** base class and implement zero or more interfaces using the `inherits` clause: `class Player inherits Entity, Drawable`.
+- A class may inherit from at most one base class and implement zero or more interfaces using the `inherits` clause: `class Player inherits Entity, Drawable`.
 - Interfaces are pure contracts. They cannot declare fields or constructors and every member is implicitly abstract.
 - Classes that declare an interface must implement all of its members. Implementations may be inherited from the base class; otherwise the derived class must provide an override.
 - Use `virtual` on base class members that may be customised and `override` in derived classes. Attempting to override a non-virtual member produces a diagnostic.
@@ -246,7 +358,7 @@ Attempting to omit an interface member or forget to override an abstract base me
 
 ## Generics
 
-Classes, interfaces, and functions can declare generic type parameters without any compiler switches-the feature is always enabled. You currently **must** provide explicit type arguments because type inference is not yet implemented. The parser performs context-sensitive lookahead so that nested templates such as `Box<List<int>>` and expressions like `left < right >> 1` coexist.
+Classes, interfaces, and functions can declare generic type parameters. You must provide explicit type arguments because type inference is not supported.
 
 ```cs
 class Box<T>
@@ -342,7 +454,7 @@ class Button inherits Widget, Clickable, Accessible
 - Only classes may specify a base class. Interfaces may extend other interfaces but cannot derive from classes.
 - If the first type resolves to an interface, the compiler treats the class as having no base class and adds that type to the interface list.
 - Inheritance cycles (direct or indirect) produce a diagnostic.
-- Derived constructors automatically receive `this` pointing at the derived storage. Use the usual initializer logic as there is no implicit base constructor chaining yet, so call helpers via `base` if needed.
+- Derived constructors automatically receive `this` pointing at the derived storage. If the base class exposes a parameterless constructor it runs automatically; otherwise call it explicitly inside the constructor body with `base(...)`.
 
 ### Interfaces as contracts
 

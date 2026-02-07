@@ -33,7 +33,7 @@ Operators are evaluated according to precedence rules (higher numbers bind tight
 | 40 | `*`, `/`, `%` | Multiplication | Left-to-right |
 | 20 | `+`, `-` | Addition | Left-to-right |
 | 15 | `<<`, `>>` | Bitwise shift | Left-to-right |
-| 10 | `<`, `>`, `<=`, `>=`, `==`, `!=` | Comparison | Left-to-right |
+| 10 | `<`, `>`, `<=`, `>=`, `==`, `!=`, `is`, `is not` | Comparison | Left-to-right |
 | 9 | `&` | Bitwise AND | Left-to-right |
 | 8 | `^` | Bitwise XOR | Left-to-right |
 | 7 | `\|` | Bitwise OR  | Left-to-right |
@@ -209,6 +209,49 @@ bool test2 = 42 == value    // Literal on left
 ```
 
 This eliminates the need for explicit casts like `b == byte: 100` in most cases. See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for details.
+
+## Type Check Operators
+
+Hybrid provides runtime type checks for conditional expressions:
+
+- `is` returns `true` when the left-hand value matches the right-hand type.
+- `is not` inverts the result.
+
+Type checks are only valid inside `if`/`while` conditions and ternary conditions.
+
+```c
+if pet is Animal
+{
+    // type matches
+}
+
+if pet is not Tree
+{
+    // type does not match
+}
+
+while node is not null
+{
+    // loop until null
+}
+
+Animal fallback = pet if pet is Animal else new()
+```
+
+### Pattern Binding
+
+Type checks can introduce a binding when the match succeeds:
+
+```c
+if pet is Dog dog
+{
+    print(dog.Id())
+}
+```
+
+The binding is available in the branch where the type check succeeds (`then` for `is`, `else` for `is not`).
+
+> C#-style `as` is not supported. Use explicit casts (`Type: expr`) or constructors instead.
 
 ## Boolean Operators
 
@@ -671,6 +714,36 @@ int sum = calculateSum(array)
 int value = process(transform(getData()))
 ```
 
+## Tuple Literals
+
+Tuple literals use parentheses with commas and must contain at least two elements:
+
+```cs
+(int, string) pair = (8, "hello")
+((int, int), string) point = ((1, 2), "origin")
+```
+
+Single-element parentheses remain a grouping expression: `(expr)` does not create a tuple.
+
+## Tuple Access
+
+Tuple indexing uses a zero-based, compile-time integer literal:
+
+```cs
+(int, string) pair = (2, "hi")
+int first = pair[0]
+string second = pair[1]
+```
+
+Named tuple elements are accessed with dot syntax:
+
+```cs
+(int count, string greeting) message = (2, "hi")
+int c = message.count
+```
+
+Tuple elements are mutable, so assignments like `pair[0] = 3` or `message.count = 5` update the tuple value in place.
+
 ## Array Indexing
 
 Array indexing expressions access array elements:
@@ -918,7 +991,7 @@ sbyte sb = -128                 // OK - minimum sbyte value
 // Invalid assignments - caught at compile time
 byte bad1 = 256                 // Error: 256 exceeds byte range [0-255]
 sbyte bad2 = 128                // Error: 128 exceeds sbyte range [-128-127]
-short bad3 = 100000             // Error: 100000 exceeds short range
+short bad3 = 100000             // Error: 100000 exceeds short range [-32768-32767]
 ```
 
 ### Limitations

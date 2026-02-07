@@ -1,3 +1,5 @@
+// This file implements compiler session management, wiring per-thread lexer, parser, and codegen state.
+
 #include "compiler_session.h"
 
 #include <cctype>
@@ -6,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "analysis/semantics.h"
 #include "codegen_context.h"
 #include "lexer.h"
 #include "parser.h"
@@ -121,11 +124,14 @@ SourceLocation LexerContext::lastCharLocation() const {
 
 static SourceLocation bestErrorLocation() {
   ParserContext &parser = currentParser();
+  SourceLocation lexerLoc = currentLexer().tokenStart();
+  if (lexerLoc.isValid())
+    return lexerLoc;
   if (parser.currentTokenLocation.isValid())
     return parser.currentTokenLocation;
   if (parser.previousTokenLocation.isValid())
     return parser.previousTokenLocation;
-  return currentLexer().tokenStart();
+  return {};
 }
 
 std::string describeTokenForDiagnostics(int token) {
@@ -148,6 +154,10 @@ std::string describeTokenForDiagnostics(int token) {
       if (!lex.identifierStr.empty())
         return "identifier '" + lex.identifierStr + "'";
       return "identifier";
+    case tok_tilde_identifier:
+      if (!lex.identifierStr.empty())
+        return "destructor name '~" + lex.identifierStr + "'";
+      return "destructor name";
     case tok_number:
       return "numeric literal '" + lex.numericLiteral.getSpelling() + "'";
     case tok_string_literal:
@@ -166,6 +176,8 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("extern");
     case tok_return:
       return makeKeyword("return");
+    case tok_delegate:
+      return makeKeyword("delegate");
     case tok_for:
       return makeKeyword("for");
     case tok_in:
@@ -176,6 +188,10 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("by");
     case tok_if:
       return makeKeyword("if");
+    case tok_is:
+      return makeKeyword("is");
+    case tok_not_kw:
+      return makeKeyword("not");
     case tok_else:
       return makeKeyword("else");
     case tok_while:
@@ -226,6 +242,8 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("float");
     case tok_double:
       return makeKeyword("double");
+    case tok_decimal:
+      return makeKeyword("decimal");
     case tok_char:
       return makeKeyword("char");
     case tok_void:
@@ -256,6 +274,26 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("unsafe");
     case tok_ref:
       return makeKeyword("ref");
+    case tok_params:
+      return makeKeyword("params");
+    case tok_get:
+      return makeKeyword("get");
+    case tok_set:
+      return makeKeyword("set");
+    case tok_value:
+      return makeKeyword("value");
+    case tok_weak:
+      return makeKeyword("weak");
+    case tok_unique:
+      return makeKeyword("unique");
+    case tok_shared:
+      return makeKeyword("shared");
+    case tok_autoreleasepool:
+      return makeKeyword("@autoreleasepool");
+    case tok_new:
+      return makeKeyword("new");
+    case tok_free:
+      return makeKeyword("free");
     case tok_lambda:
       return makeOperator("=>");
     case tok_eq:
@@ -412,10 +450,14 @@ void ParserContext::reset(bool clearSymbols) {
   genericParameterStack.clear();
   activeGenericParameters.clear();
   templateAngleDepth = 0;
+  allowValueIdentifier = false;
+  allowTypeCheck = false;
   if (clearSymbols)
     structNames.clear();
   if (clearSymbols)
     classNames.clear();
+  if (clearSymbols)
+    delegateNames.clear();
 }
 
 void ParserContext::clearPrecedence() {
@@ -475,6 +517,11 @@ CodegenContext &CompilerSession::codegen() {
     codegenState = std::make_unique<CodegenContext>();
   return *codegenState;
 }
+analysis::SemanticAnalysis &CompilerSession::analysis() {
+  if (!analysisState)
+    analysisState = std::make_unique<analysis::SemanticAnalysis>();
+  return *analysisState;
+}
 
 void CompilerSession::resetParser() {
   parserState.reset();
@@ -487,11 +534,15 @@ void CompilerSession::resetAll() {
   parserState.clearPrecedence();
   if (codegenState)
     codegenState->reset();
+  if (analysisState)
+    analysisState->reset();
 }
 
 void CompilerSession::beginUnit(bool preserveSymbols) {
   lexerState.reset();
   parserState.reset(!preserveSymbols);
+  if (analysisState)
+    analysisState->reset();
 }
 
 // Session stack helpers --------------------------------------------------------
@@ -524,4 +575,8 @@ ParserContext &currentParser() {
 
 CodegenContext &currentCodegen() {
   return currentCompilerSession().codegen();
+}
+
+analysis::SemanticAnalysis &currentAnalysis() {
+  return currentCompilerSession().analysis();
 }

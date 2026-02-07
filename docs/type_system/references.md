@@ -58,13 +58,21 @@ increment(ref x)  // x is now 6
 ### Function Return Types
 
 ```cs
-// Function returning a ref
-ref int getRef()
+// Return a ref that aliases caller-owned storage
+ref int pickLarger(ref int left, ref int right)
 {
-    int localVar = 42
-    return ref localVar
+    if (left > right) return ref left
+    return ref right
 }
+
+int a = 5
+int b = 10
+ref int biggest = pickLarger(ref a, ref b)
+biggest = 42  // Mutates b, because pickLarger returned ref b
 ```
+
+> [!WARNING]
+> Do not return a reference to a stack-local or temporary. The compiler rejects escaping refs that would dangle. Instead, return a value or store it in longer-lived storage first (e.g. a global, static, or caller-provided ref).
 
 ## Use Cases
 
@@ -333,6 +341,19 @@ float f = 3.14
 func(ref f)  // ERROR: Type mismatch
 ```
 
+## Ref Rebinding
+
+Rebinding a `ref` variable requires the `ref` keyword on the right-hand side.
+Without it, assignment writes through the existing binding.
+```cs
+int a = 10
+int b = 20
+ref int x = ref a
+x = 15       // Writes to a
+x = ref b    // Rebinds x to b
+x = 25       // Writes to b
+```
+
 ## Restrictions
 
 1. **No ref to temporaries**: Cannot create refs to literal values
@@ -341,15 +362,7 @@ func(ref f)  // ERROR: Type mismatch
    ref int y = ref 10  // Not allowed - 10 is not a variable
    ```
 
-2. **No ref reassignment**: Once a ref is linked, it cannot be relinked
-   ```cs
-   int a = 10
-   int b = 20
-   int x = ref a
-   x = ref b  // This assigns b's value to a, doesn't relink x
-   ```
-
-3. **Function scope**: Returning ref to local variables is unsafe (like C++)
+2. **Function scope**: Returning ref to local variables is disallowed
    ```cs
    ref int getRef()
    {
@@ -357,3 +370,4 @@ func(ref f)  // ERROR: Type mismatch
        return ref local  // Dangerous - local goes out of scope
    }
    ```
+   The compiler rejects this pattern with a clear diagnostic. Return a value copy or a reference to caller-owned/storage with a longer lifetime instead.

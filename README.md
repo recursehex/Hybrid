@@ -135,6 +135,7 @@ Run a program:
 ./run_tests.sh
 ./run_tests.sh multi_unit   # Only the multi-file directory tests
 ./run_tests.sh -v           # Verbose mode
+./run_tests.sh -j 4         # Parallel single-file tests (compact mode)
 ```
 
 #### Windows
@@ -195,131 +196,26 @@ Hybrid/
 └── run_tests.bat       # Windows test runner
 ```
 
-## Current Status
-
-**Implemented**
-- Complete lexer and parser
-- AST construction
-- LLVM code generation
-- Function definitions and calls
-- All primitive types and arrays
-- Mulitidimensional and jagged arrays
-- Multiline literals (arrays, function arguments, constructor calls)
-- Rich numeric literal formats (`0b`, `0o`, `0x`, scientific notation)
-- If-else statements
-- While loops
-- For loops with advanced features:
-  - Basic `for int i = 1 to 10` syntax with automatic increment/decrement
-  - Anonymous loops `for 0 to 10` without variable declarations
-  - Custom steps with `by` keyword: `by 2`, `by -3`, `by * 2`, `by / 2`
-  - Exclusive bounds: `for int i = 0 to i < size`
-  - Full float/double support: `for float f = 0.0 to 1.0 by 0.1`
-  - Complex conditions and nested loops
-- Foreach loops
-- Expression evaluation
-- Global and local variables
-- External function declarations
-- Bitwise operators and compound assignments (`&`, `|`, `^`, `<<`, `>>`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
-- Increment/decrement operators (`++`, `--`) - both prefix and postfix
-- Multiple sizes for integers and characters
-    - `byte` - 8 bit unsigned integer
-    - `short` - 16 bit signed integer
-    - `long` - 64 bit signed integer
-    - `schar` - 8 bit character
-    - `lchar` - 32 bit Unicode character
-- Unsigned versions of integer types
-    - `sbyte` - 8 bit signed (`byte` is unsigned)
-    - `ushort` - 16 bit unsigned
-    - `uint` - 32 bit unsigned
-    - `ulong` - 64 bit unsigned
-- Structures
-    - `struct` - supports fields and constructors
-    - `class` - supports methods and inheritance
-- Inheritance
-    - `inherits`
-    - `abstract`
-    - `interface`
-    - `base`
-    - `virtual`
-    - `override`
-- Access modifiers
-    - `public`
-    - `private`
-    - `protected`
-    - `static`
-    - `const`
-- Switch statements and expressions
-    - Block-style switch statements: `switch num { case 1 { ... } default { ... } }`
-    - Arrow-syntax switch expressions: `switch letter { 'a' => "Alpha" default => "Unknown" }`
-    - Multiple case values: `case 1, 2 => 10`
-    - Full LLVM optimization with native switch instructions
-- Ternary operator with Python-style syntax
-    - Conditional expressions: `value_if_true if condition else value_if_false`
-    - Examples: `int max = a if a > b else b`, `return n if n >= 0 else -n`
-    - Automatic type promotion: `double mixed = 3.14 if false else 42`
-    - Right-associative with proper precedence handling
-- Pointer operators
-    - `@` - pointer operator and dereference operator
-    - `#` - address operator
-    - `->` - member access through pointer
-    - `unsafe` - pointers can only be used within these blocks
-- Reference types
-    - `ref type`
-- Assert statement
-    - `assert num == 42`
-- String interpolation
-    - ```$"Hello, `name`!"```
-- Nullable types
-    - `type?`
-- Nullity operators
-    - `?.`
-    - `?[]`
-    - `??`
-    - `??=`
-- Generics
-    - `class Box<T> { ... }` - generic classes
-    - `void Assign<T>(ref T target, T value)` - generic functions
-    - Explicit invocations such as `Box<int>` and `Assign<int>(ref target, 7)`
-
-**Planned Features**
-- Stuctures
-    - `enum`
-    - `namespace`
-- Heap allocation keywords
-    - `new`
-    - `free`
-- 128 bit base 10 floating point type
-    - `decimal`
-- Smart pointers
-    - `unique`
-    - `shared`
-    - `weak`
-- Tuples
-    - `(type1, type2) var`
-- Type checking
-    - `is`
-    - `not`
-- Reflection keywords
-    - `typeof`
-    - `nameof`
-    - `sizeof`
-- Exception statements
-    - `try`
-    - `catch`
-    - `throw`
-    - `finally`
-- Properties
-    - `type var {}`
-    - `get`
-    - `set`
-    - `value`
-- Delegates
-    - `delegate` - function pointer type
-
-
 ## Contributing
 
-Contributions are welcome! Please ensure all tests pass and add tests for new features.
+Contributions are welcome! To keep reviews fast and regressions low, please follow the workflow below.
+
+### Workflow
+- Create a focused branch and keep changes scoped to one feature or fix.
+- Build after any source change: `./build.sh` (use `./build.sh -c` for a clean configure) or `build.bat` (`build.bat -c` for clean).
+- Run tests: `./run_tests.sh` (add `-v` for verbose output) or `run_tests.bat` (`run_tests.bat -v`).
+- Run a single test with `./run_tests.sh test_name` (name without `.hy`) or `run_tests.bat test_name`.
+- Add or update documentation in `docs/` when behavior changes.
+
+### Tests and Diagnostics
+- Add new tests under `test/` using `.hy` files; prefer minimal programs.
+- For expected failures, use files with `fail`/`error` suffixes and include the diagnostic text.
+- When adding new diagnostics, route them through `reportCompilerError()` / `LogError*` and ensure tokens have useful names in `describeTokenForDiagnostics()`.
+
+### Pull Request Checklist
+- Tests pass locally (`./run_tests.sh` or `run_tests.bat`).
+- New behavior is covered by tests in `test/`.
+- Docs updated in `docs/` where relevant.
 
 ## License
 

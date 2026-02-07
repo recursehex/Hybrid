@@ -1,0 +1,37 @@
+name: ARC Guardrails
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - std-arc
+
+jobs:
+  arc-asan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
+
+      - name: Run ARC ASan Suites
+        run: ./scripts/run_arc_asan.sh
+
+  arc-valgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 valgrind libc++-dev libc++abi-dev
+
+      - name: Run ARC Valgrind Suites
+        run: ./scripts/run_arc_valgrind.sh

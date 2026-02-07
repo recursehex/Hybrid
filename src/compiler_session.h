@@ -14,13 +14,7 @@
 
 #include "numeric_literal.h"
 #include "codegen_context.h"
-
-struct SourceLocation {
-  std::size_t line = 0;
-  std::size_t column = 0;
-
-  constexpr bool isValid() const noexcept { return line != 0; }
-};
+#include "analysis/semantics.h"
 
 /// LexerContext holds all mutable lexer state for a compilation unit.
 struct LexerContext {
@@ -76,6 +70,7 @@ struct ParserContext {
   std::set<std::string> structNames;
   std::vector<std::string> structDefinitionStack;
   std::set<std::string> classNames;
+  std::set<std::string> delegateNames;
   std::vector<std::string> classDefinitionStack;
   int loopNestingDepth = 0;
   int unsafeContextLevel = 0;
@@ -95,6 +90,8 @@ struct ParserContext {
   std::vector<std::vector<std::string>> genericParameterStack;
   std::set<std::string> activeGenericParameters;
   int templateAngleDepth = 0;
+  bool allowValueIdentifier = false;
+  bool allowTypeCheck = false;
 
   void reset(bool clearSymbols = true);
   void clearPrecedence();
@@ -117,6 +114,7 @@ public:
   LexerContext &lexer();
   ParserContext &parser();
   CodegenContext &codegen();
+  analysis::SemanticAnalysis &analysis();
 
   void resetParser();
   void resetAll();
@@ -126,6 +124,7 @@ private:
   LexerContext lexerState;
   ParserContext parserState;
   std::unique_ptr<CodegenContext> codegenState;
+  std::unique_ptr<analysis::SemanticAnalysis> analysisState;
 };
 
 /// Session stack management -------------------------------------------------
@@ -138,6 +137,7 @@ bool hasCompilerSession();
 LexerContext &currentLexer();
 ParserContext &currentParser();
 CodegenContext &currentCodegen();
+analysis::SemanticAnalysis &currentAnalysis();
 
 std::string describeTokenForDiagnostics(int token);
 void reportCompilerError(const std::string &message, std::string_view hint = {});

@@ -14,6 +14,7 @@ Hybrid types map directly to LLVM types:
 | `sbyte` | `i8` | 8-bit signed integer |
 | `float` | `float` | 32-bit IEEE float |
 | `double` | `double` | 64-bit IEEE float |
+| `decimal` | `{i64, i64}` | 128-bit decimal payload; arithmetic lowered to runtime calls |
 | `char` | `i16` | 16-bit Unicode character |
 | `schar` | `i8` | 8-bit signed character |
 | `lchar` | `i32` | 32-bit Unicode character |

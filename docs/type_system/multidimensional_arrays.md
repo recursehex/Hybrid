@@ -8,6 +8,7 @@ Hybrid supports both rectangular (multidimensional) arrays and jagged arrays. Us
 | Declaration | Uses commas inside the `[]` (e.g. `int[,]`, `float[,,]`). | Chains successive `[]` (e.g. `int[][]`, `string[][][]`). |
 | Storage | One contiguous allocation that stores all elements. | Each inner array is allocated separately. |
 | Size Consistency | Every row/plane must have identical length. | Each row decides its own length. |
+| Size (`.size`) | Total number of elements across all dimensions. | Number of rows in the outer array (use `.size` on inner arrays for row lengths). |
 | Indexing Syntax | Comma-separated indices: `matrix[row, column]`. | Nested brackets: `triangle[row][column]`. |
 | Bounds Behaviour | Compiler tracks every dimension size; runtime checks guard each axis. | Each access first checks the outer array, then the chosen inner array. |
 | Performance | Fastest traversal thanks to cache-friendly contiguous storage. | Slightly more indirection but ideal for ragged data. |
@@ -27,6 +28,18 @@ matrix[1, 0] = 9
 
 - The compiler enforces rectangular literals. Mismatched row lengths produce `Multidimensional array initializer must be rectangular`.
 - Every dimension length is recorded so both compile-time and runtime bounds checks understand each axis.
+
+### Allocating with `new`
+
+Rectangular arrays can also be allocated with runtime bounds. Provide one bound per dimension:
+
+```c
+int rows = 2
+int cols = 3
+int[,] grid = new[rows, cols]
+```
+
+The resulting `.size` is the total element count (`rows * cols`).
 
 ## Jagged Arrays
 

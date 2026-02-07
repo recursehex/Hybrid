@@ -5,6 +5,9 @@ Hybrid's front-end routes all parser, lexer, and code generation state through
 invocation, and the session will track shared types while clearing per-unit
 scratch state.
 
+> [!IMPORTANT]
+> Pass every file that shares types or globals in the same invocation (`hybrid a.hy b.hy ...`). A new `CompilerSession` resets type tables between runs, so splitting dependent files across commands will produce "undefined" diagnostics by design.
+
 ```
 hybrid module_a.hy module_b.hy -o my_program
 ```

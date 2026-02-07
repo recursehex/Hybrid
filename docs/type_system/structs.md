@@ -4,6 +4,12 @@
 
 Structs in Hybrid are user-defined composite types that group related data together. Structs cannot define methods, unlike classes. This design keeps structs as simple data containers, similar to C structs but with constructor support. Because fields do not receive implicit default values, every struct must declare at least one constructor so instances can initialize their storage. Structs may declare multiple constructors, provided each one initializes all instance fields before returning. If you need methods, access modifiers, or full object-oriented programming capabilities, use classes instead.
 
+Structs can still declare properties and indexers to control access to their
+fields; the syntax is the same as for classes.
+
+> [!IMPORTANT]
+> Every constructor overload must assign every instance field before exiting, as field have no default values. Omitting a field assignment in any constructor results in a compile-time error.
+
 ## Struct Declaration
 
 ### Basic Syntax
@@ -348,16 +354,18 @@ Point p = Point(10, 20)  // Stack allocated
 // Memory automatically freed when out of scope
 ```
 
-### Heap Allocation (Planned)
+### Heap Allocation
 
-Future versions will support heap allocation with `new`:
+Structs can be heap allocated with `new`:
 
 ```cs
-// Future syntax (not yet implemented)
 Point@ p = new Point(10, 20)    // Heap allocated
 Point@ p = new(10, 20)          // Compact syntax
-// Will require manual memory management or ARC
 ```
+
+- Structs are value types with stack-based storage by default. `Point p = Point(1, 2)` allocates storage in the surrounding scope.
+- `new Point(args)` allocates a heap instance and runs the constructor, returning an ARC-managed reference. Manual release is optional via `free`.
+- `free p` is rejected on stack-allocated struct values; use it only on heap references produced by `new` (or pointers to them inside `unsafe` blocks).
 
 ## Type System Integration
 
@@ -483,30 +491,6 @@ entry:
        }
    }
    ```
-
-## Limitations
-
-### Current Limitations
-
-1. **No Methods**: Structs are restricted to fields and constructors only. Use classes for methods.
-2. **No Inheritance**: Structs don't support inheritance
-3. **No Access Modifiers**: All fields are public (classes support `public`, `private`, `protected`)
-4. **No Static Members**: No static fields or methods (classes support these)
-5. **No Destructors**: No cleanup methods
-6. **Stack Only**: No heap allocation support
-
-### Future Enhancements
-
-Planned features for structs:
-
-- Heap allocation with `new`
-- Generic structs with type parameters
-- Struct literals for initialization
-- Copy constructors
-- Multiple constructors
-- Destructors for cleanup
-
-**Note**: Methods, access modifiers, static members, and inheritance are deliberately not planned for structs. These features are available in classes to maintain a clear separation between simple data containers (structs) and full object-oriented types (classes).
 
 ## Examples
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Arrays in Hybrid are fixed-size collections of elements of the same type. They are declared using the `[]` syntax after the element type and must be initialized with array literals at declaration.
+Arrays in Hybrid are fixed-size collections of elements of the same type. They are declared using the `[]` syntax after the element type and must be initialized at declaration, typically with array literals or the sized fill shorthand.
 
 ## Array Declaration
 
@@ -29,6 +29,15 @@ bool[] flags = [true, false, true, false]
 
 // String array
 string[] names = ["Alice", "Bob", "Charlie"]
+```
+
+### Sized Fill Shorthand
+
+When you know the desired length up front, you can place the size inside the brackets and assign a single value. The compiler allocates the array with that size and copies the initializer into every slot:
+
+```c
+int[3] offsets = 2          // offsets == [2, 2, 2]
+int[2, 3] grid = 5          // Every cell in the 2x3 grid is 5
 ```
 
 ## Array Literals
@@ -125,6 +134,26 @@ triangle[2][0] = 42
 
 Hybrid lets you mix shapes when you nest arrays more deeply. For example, `int[][,,]` describes an array whose elements are rectangular 3D arrays, while `int[,][]` would be a rectangular 2D shell whose elements are jagged arrays.
 
+## Array Size (.size)
+
+All array values have a `.size` property that returns an `int` count:
+
+- 1D arrays return their element count.
+- Rectangular arrays return the total number of elements across all dimensions.
+- Jagged arrays return the number of rows in the outer array; use `.size` on each inner array to get per-row lengths.
+
+```c
+int[] values = [10, 20, 30]
+int count = values.size          // 3
+
+int[,] grid = [[1, 2, 3], [4, 5, 6]]
+int total = grid.size            // 6
+
+int[][] triangle = [[1], [2, 3], [4, 5, 6]]
+int rows = triangle.size         // 3
+int secondRow = triangle[1].size // 2
+```
+
 ## Array Indexing
 
 ### Element Access
@@ -171,6 +200,9 @@ Hybrid performs both compile-time and runtime bounds validation when you index a
 - Dynamic indices generate runtime checks that `abort()` the program if the access is out of range or negative.
 
 These checks apply while you operate on Hybrid array values (the `{ ptr, size }` representation produced by the compiler). If you explicitly convert an array to a raw pointer (`int@`, `float@`, etc.) you step outside these guarantees, so raw pointer arithmetic and dereferencing remain unsafe and unchecked.
+
+> [!CAUTION]
+> Converting a Hybrid array to a raw pointer drops bounds validation entirely. Keep indexing through the array value when you want safety; switch to pointers only when you intentionally accept unchecked accesses.
 
 ## Nullable Arrays
 
@@ -303,6 +335,37 @@ int getGlobalScore(int index)
 }
 ```
 
+## Heap Allocation
+
+- `new T[len]` allocates a 1-D array of length `len`, zero-initialized, and returns the `{ ptr, len, dims }` array value Hybrid uses in codegen.
+- `new T[len1, len2]` (or more comma-separated bounds) allocates a rectangular array and records each dimension length.
+- `new[len]` or `new[len1, len2]` is target-typed: the element type and rank are inferred from the assignment target.
+- Jagged arrays allocate one dimension at a time (`new[rows]` for the outer array, then `new[cols]` for each row).
+- Arrays allocated with `new` are ARC-managed references. They participate in the same retain/release flow as class instances, but explicit `free` is optional, as ARC releases automatically when the last strong reference goes out of scope. `free` is only valid on ARC-managed references; stack arrays and smart pointers reject it.
+
+```cs
+int[] numbers = new int[5]     // Allocates an int array of length 5
+int[] inferred = new[10]       // Type inferred from target
+int[,] grid = new[2, 3]        // 2x3 rectangular array
+int[][] rows = new[4]          // Jagged outer array
+rows[0] = new[2]               // Allocate a row
+
+free numbers                   // Optional explicit release
+```
+
+## Resizing with `new`
+
+Arrays are fixed-size once allocated. To resize an existing array, assign a `new` array expression to it. The runtime allocates a new array, copies existing elements up to the new length, and zero-initializes any new slots. Assigning an array literal of a different length is an error.
+
+```cs
+int[] values = [1, 2, 3]
+values = new[5]        // values == [1, 2, 3, 0, 0]
+values = new int[2]    // values == [1, 2]
+
+int[,] grid = new[2, 2]
+grid = new[3, 2]       // Keeps the first 4 elements in row-major order
+```
+
 ## Implementation Details
 
 ### Memory Representation
@@ -346,15 +409,11 @@ Array indexing uses `getelementptr` instruction:
 
 ### Current Limitations
 
-1. **Fixed Size**: Arrays must be initialized with literals; dynamic sizing not supported
-2. **No Length Property**: Array length must be tracked separately
-3. **Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
+**Raw Pointer Escapes Are Unsafe**: Converting an array to a raw pointer sidesteps bounds checks and is the programmer's responsibility
 
 ### Future Enhancements
 
 Planned features include:
-- Dynamic array allocation with `new[]`
-- Array length property `size`
 - Bounds checking support for additional unsafe scenarios
 - Array slicing operations
 

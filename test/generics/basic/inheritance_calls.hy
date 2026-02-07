@@ -24,7 +24,7 @@ class TrackingBox<T> inherits Box<T>
 {
     TrackingBox(T initial)
     {
-        this.value = initial
+        base(initial)
     }
 
     T Snapshot()

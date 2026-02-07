@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Ambiguous call to 'Crate'
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // Expect: invariant generic assignment should be rejected
 
 class Animal

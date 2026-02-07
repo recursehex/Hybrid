@@ -97,6 +97,199 @@ int result = transform(
 )
 ```
 
+### Default Parameters
+
+Hybrid supports default values on trailing parameters for free functions, methods, and constructors:
+
+```c
+int log(string message, bool writeToFile = true, bool append = true)
+{
+    // ...
+}
+```
+
+- Defaults must be compile-time evaluable (literals, simple arithmetic, enum values, address-of globals) and side-effect free.
+- Constant-foldable arithmetic may include bitwise and shift operators as long as the expression contains no side effects.
+- Once a parameter declares a default, all parameters to its right must also declare defaults.
+- Variadic parameters cannot have defaults. `ref` parameters may when the expression is const-evaluable; null defaults are only valid when the ref target type itself permits null.
+- Defaults are injected at call sites; function signatures and mangling do not change.
+
+### Variadic Parameters (`params`)
+
+Use `params` on the final parameter to accept a variable number of trailing arguments:
+
+```cs
+int sum(params int[] values)
+{
+    int total = 0
+    for int v in values
+    {
+        total += v
+    }
+    return total
+}
+```
+
+- Exactly one `params` parameter is allowed and it must be the final parameter.
+- The parameter type must be a single-dimensional array (e.g. `int[]`), and `params` cannot be combined with `ref` or default values.
+- Calls may supply zero or more trailing arguments; they are packed into an array of the element type.
+- Supplying a single argument of the exact array type forwards it directly without repacking.
+
+### Named Arguments
+
+Calls may supply arguments by name, which is required when skipping earlier defaults:
+
+```c
+log("startup", append = false)   // skips writeToFile, overrides append
+```
+
+- Positional arguments must precede any named arguments; once named, the rest must be named.
+- Named arguments can target required parameters but only parameters with defaults may be omitted.
+- Duplicate or unknown names are rejected at compile time.
+
+## Delegates
+
+Delegates are named function pointer types with explicit signatures. Declare them wherever a type is allowed and use them in variables, parameters, and return types.
+
+```c
+delegate int Transform(int value)
+```
+
+- Delegate parameters follow the same rules as function parameters, including defaults and `params`.
+- Delegate types are non-nullable by default. Append `?` to allow `null`.
+- Assigning a function or method reference requires an exact signature match. Overload selection uses the delegate signature.
+- Instance method references capture the receiver: `Accumulator inc = counter.Add`.
+- Invoke delegates with the usual call syntax: `inc(5)`. Nullable delegates must be checked before calling.
+
+### Delegate Scope and Placement
+
+Delegates can appear at the top level or inside type bodies for grouping:
+
+```cs
+class Box
+{
+    delegate int Transformer(int value)
+
+    int Apply(Transformer op, int value)
+    {
+        return op(value)
+    }
+}
+
+int square(int x)
+{
+    return x * x
+}
+
+int main()
+{
+    Box b = Box()
+    int result = b.Apply(square, 6)
+    return result
+}
+```
+
+- Delegates declared inside a type body still use a module-wide name. Refer to them by name without a type prefix.
+- Delegate names must be unique within the module and cannot match the enclosing type name.
+- Member modifiers (`public`, `static`, `abstract`, etc.) are not allowed on delegate declarations.
+- Delegates declared inside generic types are not supported yet.
+
+### Method References
+
+Use instance or static method references when the signatures match:
+
+```cs
+class Counter
+{
+    int total
+
+    Counter(int start)
+    {
+        total = start
+    }
+
+    int Add(int amount)
+    {
+        total += amount
+        return total
+    }
+}
+
+delegate int Accumulator(int amount)
+
+int main()
+{
+    Counter counter = Counter(10)
+    Accumulator inc = counter.Add
+    return inc(5)
+}
+```
+
+- Instance method references require a receiver. `Counter.Add` is not valid without an instance.
+
+### Nullable Delegates
+
+Nullable delegates use `?` and must be checked before calling:
+
+```cs
+delegate int Transform(int value)
+
+int square(int x)
+{
+    return x * x
+}
+
+int main()
+{
+    Transform? op = null
+    if op != null
+    {
+        return op(3)
+    }
+
+    op = square
+    if op != null
+    {
+        return op(4)
+    }
+    return 0
+}
+```
+
+### Defaults and Params
+
+Delegates can carry default arguments and `params`:
+
+```cs
+delegate int Compute(int start, int step = 1, params int[] extras)
+
+int sum(int start, int step = 1, params int[] extras)
+{
+    int total = start
+    total += step
+    for int value in extras
+    {
+        total += value
+    }
+    return total
+}
+
+int main()
+{
+    Compute op = sum
+    int a = op(10)
+    int b = op(10, 2, 3, 4)
+    return a + b
+}
+```
+
+### Style Guidance
+
+- Prefer positional calls for the common path; reach for named arguments when skipping earlier defaults or clarifying boolean/sentinel parameters.
+- Keep caller ordering aligned with parameter ordering unless skipping defaults; avoid reordering purely for style.
+- Avoid mixing positional and named arguments in short calls unless it materially improves readability; once named, keep the rest named.
+- For APIs with many optional flags, consider a small options struct instead of long chains of named arguments.
+
 ### Array Parameters
 
 Arrays can be passed as parameters by reference:
@@ -173,7 +366,19 @@ void noReturn()
 
 ### Array Return Types
 
-Currently, functions cannot return arrays directly. Arrays must be passed as parameters and modified in place.
+Functions can return arrays directly. Returned arrays are full values, so callers can index them, pass them to other functions, or store them in variables.
+
+```c
+int[] makeNumbers()
+{
+    return [1, 2, 3]
+}
+
+string[]? maybeNames(bool include)
+{
+    return ["alpha", "beta"] if include else null
+}
+```
 
 ## Return Statements
 

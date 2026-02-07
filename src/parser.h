@@ -32,8 +32,8 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LH
 std::unique_ptr<ExprAST> ParseExpression();
 std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe = false);
 std::unique_ptr<FunctionAST> ParseDefinition();
-std::unique_ptr<FunctionAST> ParseTopLevelExpr();
 std::unique_ptr<PrototypeAST> ParseExtern();
+std::unique_ptr<DelegateDeclAST> ParseDelegateDefinition();
 
 // Statement parsing functions
 std::unique_ptr<StmtAST> ParseStatement();
@@ -41,6 +41,7 @@ std::unique_ptr<ReturnStmtAST> ParseReturnStatement();
 std::unique_ptr<BlockStmtAST> ParseBlock();
 std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef = false);
 std::unique_ptr<ForEachStmtAST> ParseForEachStatement();
+std::unique_ptr<StmtAST> ParseForStatement();
 std::unique_ptr<ForLoopStmtAST> ParseForLoopStatement();
 std::unique_ptr<UseStmtAST> ParseUseStatement();
 std::unique_ptr<IfStmtAST> ParseIfStatement();
@@ -78,6 +79,7 @@ struct ConstantValue {
   ConstantValue(bool val) : type(BOOLEAN), boolVal(val) {}
 };
 
-bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result);
+bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result,
+                                SourceLocation *firstErrorLocation = nullptr);
 
 #endif // PARSER_H

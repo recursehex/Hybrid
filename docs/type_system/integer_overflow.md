@@ -59,3 +59,6 @@ The behavior is covered by `test/types/overflow.hy`, which compiles at the limit
 
 - Unary negation is applied after lexing, so `-2147483648` is accepted by combining the `2147483648` token with a leading `-`, even though the positive literal would overflow on its own.
 - Runtime arithmetic still follows LLVM's two's-complement semantics. The compiler halts only on overflowing literals; expressions such as `int x = 2147483647 + 1` currently wrap rather than trapping.
+
+> [!CAUTION]
+> Currently, only literals are checked for overflow. Runtime arithmetic wraps with two's-complement semantics, so add guards when overflows would be incorrect for your domain.

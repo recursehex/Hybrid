@@ -161,9 +161,9 @@ void testPromotionInComparisons()
     assert eq2 == true   // float 5.0 should be less than double 5.1
     assert eq3 == true   // int 5 should be less than or equal to double 5.1
 
-    print(int: eq1)
-    print(int: eq2)
-    print(int: eq3)
+    print(1 if eq1 else 0)
+    print(1 if eq2 else 0)
+    print(1 if eq3 else 0)
 }
 
 int main()

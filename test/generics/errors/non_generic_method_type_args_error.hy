@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Method 'Counter.Increment' does not accept explicit type arguments
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // Expect error when supplying type arguments to a non-generic method
 
 class Counter

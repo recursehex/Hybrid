@@ -14,10 +14,19 @@ Specialization can inflate the module if a template is instantiated for dozens o
 2. **Registry reset hooks** - `CompilerSession::resetAll()` calls `ResetGenericTemplateRegistries()` so stale templates from previous compilations cannot leak into the next session.
 3. **Describe + inspect tooling** - the `describeType("Box<int>")` intrinsic reads the runtime descriptor and reports bound arguments, base classes, interfaces, and generic method instantiations. Tests under `test/generics/basic/metadata_dump.hy` pin the exact wording so future regressions are visible.
 
+> [!WARNING]
+> Deeply nested or wildly varied instantiations will eventually hit depth/instantiation caps and halt compilation. Trim unused bindings or raise `--max-generic-depth` / `--max-generic-instantiations`.
+
 ## Relationship to modules & diagnostics
 All diagnostics flow through `reportCompilerError(...)`, and the parser relies on the `TemplateAngleScope` lookahead to decide when `<...>` denotes type arguments versus comparisons or shifts.
 
 The combination of these changes gives us the safety of C#/Java-style syntax with the predictable codegen of C++ templates.
+
+## ARC and specialization
+
+- ARC lowering is emitted per instantiation: each specialised class/struct/function body carries the retain/release and destructor sequencing for its bound types, and the overload registry keeps copies distinct so ref-counting matches the concrete layout.
+- Generated copy/move constructors for generic types reuse the bound member types so retains happen in declaration order instead of being shared across unrelated bindings.
+- Building with `--arc-enabled=false` (or `./run_tests.sh -a off`) still instantiates the same bodies but strips ARC calls and ARC-only diagnostics; use that mode when a fixture needs to show ARC-disabled behavior without rewriting source.
 
 ## Troubleshooting & Telemetry
 

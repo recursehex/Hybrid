@@ -1,10 +1,11 @@
+// This file implements the Hybrid lexer that tokenizes source text while tracking source locations.
+
 #include "lexer.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdint>
-#include <iostream>
 
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ConvertUTF.h"
@@ -31,7 +32,7 @@ static bool buildIntegerLiteral(const std::string &digits,
                                 const std::string &spelling,
                                 NumericLiteral &outLiteral) {
   if (digits.empty()) {
-    std::cerr << "Error: Numeric literal '" << spelling << "' is missing digits\n";
+    reportCompilerError("Numeric literal '" + spelling + "' is missing digits");
     return false;
   }
 
@@ -39,8 +40,8 @@ static bool buildIntegerLiteral(const std::string &digits,
 
   llvm::APInt value(parseBits, digits, radix);
   if (value.getActiveBits() > 64) {
-    std::cerr << "Error: Integer literal '" << spelling
-              << "' exceeds maximum supported 64-bit range\n";
+    reportCompilerError("Integer literal '" + spelling +
+                        "' exceeds maximum supported 64-bit range");
     return false;
   }
 
@@ -59,24 +60,26 @@ static bool buildFloatingLiteral(const std::string &literal,
 
   if (!statusOr) {
     llvm::consumeError(statusOr.takeError());
-    std::cerr << "Error: Invalid floating-point literal '" << literal << "'\n";
+    reportCompilerError("Invalid floating-point literal '" + literal + "'");
     return false;
   }
 
   llvm::APFloat::opStatus status = *statusOr;
 
   if (status & llvm::APFloat::opInvalidOp) {
-    std::cerr << "Error: Invalid floating-point literal '" << literal << "'\n";
+    reportCompilerError("Invalid floating-point literal '" + literal + "'");
     return false;
   }
 
   if (status & llvm::APFloat::opOverflow) {
-    std::cerr << "Error: Floating-point literal '" << literal << "' overflowed the representable range\n";
+    reportCompilerError("Floating-point literal '" + literal +
+                        "' overflowed the representable range");
     return false;
   }
 
   if (status & llvm::APFloat::opUnderflow) {
-    std::cerr << "Error: Floating-point literal '" << literal << "' underflowed the representable range\n";
+    reportCompilerError("Floating-point literal '" + literal +
+                        "' underflowed the representable range");
     return false;
   }
 
@@ -177,10 +180,10 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
   }
 
   if (digits.empty()) {
-    std::cerr << "Error: Numeric literal '0" << static_cast<char>(prefixChar)
-              << "' is missing digits\n";
-    LastChar = CurrentChar;
     lex.setTokenStart(tokenStart);
+    reportCompilerError("Numeric literal '0" + std::string(1, prefixChar) +
+                        "' is missing digits");
+    LastChar = CurrentChar;
     return tok_error;
   }
 
@@ -189,10 +192,10 @@ static int lexPrefixedIntegerLiteral(LexerContext &lex,
     spelling += static_cast<char>(prefixChar);
     spelling += digits;
     spelling += static_cast<char>(CurrentChar);
-    std::cerr << "Error: Invalid digit '" << static_cast<char>(CurrentChar)
-              << "' in numeric literal '" << spelling << "'\n";
-    LastChar = CurrentChar;
     lex.setTokenStart(tokenStart);
+    reportCompilerError("Invalid digit '" + std::string(1, static_cast<char>(CurrentChar)) +
+                        "' in numeric literal '" + spelling + "'");
+    LastChar = CurrentChar;
     return tok_error;
   }
 
@@ -218,7 +221,8 @@ static bool prepareInterpolatedLiteralSegment(LexerContext &lex, int &LastChar) 
 
   while (true) {
     if (LastChar == EOF) {
-      std::cerr << "Error: Unterminated interpolated string literal\n";
+      lex.setTokenStart(segmentStart);
+      reportCompilerError("Unterminated interpolated string literal");
       lex.inInterpolatedString = false;
       return false;
     }
@@ -394,6 +398,8 @@ int gettok() {
       return tok_extern;
     if (lex.identifierStr == "return")
       return tok_return;
+    if (lex.identifierStr == "delegate")
+      return tok_delegate;
     if (lex.identifierStr == "for")
       return tok_for;
     if (lex.identifierStr == "in")
@@ -408,6 +414,8 @@ int gettok() {
       return tok_float;
     if (lex.identifierStr == "double")
       return tok_double;
+    if (lex.identifierStr == "decimal")
+      return tok_decimal;
     if (lex.identifierStr == "char")
       return tok_char;
     if (lex.identifierStr == "void")
@@ -442,6 +450,10 @@ int gettok() {
       return tok_null;
     if (lex.identifierStr == "if")
       return tok_if;
+    if (lex.identifierStr == "is")
+      return tok_is;
+    if (lex.identifierStr == "not")
+      return tok_not_kw;
     if (lex.identifierStr == "else")
       return tok_else;
     if (lex.identifierStr == "while")
@@ -472,6 +484,22 @@ int gettok() {
       return tok_unsafe;
     if (lex.identifierStr == "ref")
       return tok_ref;
+    if (lex.identifierStr == "params")
+      return tok_params;
+    if (lex.identifierStr == "get")
+      return tok_get;
+    if (lex.identifierStr == "set")
+      return tok_set;
+    if (lex.identifierStr == "weak")
+      return tok_weak;
+    if (lex.identifierStr == "unique")
+      return tok_unique;
+    if (lex.identifierStr == "shared")
+      return tok_shared;
+    if (lex.identifierStr == "new")
+      return tok_new;
+    if (lex.identifierStr == "free")
+      return tok_free;
     if (lex.identifierStr == "abstract")
       return tok_abstract;
     if (lex.identifierStr == "inherits")
@@ -539,7 +567,7 @@ int gettok() {
         LastChar = lex.consumeChar();
       }
       if (!isDecimalDigit(LastChar)) {
-        std::cerr << "Error: Invalid exponent in floating-point literal '" << literal << "'\n";
+        reportCompilerError("Invalid exponent in floating-point literal '" + literal + "'");
         return tok_error;
       }
       while (isDecimalDigit(LastChar)) {
@@ -582,7 +610,7 @@ int gettok() {
           LastChar = lex.consumeChar();
         }
         if (!isDecimalDigit(LastChar)) {
-          std::cerr << "Error: Invalid exponent in floating-point literal '" << literal << "'\n";
+          reportCompilerError("Invalid exponent in floating-point literal '" + literal + "'");
           lex.setTokenStart(start);
           return tok_error;
         }
@@ -696,7 +724,11 @@ string_continue:
           }
           // Validate Unicode code point: reject UTF-16 surrogates (U+D800 to U+DFFF)
           if (unicode >= 0xD800 && unicode <= 0xDFFF) {
-            fprintf(stderr, "Error: Invalid Unicode code point U+%04X (UTF-16 surrogate)\n", unicode);
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer),
+                          "Invalid Unicode code point U+%04X (UTF-16 surrogate)",
+                          unicode);
+            reportCompilerError(buffer);
             lex.charLiteral = '?';
           } else {
             lex.charLiteral = unicode;
@@ -722,7 +754,10 @@ string_continue:
           // Validate Unicode code point
           // Valid range: U+0000 to U+10FFFF, excluding surrogates U+D800 to U+DFFF
           if (unicode > 0x10FFFF || (unicode >= 0xD800 && unicode <= 0xDFFF)) {
-            fprintf(stderr, "Error: Invalid Unicode code point U+%08X\n", unicode);
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer),
+                          "Invalid Unicode code point U+%08X", unicode);
+            reportCompilerError(buffer);
             lex.charLiteral = '?';
           } else {
             lex.charLiteral = unicode;
@@ -738,7 +773,7 @@ string_continue:
           utf8SequenceLength(static_cast<unsigned char>(utf8Bytes[0]));
 
       if (expectedLength == 0) {
-        std::cerr << "Error: Invalid UTF-8 start byte in character literal\n";
+        reportCompilerError("Invalid UTF-8 start byte in character literal");
         lex.charLiteral = '?';
         goto char_literal_end;
       }
@@ -746,12 +781,12 @@ string_continue:
       for (unsigned i = 1; i < expectedLength; ++i) {
         LastChar = lex.consumeChar();
         if (LastChar == EOF) {
-          std::cerr << "Error: Incomplete UTF-8 sequence in character literal\n";
+          reportCompilerError("Incomplete UTF-8 sequence in character literal");
           lex.charLiteral = '?';
           goto char_literal_end;
         }
         if ((LastChar & 0xC0) != 0x80) {
-          std::cerr << "Error: Invalid UTF-8 continuation byte in character literal\n";
+          reportCompilerError("Invalid UTF-8 continuation byte in character literal");
           lex.charLiteral = '?';
           goto char_literal_end;
         }
@@ -762,9 +797,9 @@ string_continue:
       std::string decodeError;
       if (!decodeSingleUTF8CodePoint(utf8Bytes, decoded, decodeError)) {
         if (!decodeError.empty())
-          std::cerr << "Error: " << decodeError << "\n";
+          reportCompilerError(decodeError);
         else
-          std::cerr << "Error: Invalid UTF-8 character literal\n";
+          reportCompilerError("Invalid UTF-8 character literal");
         lex.charLiteral = '?';
       } else {
         lex.charLiteral = decoded;
@@ -777,7 +812,7 @@ char_literal_end:
       LastChar = lex.consumeChar(); // eat closing '
       return tok_char_literal;
     }
-    std::cerr << "Error: Unterminated character literal\n";
+    reportCompilerError("Unterminated character literal");
     while (LastChar != EOF && LastChar != '\n' && LastChar != '\r' && LastChar != '\'')
       LastChar = lex.consumeChar();
     if (LastChar == '\'')
@@ -800,6 +835,33 @@ char_literal_end:
 
       if (LastChar != EOF)
         return gettok();
+    }
+
+    // Handle /* */ block comments
+    if (Op == '/' && NextChar == '*') {
+      SourceLocation commentStart = start;
+      LastChar = lex.consumeChar(); // move past the initial "/*"
+      while (true) {
+        if (LastChar == EOF) {
+          lex.setTokenStart(commentStart);
+          reportCompilerError("Unterminated block comment");
+          return tok_error;
+        }
+
+        if (LastChar == '*') {
+          int maybeSlash = lex.consumeChar();
+          if (maybeSlash == '/') {
+            LastChar = lex.consumeChar(); // consume '/' and continue lexing
+            break;
+          }
+          LastChar = maybeSlash;
+          continue;
+        }
+
+        LastChar = lex.consumeChar();
+      }
+
+      return gettok();
     }
     
     // Handle increment operator
@@ -987,6 +1049,28 @@ char_literal_end:
     }
   }
 
+  if (LastChar == '~') {
+    SourceLocation start = lex.lastCharLocation();
+    int NextChar = lex.consumeChar();
+    if (std::isalpha(static_cast<unsigned char>(NextChar)) || NextChar == '_') {
+      std::string ident;
+      ident.push_back(static_cast<char>(NextChar));
+      int ch = lex.consumeChar();
+      while (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_') {
+        ident.push_back(static_cast<char>(ch));
+        ch = lex.consumeChar();
+      }
+      lex.identifierStr = ident;
+      LastChar = ch;
+      lex.setTokenStart(start);
+      return tok_tilde_identifier;
+    }
+    lex.unconsumeChar(NextChar);
+    LastChar = lex.consumeChar();
+    lex.setTokenStart(start);
+    return '~';
+  }
+
   // Check for colon (type casting operator)
   if (LastChar == ':') {
     SourceLocation start = lex.lastCharLocation();
@@ -1003,9 +1087,30 @@ char_literal_end:
     return tok_dot;
   }
 
-  // Check for @ (dereference/pointer type)
+  // Check for @ (dereference/pointer type or autoreleasepool)
   if (LastChar == '@') {
     SourceLocation start = lex.lastCharLocation();
+    int NextChar = lex.consumeChar();
+    if (std::isalpha(static_cast<unsigned char>(NextChar)) || NextChar == '_') {
+      std::string ident;
+      ident.push_back(static_cast<char>(NextChar));
+      int ch = lex.consumeChar();
+      while (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_') {
+        ident.push_back(static_cast<char>(ch));
+        ch = lex.consumeChar();
+      }
+      if (ident == "autoreleasepool") {
+        lex.identifierStr = ident;
+        LastChar = ch;
+        lex.setTokenStart(start);
+        return tok_autoreleasepool;
+      }
+      lex.unconsumeChar(ch);
+      for (auto it = ident.rbegin(); it != ident.rend(); ++it)
+        lex.unconsumeChar(*it);
+    } else {
+      lex.unconsumeChar(NextChar);
+    }
     LastChar = lex.consumeChar();
     lex.setTokenStart(start);
     return tok_at;

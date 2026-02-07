@@ -13,6 +13,9 @@ Hybrid programs run through a `main` function defined in the root compilation un
 
 Both forms run global initializers and top-level expressions (when present) before executing user code. Pick the signature that matches your intent: use `void main()` for scripts that never fail, and `int main()` when downstream tooling should observe failure exit codes.
 
+> [!IMPORTANT]
+> CI and tooling rely on the process exit code. Use `int main()` whenever you need failing runs to surface as non-zero exits; `void main()` always returns `0`, which can mask missing error checks.
+
 ## Basic Syntax
 
 ### Comments
@@ -20,6 +23,9 @@ Both forms run global initializers and top-level expressions (when present) befo
 ```c
 // This is a single-line comment
 // Comments continue until the end of the line
+
+/* Block comments can span multiple lines
+   and are ignored by the compiler */
 ```
 
 ### Statement Termination
@@ -69,21 +75,55 @@ int add(int x, int y)
 add(5, 3)
 ```
 
+## Delegates
+
+Delegates are named function pointer types with explicit signatures. They can be declared at the top level or inside a type body for grouping, and then used anywhere a type is allowed.
+
+```cs
+class Box
+{
+    delegate int Transformer(int value)
+
+    int Apply(Transformer op, int value)
+    {
+        return op(value)
+    }
+}
+```
+
+- Delegate names are module-wide; refer to them by name without a type prefix.
+- Nullable delegates use `?` and must be checked before calling.
+- Instance method references require a receiver (`counter.Add`, not `Counter.Add`).
+
+See the [Functions guide](functions.md#delegates) for detailed rules and examples.
+
 ## Keywords
 
 The following keywords are reserved:
 
 - Type keywords: 
-  - Basic types: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
+  - Basic types: `int`, `float`, `double`, `decimal`, `char`, `void`, `bool`, `string`
   - Sized integers: `byte`, `sbyte`, `short`, `ushort`, `uint`, `long`, `ulong`
   - Sized characters: `schar`, `lchar`
-- Control flow: `if`, `else`, `for`, `in`, `to`, `by`, `while`, `break`, `skip`, `switch`, `case`, `default`
-- Function keywords: `return`, `extern`, `ref`
+- Control flow:
+  - If-else: `if`, `else`
+  - For and foreach loops: `for`, `in`, `to`, `by`
+  - While loops: `while`
+  - Loop control: `break`, `skip`
+  - Switch statements and expressions: `switch`, `case`, `default`
+- Function keywords: `return`, `extern`, `delegate`
 - Structure keywords: `use`, `struct`, `this`
+- Class keywords: `class`, `inherits`, `base`, `interface`, `abstract`, `virtual`, `override`
+- Access modifiers: `public`, `private`, `protected`, `const`, `static`
+- Property keywords: `get`, `set`, `value`
 - Boolean literals: `true`, `false`
 - Null literal: `null`
 - Exception handling: `assert`
+- Pass by reference: `ref`
+- Variadic parameters: `params`
 - Memory safety: `unsafe`
+- Memory management: `new`, `free`
+- Smart pointers: `unique`, `shared`, `weak`
 
 ## Literals
 
@@ -92,6 +132,7 @@ The following keywords are reserved:
 ```c
 42        // Integer literal (i32)
 3.14      // Float literal (double)
+decimal price = 12.34 // Decimal literal (base-10 decimal)
 -10       // Negative integer
 -2.5      // Negative float
 255       // Can be assigned to byte
@@ -99,6 +140,8 @@ The following keywords are reserved:
 ```
 
 Integer literals are automatically sized to fit the target type with range checking.
+Numbers with decimal points are `double` by default.
+Numeric literals are contextually typed as `decimal` when the target type is known (for example `decimal price = 12.34` or `ProcessDecimal(1.25)`).
 
 ### Boolean Literals
 
@@ -131,8 +174,8 @@ string precise = $"Pi: `pi:2`"                    // format specifier for floats
 ```
 
 - Expressions inside backticks can be any valid expression.
-- Format specifiers are optional and currently supported for floating-point values using `:digits` to control precision (e.g. `pi:3`).
-- To emit a literal backtick inside an interpolated string, escape it with `\``.
+- Format specifiers are optional and currently supported for floating-point and `decimal` values using `:digits` to control precision (e.g. `pi:3`, `amount:2`).
+- To emit a literal backtick inside an interpolated string, escape it with `` \` ``.
 
 ### Character Literals
 
@@ -176,6 +219,23 @@ int[] samples = [
 
 The same indentation rules apply to rectangular (`[,]`) and jagged (`[][]`) literals, making it easier to visualize large datasets.
 
+### Tuple Literals
+
+Tuple literals use parentheses with commas and require at least two elements:
+
+```cs
+(int, string) pair = (8, "hello")
+((int, int), string) point = ((1, 2), "origin")
+```
+
+Index into tuples with literal indices, or use named elements when declared:
+
+```cs
+(int count, string greeting) message = (2, "hi")
+int c = message.count
+string g = message[1]
+```
+
 ## Language Safety Features
 
 Hybrid includes several safety features designed to prevent common programming errors:
@@ -192,6 +252,13 @@ if x = 0 { /* ... */ }
 if x == 0 { /* ... */ }
 ```
 
+Type checks use the `is` / `is not` keywords and are only allowed in conditional contexts:
+
+```c
+if pet is Animal { /* ... */ }
+while node is not null { /* ... */ }
+```
+
 ### Mandatory Variable Initialization
 
 All variables must be initialized when declared, preventing use of uninitialized variables:
@@ -204,6 +271,32 @@ int y         // Compilation error - no initialization
 ### Static Type Checking
 
 All types are checked at compile time, preventing type-related runtime errors.
+
+## Heap Allocation and Release
+
+Hybrid exposes `new` and `free` for explicit heap management on top of ARC:
+
+- `new Type(args)` or `new(args)` allocate ARC-managed objects and run constructors. The type can be inferred from the assignment target.
+- `new Type[len]` or `new[len]` allocate a 1-D array, zero-initialized with the length stored alongside the data for bounds checks.
+- `new Type[len1, len2]` or `new[len1, len2]` allocate a rectangular array with one bound per dimension.
+- `free expr` schedules an explicit ARC release. Its use is rare, as ARC still releases automatically, and is only valid for ARC-managed references (classes, arrays, and pointers to those). Smart pointers and stack values reject `free`.
+
+See `docs/memory/heap_allocation.md` for full semantics and diagnostics.
+
+### Automatic Reference Counting (ARC)
+
+- ARC is enabled by default. Class, struct, and array references are retained on assignment and released when they leave scope; destructors run when the last strong reference drops to zero.
+- `free` is optional and only valid for ARC-managed heap references when you need a deterministic release point. Stack values and smart pointer handles reject it because ARC already tears them down automatically.
+- Toggle ARC with `--arc-enabled=true|false` (or `./run_tests.sh -a on|off`). Disabling ARC skips retain/release insertion and suppresses ARC-only diagnostics so tooling can compare behaviors without rewriting source.
+- Smart pointer helpers (`unique<T>`, `shared<T>`, `weak<T>`) wrap the same ARC-managed payloads; use them when you need exclusive/shared/weak semantics beyond the current scope, not to get basic lifetime management.
+
+```cs
+Door local = new(2)                   // Freed automatically when it leaves scope
+shared<Door> sharedDoor = (3)
+weak<Door> watcher = #sharedDoor      // Observer that won't keep the Door alive
+```
+
+See `docs/memory/arc_best_practices.md` for ownership patterns and common ARC pitfalls.
 
 ## Nullability
 

@@ -9,11 +9,20 @@
 #include <map>
 #include <optional>
 #include <utility>
+#include <cstddef>
 #include "concepts.h"
 #include "numeric_literal.h"
 
-struct SourceLocation;
+struct SourceLocation {
+  std::size_t line = 0;
+  std::size_t column = 0;
+
+  constexpr bool isValid() const noexcept { return line != 0; }
+};
+
 struct FunctionOverload;
+struct ClassDescriptor;
+class AccessorAST;
 
 enum class RefStorageClass {
   None,
@@ -21,10 +30,33 @@ enum class RefStorageClass {
   RefAlias
 };
 
+enum class OwnershipQualifier : uint8_t {
+  Strong,
+  Weak,
+  Unowned
+};
+
+enum class SmartPointerKind : uint8_t {
+  None,
+  Unique,
+  Shared,
+  Weak
+};
+
+struct GenericBindingKey {
+  std::string typeName;
+  std::vector<std::string> typeArguments;
+
+  bool empty() const { return typeName.empty() && typeArguments.empty(); }
+};
+
+bool isArcLoweringEnabled();
+
 struct TypeInfo {
   std::string typeName;           // canonical language-visible type
   std::string baseTypeName;       // base identifier without generic arguments or suffixes
   std::vector<TypeInfo> typeArguments; // explicit generic type arguments, if any
+  std::vector<std::string> tupleElementNames; // optional tuple element names
   unsigned pointerDepth = 0;      // number of explicit pointer levels (@)
   bool isArray = false;           // whether type is an array ("[]")
   unsigned arrayDepth = 0;        // number of array segments ([], [,,], etc.)
@@ -36,12 +68,32 @@ struct TypeInfo {
   bool isMutable = true;
   bool declaredRef = false;       // whether declared via `ref`
   bool isGenericParameter = false; // true when the type refers to a generic parameter
+  OwnershipQualifier ownership = OwnershipQualifier::Strong;
+  bool hasExplicitOwnership = false;
+  SmartPointerKind smartPointerKind = SmartPointerKind::None;
+  bool arcManaged = false;
+  const ClassDescriptor *classDescriptor = nullptr;
+  GenericBindingKey genericKey;
 
   bool isReference() const { return refStorage != RefStorageClass::None; }
   bool ownsStorage() const { return refStorage == RefStorageClass::RefValue; }
   bool isAlias() const { return refStorage == RefStorageClass::RefAlias; }
   bool hasTypeArguments() const { return !typeArguments.empty(); }
+  bool isSmartPointer() const { return smartPointerKind != SmartPointerKind::None; }
+  bool isTupleType() const {
+    return baseTypeName == "tuple" && !typeArguments.empty();
+  }
+  bool participatesInARC() const {
+    return arcManaged && isArcLoweringEnabled();
+  }
+  bool requiresARC() const {
+    return participatesInARC() && ownership == OwnershipQualifier::Strong;
+  }
+  const GenericBindingKey &bindingKey() const { return genericKey; }
 };
+
+void finalizeTypeInfoMetadata(TypeInfo &info);
+std::string typeNameFromInfo(const TypeInfo &info);
 
 enum class AggregateKind : uint8_t {
   Struct,
@@ -146,6 +198,36 @@ struct MemberModifiers {
   bool isProperty = false;
 };
 
+struct ClassInheritanceMetadata {
+  std::optional<std::string> baseClassName;
+  std::vector<std::string> interfaceNames;
+  MemberAccess defaultMemberAccess = MemberAccess::None();
+  std::vector<MemberAccess> constructorAccesses;
+};
+
+struct ClassDescriptor {
+  struct Constructor {
+    MemberAccess access = MemberAccess::PrivateOnly();
+    bool isImplicit = false;
+  };
+
+  std::string name;
+  AggregateKind kind = AggregateKind::Struct;
+  std::optional<std::string> baseClassName;
+  std::vector<std::string> interfaceNames;
+  std::vector<std::string> inheritanceChain;
+  bool isAbstract = false;
+  bool isInterface = false;
+  std::vector<Constructor> constructors;
+
+  bool isClass() const;
+  bool derivesFrom(const std::string &candidate) const;
+  bool implementsInterface(const std::string &iface) const;
+  bool hasPublicConstructor() const;
+  bool hasProtectedConstructor() const;
+  bool hasConstructor() const { return !constructors.empty(); }
+};
+
 // LLVM forward declarations
 namespace llvm {
   class Value;
@@ -156,10 +238,19 @@ namespace llvm {
 
 void FinalizeTopLevelExecution();
 
+// Records that a top-level statement emitted code so subsequent statements
+// resume insertion at the correct basic block inside __hybrid_top_level.
+void NoteTopLevelStatementEmitted();
+
 /// ExprAST - Base class for all expression nodes.
 class ExprAST {
 protected:
   mutable std::string TypeName; // The type name of this expression (e.g. "int", "byte", "float")
+  mutable std::optional<TypeInfo> TypeInfoCache;
+  bool TemporaryValue = false;
+  GenericBindingKey BoundGenericKey;
+  bool HasBoundGenericKey = false;
+  SourceLocation ExprLocation{};
   
 public:
   virtual ~ExprAST() = default;
@@ -170,7 +261,36 @@ public:
   [[nodiscard]] virtual std::string getTypeName() const { return TypeName; }
   
   // Set the type name (used during codegen)
-  void setTypeName(const std::string &TN) const { TypeName = TN; }
+  void setTypeName(const std::string &TN) const {
+    TypeName = TN;
+    if (TypeInfoCache && typeNameFromInfo(*TypeInfoCache) != TN)
+      TypeInfoCache.reset();
+  }
+  void setTypeInfo(TypeInfo info) const {
+    TypeInfoCache = std::move(info);
+    TypeName = typeNameFromInfo(*TypeInfoCache);
+  }
+  const TypeInfo *getTypeInfo() const {
+    return TypeInfoCache ? &*TypeInfoCache : nullptr;
+  }
+  bool isTemporary() const { return TemporaryValue; }
+  void markTemporary(bool value = true) { TemporaryValue = value; }
+  bool hasGenericBindingKey() const { return HasBoundGenericKey; }
+  const GenericBindingKey &getGenericBindingKey() const {
+    return BoundGenericKey;
+  }
+  void setGenericBindingKey(GenericBindingKey key) {
+    BoundGenericKey = std::move(key);
+    HasBoundGenericKey = !BoundGenericKey.empty();
+  }
+  void clearGenericBindingKey() {
+    BoundGenericKey = {};
+    HasBoundGenericKey = false;
+  }
+  void setSourceLocation(SourceLocation loc) { ExprLocation = loc; }
+  [[nodiscard]] SourceLocation getSourceLocation() const {
+    return ExprLocation;
+  }
 };
 
 /// StmtAST - Base class for all statement nodes.
@@ -212,11 +332,23 @@ class VariableDeclarationStmtAST : public StmtAST {
   std::string Name;
   std::unique_ptr<ExprAST> Initializer;
   bool IsRef;
+  OwnershipQualifier DeclaredOwnership = OwnershipQualifier::Strong;
+  bool HasExplicitOwnership = false;
+  GenericBindingKey DeclaredGenericBinding;
+  bool HasDeclaredGenericBinding = false;
 
 public:
   VariableDeclarationStmtAST(TypeInfo DeclaredType, const std::string &Name,
                              std::unique_ptr<ExprAST> Initializer, bool IsRef = false)
-      : DeclaredType(std::move(DeclaredType)), Name(Name), Initializer(std::move(Initializer)), IsRef(IsRef) {}
+      : DeclaredType(std::move(DeclaredType)), Name(Name),
+        Initializer(std::move(Initializer)), IsRef(IsRef) {
+    DeclaredOwnership = this->DeclaredType.ownership;
+    HasExplicitOwnership = this->DeclaredType.hasExplicitOwnership;
+    if (!this->DeclaredType.genericKey.empty()) {
+      DeclaredGenericBinding = this->DeclaredType.genericKey;
+      HasDeclaredGenericBinding = true;
+    }
+  }
 
   llvm::Value *codegen() override;
   const std::string &getType() const { return DeclaredType.typeName; }
@@ -224,6 +356,12 @@ public:
   [[nodiscard]] const std::string &getName() const { return Name; }
   ExprAST *getInitializer() const { return Initializer.get(); }
   bool isRef() const { return IsRef; }
+  OwnershipQualifier getOwnershipQualifier() const { return DeclaredOwnership; }
+  bool hasExplicitOwnershipQualifier() const { return HasExplicitOwnership; }
+  bool hasDeclaredGenericBinding() const { return HasDeclaredGenericBinding; }
+  const GenericBindingKey &getDeclaredGenericBinding() const {
+    return DeclaredGenericBinding;
+  }
 };
 
 /// ExpressionStmtAST - Statement class for expression statements.
@@ -236,6 +374,24 @@ public:
   
   llvm::Value *codegen() override;
   ExprAST *getExpression() const { return Expression.get(); }
+};
+
+/// AccessorBodyStmtAST - Statement class for property/indexer accessor bodies.
+class AccessorBodyStmtAST : public StmtAST {
+  const AccessorAST *Accessor = nullptr;
+  std::string OwnerName;
+  std::string PropertyName;
+  bool IsStatic = false;
+
+public:
+  AccessorBodyStmtAST(const AccessorAST *Accessor, std::string OwnerName,
+                      std::string PropertyName, bool IsStatic)
+      : Accessor(Accessor),
+        OwnerName(std::move(OwnerName)),
+        PropertyName(std::move(PropertyName)),
+        IsStatic(IsStatic) {}
+
+  llvm::Value *codegen() override;
 };
 
 /// ForEachStmtAST - Statement class for foreach loops.
@@ -256,6 +412,8 @@ public:
   const std::string &getTypeName() const { return DeclaredType.typeName; }
   const std::string &getVarName() const { return VarName; }
   bool isRef() const { return DeclaredType.declaredRef; }
+  ExprAST *getCollection() const { return Collection.get(); }
+  BlockStmtAST *getBody() const { return Body.get(); }
   
   void print() const;
   llvm::Value *codegen() override;
@@ -286,6 +444,12 @@ public:
   
   void print() const;
   llvm::Value *codegen() override;
+  ExprAST *getInitExpr() const { return InitExpr.get(); }
+  ExprAST *getLimitExpr() const { return LimitExpr.get(); }
+  ExprAST *getCondExpr() const { return CondExpr.get(); }
+  ExprAST *getStepExpr() const { return StepExpr.get(); }
+  BlockStmtAST *getBody() const { return Body.get(); }
+  char getStepOp() const { return StepOp; }
 };
 
 /// IfStmtAST - Statement class for if-else statements.
@@ -341,13 +505,19 @@ public:
 /// AssertStmtAST - Statement class for assert statements.
 class AssertStmtAST : public StmtAST {
   std::unique_ptr<ExprAST> Condition;
+  std::size_t Line = 0;
+  std::size_t Column = 0;
 
 public:
-  AssertStmtAST(std::unique_ptr<ExprAST> Condition)
-      : Condition(std::move(Condition)) {}
+  AssertStmtAST(std::unique_ptr<ExprAST> Condition,
+                std::size_t Line = 0,
+                std::size_t Column = 0)
+      : Condition(std::move(Condition)), Line(Line), Column(Column) {}
 
   llvm::Value *codegen() override;
   ExprAST *getCondition() const { return Condition.get(); }
+  std::size_t getLine() const { return Line; }
+  std::size_t getColumn() const { return Column; }
 };
 
 /// UnsafeBlockStmtAST - Statement class for unsafe blocks.
@@ -675,21 +845,52 @@ private:
   llvm::Value *codegenNullCoalescingAssign(llvm::Value *lhsValue);
 };
 
+/// TypeCheckExprAST - Expression class for runtime type checking (is / is not).
+class TypeCheckExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+  TypeInfo TargetType;
+  bool IsNegated = false;
+  bool TargetIsNull = false;
+  std::optional<std::string> BindingName;
+  mutable llvm::Value *BindingValue = nullptr;
+
+public:
+  TypeCheckExprAST(std::unique_ptr<ExprAST> Operand, TypeInfo TargetType,
+                   bool IsNegated, bool TargetIsNull,
+                   std::optional<std::string> BindingName)
+      : Operand(std::move(Operand)), TargetType(std::move(TargetType)),
+        IsNegated(IsNegated), TargetIsNull(TargetIsNull),
+        BindingName(std::move(BindingName)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+  const TypeInfo &getTargetTypeInfo() const { return TargetType; }
+  bool isNegated() const { return IsNegated; }
+  bool isNullCheck() const { return TargetIsNull; }
+  const std::optional<std::string> &getBindingName() const { return BindingName; }
+  llvm::Value *getBindingValue() const { return BindingValue; }
+};
+
 /// UnaryExprAST - Expression class for a unary operator.
 class UnaryExprAST : public ExprAST {
   std::string Op;
   std::unique_ptr<ExprAST> Operand;
   bool isPrefix;
+  bool ParsedInUnsafe = false;
 
 public:
-  UnaryExprAST(const std::string &Op, std::unique_ptr<ExprAST> Operand, bool isPrefix)
-      : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix) {}
+  UnaryExprAST(const std::string &Op, std::unique_ptr<ExprAST> Operand,
+               bool isPrefix, bool parsedInUnsafe = false)
+      : Op(Op), Operand(std::move(Operand)), isPrefix(isPrefix),
+        ParsedInUnsafe(parsedInUnsafe) {}
 
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
   [[nodiscard]] const std::string &getOp() const { return Op; }
   ExprAST *getOperand() const { return Operand.get(); }
   bool getIsPrefix() const { return isPrefix; }
+  bool wasParsedInUnsafe() const { return ParsedInUnsafe; }
+  std::unique_ptr<ExprAST> takeOperand() { return std::move(Operand); }
 };
 
 /// CastExprAST - Expression class for type casting.
@@ -718,6 +919,100 @@ public:
   ExprAST *getOperand() const { return Operand.get(); }
 };
 
+class RetainExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  explicit RetainExprAST(std::unique_ptr<ExprAST> Operand)
+      : Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+};
+
+class ReleaseExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  explicit ReleaseExprAST(std::unique_ptr<ExprAST> Operand)
+      : Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+};
+
+class FreeExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  explicit FreeExprAST(std::unique_ptr<ExprAST> Operand)
+      : Operand(std::move(Operand)) {}
+
+  llvm::Value *codegen() override;
+  ExprAST *getOperand() const { return Operand.get(); }
+};
+
+class NewExprAST : public ExprAST {
+  std::string RequestedTypeName;
+  std::vector<std::unique_ptr<ExprAST>> Args;
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocations;
+  std::vector<SourceLocation> ArgEqualsLocations;
+  std::vector<std::unique_ptr<ExprAST>> ArraySizeExprs;
+  bool ArrayForm = false;
+  bool TypeElided = false;
+
+public:
+  NewExprAST(std::string TypeName,
+             std::vector<std::unique_ptr<ExprAST>> Args,
+             std::vector<std::string> ArgNames = {},
+             std::vector<SourceLocation> ArgNameLocations = {},
+             std::vector<SourceLocation> ArgEqualsLocations = {},
+             std::vector<std::unique_ptr<ExprAST>> ArraySizeExprs = {},
+             bool IsArray = false,
+             bool WasTypeElided = false)
+      : RequestedTypeName(std::move(TypeName)), Args(std::move(Args)),
+        ArgNames(std::move(ArgNames)),
+        ArgNameLocations(std::move(ArgNameLocations)),
+        ArgEqualsLocations(std::move(ArgEqualsLocations)),
+        ArraySizeExprs(std::move(ArraySizeExprs)), ArrayForm(IsArray),
+        TypeElided(WasTypeElided) {
+    normalizeArgMetadata();
+  }
+
+  llvm::Value *codegen() override;
+  [[nodiscard]] bool isArray() const { return ArrayForm; }
+  [[nodiscard]] bool hasExplicitType() const {
+    return !RequestedTypeName.empty() && !TypeElided;
+  }
+  [[nodiscard]] bool typeWasElided() const { return TypeElided && RequestedTypeName.empty(); }
+  [[nodiscard]] const std::string &getRequestedTypeName() const { return RequestedTypeName; }
+  [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+  [[nodiscard]] const std::vector<std::string> &getArgNames() const { return ArgNames; }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgNameLocations() const {
+    return ArgNameLocations;
+  }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgEqualsLocations() const {
+    return ArgEqualsLocations;
+  }
+  [[nodiscard]] ExprAST *getArraySize() const {
+    return ArraySizeExprs.empty() ? nullptr : ArraySizeExprs.front().get();
+  }
+  [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArraySizes() const {
+    return ArraySizeExprs;
+  }
+  void setInferredType(std::string TypeName) {
+    if (RequestedTypeName.empty())
+      RequestedTypeName = std::move(TypeName);
+  }
+  void normalizeArgMetadata() {
+    const std::size_t count = Args.size();
+    ArgNames.resize(count);
+    ArgNameLocations.resize(count);
+    ArgEqualsLocations.resize(count);
+  }
+};
+
 class MemberAccessExprAST;
 
 /// CallExprAST - Expression class for function calls.
@@ -725,23 +1020,62 @@ class CallExprAST : public ExprAST {
   std::string Callee;
   std::unique_ptr<ExprAST> CalleeExpr;
   std::vector<std::unique_ptr<ExprAST>> Args;
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocations;
+  std::vector<SourceLocation> ArgEqualsLocations;
+  bool IsDestructorCall = false;
+  std::string DestructorTypeName;
+  bool IsBaseConstructorCall = false;
 
 public:
   CallExprAST(const std::string &Callee,
-              std::vector<std::unique_ptr<ExprAST>> Args)
-      : Callee(Callee), Args(std::move(Args)) {}
+              std::vector<std::unique_ptr<ExprAST>> Args,
+              std::vector<std::string> ArgNames = {},
+              std::vector<SourceLocation> ArgNameLocations = {},
+              std::vector<SourceLocation> ArgEqualsLocations = {})
+      : Callee(Callee), Args(std::move(Args)),
+        ArgNames(std::move(ArgNames)),
+        ArgNameLocations(std::move(ArgNameLocations)),
+        ArgEqualsLocations(std::move(ArgEqualsLocations)) {
+    normalizeArgMetadata();
+  }
 
   CallExprAST(std::unique_ptr<ExprAST> CalleeExpr,
-              std::vector<std::unique_ptr<ExprAST>> Args)
-      : CalleeExpr(std::move(CalleeExpr)), Args(std::move(Args)) {}
+              std::vector<std::unique_ptr<ExprAST>> Args,
+              std::vector<std::string> ArgNames = {},
+              std::vector<SourceLocation> ArgNameLocations = {},
+              std::vector<SourceLocation> ArgEqualsLocations = {})
+      : CalleeExpr(std::move(CalleeExpr)), Args(std::move(Args)),
+        ArgNames(std::move(ArgNames)),
+        ArgNameLocations(std::move(ArgNameLocations)),
+        ArgEqualsLocations(std::move(ArgEqualsLocations)) {
+    normalizeArgMetadata();
+  }
 
   llvm::Value *codegen() override;
   [[nodiscard]] const std::string &getCallee() const { return Callee; }
   ExprAST *getCalleeExpr() const { return CalleeExpr.get(); }
   bool hasCalleeExpr() const { return static_cast<bool>(CalleeExpr); }
   [[nodiscard]] const std::vector<std::unique_ptr<ExprAST>> &getArgs() const { return Args; }
+  [[nodiscard]] const std::vector<std::string> &getArgNames() const { return ArgNames; }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgNameLocations() const {
+    return ArgNameLocations;
+  }
+  [[nodiscard]] const std::vector<SourceLocation> &getArgEqualsLocations() const {
+    return ArgEqualsLocations;
+  }
+  bool isDestructorCall() const { return IsDestructorCall; }
+  const std::string &getDestructorTypeName() const { return DestructorTypeName; }
+  void markDestructorCall(std::string typeName) {
+    IsDestructorCall = true;
+    DestructorTypeName = std::move(typeName);
+  }
+  void markBaseConstructorCall() { IsBaseConstructorCall = true; }
+  bool isBaseConstructorCall() const { return IsBaseConstructorCall; }
 
 private:
+  void normalizeArgMetadata();
+  void resetArgs(std::vector<std::unique_ptr<ExprAST>> NewArgs);
   llvm::Value *emitResolvedCall(const std::string &callee,
                                 std::vector<llvm::Value *> ArgValues,
                                 const std::vector<bool> &ArgIsRef,
@@ -750,12 +1084,32 @@ private:
   llvm::Value *codegenMemberCall(MemberAccessExprAST &member);
 };
 
+struct DefaultArgInfo {
+  enum class Kind : uint8_t { None, Number, Bool, String, Char, Null, GlobalAddress };
+
+  Kind kind = Kind::None;
+  NumericLiteral numberValue;
+  bool boolValue = false;
+  std::string stringValue;
+  std::string globalName;
+  uint32_t charValue = 0;
+
+  bool isSet() const { return kind != Kind::None; }
+};
+
 /// Parameter - Represents a function parameter with type and name
 struct Parameter {
   std::string Type;
   std::string Name;
   bool IsRef = false;
+  bool IsParams = false;
   TypeInfo DeclaredType;
+  bool HasDefault = false;
+  std::unique_ptr<ExprAST> DefaultValue;
+  DefaultArgInfo ResolvedDefault;
+  SourceLocation NameLocation{};
+  SourceLocation DefaultEqualsLocation{};
+  SourceLocation ParamsLocation{};
 };
 
 /// PrototypeAST - Represents the "prototype" for a function,
@@ -781,6 +1135,7 @@ public:
   const TypeInfo &getReturnTypeInfo() const { return ReturnTypeInfo; }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const std::vector<Parameter> &getArgs() const { return Args; }
+  std::vector<Parameter> &getMutableArgs() { return Args; }
   const std::vector<std::string> &getGenericParameters() const { return GenericParameters; }
   bool isUnsafe() const { return IsUnsafe; }
   bool returnsByRef() const { return ReturnsByRef; }
@@ -791,6 +1146,31 @@ public:
   const std::string &getMangledName() const;
 
   llvm::Function *codegen();
+};
+
+class DelegateDeclAST {
+  TypeInfo ReturnTypeInfo;
+  std::string Name;
+  std::vector<Parameter> Params;
+  bool ReturnsByRef = false;
+  SourceLocation NameLocation{};
+
+public:
+  DelegateDeclAST(TypeInfo ReturnTypeInfo, std::string Name,
+                  std::vector<Parameter> Params, bool ReturnsByRef,
+                  SourceLocation NameLocation)
+      : ReturnTypeInfo(std::move(ReturnTypeInfo)),
+        Name(std::move(Name)),
+        Params(std::move(Params)),
+        ReturnsByRef(ReturnsByRef),
+        NameLocation(NameLocation) {}
+
+  llvm::Type *codegen();
+  const std::string &getName() const { return Name; }
+  const TypeInfo &getReturnTypeInfo() const { return ReturnTypeInfo; }
+  const std::vector<Parameter> &getParams() const { return Params; }
+  bool returnsByRef() const { return ReturnsByRef; }
+  SourceLocation getNameLocation() const { return NameLocation; }
 };
 
 /// FunctionAST - Represents a function definition itself.
@@ -812,21 +1192,39 @@ public:
 /// FieldAST - Represents a field in a struct.
 class FieldAST {
   std::string Type;
+  TypeInfo DeclaredTypeInfo;
   std::string Name;
   MemberModifiers Modifiers;
   std::unique_ptr<ExprAST> Initializer;
 
 public:
   FieldAST(std::string Type,
+           TypeInfo DeclaredTypeInfo,
            std::string Name,
            MemberModifiers Modifiers,
            std::unique_ptr<ExprAST> Initializer = nullptr)
       : Type(std::move(Type)),
+        DeclaredTypeInfo(std::move(DeclaredTypeInfo)),
         Name(std::move(Name)),
         Modifiers(Modifiers),
-        Initializer(std::move(Initializer)) {}
+        Initializer(std::move(Initializer)) {
+    this->Type = this->DeclaredTypeInfo.typeName;
+  }
   
   const std::string &getType() const { return Type; }
+  const TypeInfo &getTypeInfo() const { return DeclaredTypeInfo; }
+  OwnershipQualifier getOwnershipQualifier() const {
+    return DeclaredTypeInfo.ownership;
+  }
+  bool hasExplicitOwnership() const {
+    return DeclaredTypeInfo.hasExplicitOwnership;
+  }
+  bool hasDeclaredGenericBinding() const {
+    return !DeclaredTypeInfo.genericKey.empty();
+  }
+  const GenericBindingKey &getDeclaredGenericBinding() const {
+    return DeclaredTypeInfo.genericKey;
+  }
   [[nodiscard]] const std::string &getName() const { return Name; }
   const MemberModifiers &getModifiers() const { return Modifiers; }
   bool hasInitializer() const { return static_cast<bool>(Initializer); }
@@ -839,13 +1237,18 @@ class MemberAccessExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Object;
   std::string MemberName;
   std::string GenericArguments;
+  bool IsDestructor = false;
+  bool IsSafeSmartArrow = false;
 
 public:
   MemberAccessExprAST(std::unique_ptr<ExprAST> Object, std::string MemberName,
-                      std::string GenericArguments = {})
+                      std::string GenericArguments = {},
+                      bool IsDestructor = false,
+                      bool IsSafeSmartArrow = false)
       : Object(std::move(Object)),
         MemberName(std::move(MemberName)),
-        GenericArguments(std::move(GenericArguments)) {}
+        GenericArguments(std::move(GenericArguments)),
+        IsDestructor(IsDestructor), IsSafeSmartArrow(IsSafeSmartArrow) {}
   
   llvm::Value *codegen() override;
   llvm::Value *codegen_ptr() override;
@@ -853,6 +1256,8 @@ public:
   const std::string &getMemberName() const { return MemberName; }
   bool hasExplicitGenerics() const { return !GenericArguments.empty(); }
   const std::string &getGenericArguments() const { return GenericArguments; }
+  bool isDestructorAccess() const { return IsDestructor; }
+  bool isSafeSmartArrow() const { return IsSafeSmartArrow; }
 };
 
 /// NullSafeAccessExprAST - Expression class for null-safe member access (e.g. obj?.field).
@@ -894,7 +1299,111 @@ private:
 enum class MethodKind : uint8_t {
   Constructor,
   Regular,
-  ThisOverride
+  ThisOverride,
+  Destructor
+};
+
+enum class AccessorKind : uint8_t {
+  Get,
+  Set
+};
+
+class AccessorAST {
+  AccessorKind Kind;
+  SourceLocation KeywordLocation{};
+  std::unique_ptr<ExprAST> ExpressionBody;
+  std::unique_ptr<BlockStmtAST> BlockBody;
+  bool IsImplicit = false;
+
+public:
+  AccessorAST(AccessorKind Kind, SourceLocation KeywordLocation,
+              std::unique_ptr<ExprAST> ExpressionBody,
+              std::unique_ptr<BlockStmtAST> BlockBody,
+              bool IsImplicit)
+      : Kind(Kind),
+        KeywordLocation(KeywordLocation),
+        ExpressionBody(std::move(ExpressionBody)),
+        BlockBody(std::move(BlockBody)),
+        IsImplicit(IsImplicit) {}
+
+  AccessorKind getKind() const { return Kind; }
+  SourceLocation getKeywordLocation() const { return KeywordLocation; }
+  bool isImplicit() const { return IsImplicit; }
+  bool hasExpressionBody() const { return static_cast<bool>(ExpressionBody); }
+  bool hasBlockBody() const { return static_cast<bool>(BlockBody); }
+  ExprAST *getExpressionBody() const { return ExpressionBody.get(); }
+  BlockStmtAST *getBlockBody() const { return BlockBody.get(); }
+  std::unique_ptr<ExprAST> takeExpressionBody() {
+    return std::move(ExpressionBody);
+  }
+  std::unique_ptr<BlockStmtAST> takeBlockBody() {
+    return std::move(BlockBody);
+  }
+};
+
+class PropertyAST {
+  std::string Type;
+  TypeInfo DeclaredTypeInfo;
+  std::string Name;
+  MemberModifiers Modifiers;
+  std::unique_ptr<ExprAST> Initializer;
+  std::vector<Parameter> Parameters;
+  SourceLocation NameLocation{};
+  std::unique_ptr<AccessorAST> Getter;
+  std::unique_ptr<AccessorAST> Setter;
+
+public:
+  PropertyAST(std::string Type,
+              TypeInfo DeclaredTypeInfo,
+              std::string Name,
+              MemberModifiers Modifiers,
+              std::unique_ptr<ExprAST> Initializer,
+              std::vector<Parameter> Parameters,
+              SourceLocation NameLocation,
+              std::unique_ptr<AccessorAST> Getter,
+              std::unique_ptr<AccessorAST> Setter)
+      : Type(std::move(Type)),
+        DeclaredTypeInfo(std::move(DeclaredTypeInfo)),
+        Name(std::move(Name)),
+        Modifiers(Modifiers),
+        Initializer(std::move(Initializer)),
+        Parameters(std::move(Parameters)),
+        NameLocation(NameLocation),
+        Getter(std::move(Getter)),
+        Setter(std::move(Setter)) {
+    this->Type = this->DeclaredTypeInfo.typeName;
+  }
+
+  const std::string &getType() const { return Type; }
+  const TypeInfo &getTypeInfo() const { return DeclaredTypeInfo; }
+  const std::string &getName() const { return Name; }
+  const MemberModifiers &getModifiers() const { return Modifiers; }
+  bool isIndexer() const { return !Parameters.empty(); }
+  bool isStatic() const {
+    return static_cast<uint8_t>(Modifiers.storage & StorageFlag::Static) != 0;
+  }
+  bool hasInitializer() const { return static_cast<bool>(Initializer); }
+  ExprAST *getInitializer() const { return Initializer.get(); }
+  std::unique_ptr<ExprAST> takeInitializer() { return std::move(Initializer); }
+  const std::vector<Parameter> &getParameters() const { return Parameters; }
+  SourceLocation getNameLocation() const { return NameLocation; }
+  bool hasGetter() const { return static_cast<bool>(Getter); }
+  bool hasSetter() const { return static_cast<bool>(Setter); }
+  AccessorAST *getGetter() const { return Getter.get(); }
+  AccessorAST *getSetter() const { return Setter.get(); }
+  std::unique_ptr<AccessorAST> takeGetter() { return std::move(Getter); }
+  std::unique_ptr<AccessorAST> takeSetter() { return std::move(Setter); }
+};
+
+struct ConstructorInitializer {
+  enum class Kind : uint8_t {
+    Base,
+    Field
+  };
+
+  Kind kind = Kind::Field;
+  std::string target;
+  std::vector<std::unique_ptr<ExprAST>> arguments;
 };
 
 struct MethodDefinition {
@@ -905,6 +1414,7 @@ struct MethodDefinition {
   std::string DisplayName;
   bool HasImplicitThis = false;
   PrototypeAST *PrototypeView = nullptr;
+  std::vector<ConstructorInitializer> Initializers;
 
   MethodDefinition(std::unique_ptr<FunctionAST> Function,
                    MemberModifiers Modifiers,
@@ -942,13 +1452,24 @@ struct MethodDefinition {
   bool needsInstanceThis() const {
     return !isStatic() && Kind != MethodKind::Constructor;
   }
+  void setConstructorInitializers(std::vector<ConstructorInitializer> inits) {
+    Initializers = std::move(inits);
+  }
+  std::vector<ConstructorInitializer> &getConstructorInitializers() {
+    return Initializers;
+  }
+  const std::vector<ConstructorInitializer> &getConstructorInitializers() const {
+    return Initializers;
+  }
 };
 
 /// StructAST - Represents a struct definition.
 class StructAST {
   AggregateKind Kind = AggregateKind::Struct;
   std::string Name;
+  std::vector<std::unique_ptr<DelegateDeclAST>> Delegates;
   std::vector<std::unique_ptr<FieldAST>> Fields;
+  std::vector<std::unique_ptr<PropertyAST>> Properties;
   std::vector<MethodDefinition> Methods;
   std::vector<std::string> BaseTypes;
   std::vector<std::string> GenericParameters;
@@ -958,25 +1479,37 @@ class StructAST {
   std::optional<TypeInfo> BaseClassInfo;
   std::vector<TypeInfo> InterfaceTypeInfos;
   bool IsAbstract = false;
+  int DestructorIndex = -1;
   mutable bool LayoutUsageComputed = false;
   mutable std::vector<bool> LayoutParameterUsage;
+  ClassInheritanceMetadata InheritanceMetadata;
 
 public:
   StructAST(AggregateKind Kind,
             std::string Name,
+            std::vector<std::unique_ptr<DelegateDeclAST>> Delegates,
             std::vector<std::unique_ptr<FieldAST>> Fields,
+            std::vector<std::unique_ptr<PropertyAST>> Properties,
             std::vector<MethodDefinition> Methods,
             std::vector<std::string> BaseTypes = {},
             std::vector<std::string> GenericParameters = {})
-      : Kind(Kind), Name(std::move(Name)), Fields(std::move(Fields)),
-        Methods(std::move(Methods)), BaseTypes(std::move(BaseTypes)),
+      : Kind(Kind), Name(std::move(Name)),
+        Delegates(std::move(Delegates)), Fields(std::move(Fields)),
+        Properties(std::move(Properties)), Methods(std::move(Methods)),
+        BaseTypes(std::move(BaseTypes)),
         GenericParameters(std::move(GenericParameters)) {}
   
   llvm::Type *codegen();
   
   AggregateKind getKind() const { return Kind; }
   [[nodiscard]] const std::string &getName() const { return Name; }
+  const std::vector<std::unique_ptr<DelegateDeclAST>> &getDelegates() const {
+    return Delegates;
+  }
   const std::vector<std::unique_ptr<FieldAST>> &getFields() const { return Fields; }
+  const std::vector<std::unique_ptr<PropertyAST>> &getProperties() const {
+    return Properties;
+  }
   const std::vector<MethodDefinition> &getMethods() const { return Methods; }
   std::vector<MethodDefinition> &getMethods() { return Methods; }
   const std::vector<std::string> &getBaseTypes() const { return BaseTypes; }
@@ -986,9 +1519,23 @@ public:
   const std::optional<TypeInfo> &getBaseClassInfo() const { return BaseClassInfo; }
   const std::vector<std::string> &getInterfaces() const { return InterfaceTypes; }
   const std::vector<TypeInfo> &getInterfaceTypeInfos() const { return InterfaceTypeInfos; }
+  const ClassInheritanceMetadata &getInheritanceMetadata() const {
+    return InheritanceMetadata;
+  }
+  bool hasDestructor() const { return DestructorIndex >= 0; }
   bool isAbstract() const { return IsAbstract; }
   bool isInterface() const { return Kind == AggregateKind::Interface; }
   bool isGenericTemplate() const { return !GenericParameters.empty(); }
+  MethodDefinition *getDestructor() {
+    if (!hasDestructor())
+      return nullptr;
+    return &Methods[static_cast<size_t>(DestructorIndex)];
+  }
+  const MethodDefinition *getDestructor() const {
+    if (!hasDestructor())
+      return nullptr;
+    return &Methods[static_cast<size_t>(DestructorIndex)];
+  }
   const std::vector<bool> &layoutParameterUsage() const;
 
   void setBaseClass(std::optional<std::string> Base) { BaseClass = std::move(Base); }
@@ -999,6 +1546,10 @@ public:
   void appendBaseTypes(std::vector<std::string> bases) { BaseTypes = std::move(bases); }
   void setBaseTypeInfos(std::vector<TypeInfo> Infos) { BaseTypeInfos = std::move(Infos); }
   void setGenericParameters(std::vector<std::string> Generics) { GenericParameters = std::move(Generics); }
+  void setInheritanceMetadata(ClassInheritanceMetadata metadata) {
+    InheritanceMetadata = std::move(metadata);
+  }
+  void setDestructorIndex(int index) { DestructorIndex = index; }
 };
 
 // Initialize LLVM module

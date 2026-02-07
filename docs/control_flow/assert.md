@@ -2,6 +2,9 @@
 
 Assert statements are used for debugging and testing to verify that conditions hold true at runtime. If an assertion fails, the program terminates immediately.
 
+> [!WARNING]
+> Failed assertions abort the process and cannot be caught, so any failing assert will mark the test run as a hard failure.
+
 Assert statements can be used both inside functions and at the top level (global scope), making them useful for compile-time validation and runtime checks.
 
 ## Basic Syntax

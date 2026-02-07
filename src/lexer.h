@@ -15,6 +15,7 @@ enum Token {
   tok_use = -2,             // import statement
   tok_extern = -3,          // external function declaration
   tok_return = -4,          // return statement
+  tok_delegate = -114,      // delegate keyword
   
   // control flow
   tok_for = -5,             // for loop
@@ -33,11 +34,14 @@ enum Token {
   tok_case = -18,           // case in switch
   tok_default = -19,        // default case in switch
   tok_assert = -20,         // assert statement
+  tok_is = -112,            // is (type check)
+  tok_not_kw = -113,        // not (type check)
 
   // basic types
   tok_int = -21,            // int (32-bit signed integer)
   tok_float = -22,          // float (32-bit floating point)
   tok_double = -23,         // double (64-bit floating point)
+  tok_decimal = -115,       // decimal (128-bit decimal payload)
   tok_char = -24,           // char (16-bit Unicode character)
   tok_void = -25,           // void (no type)
   tok_bool = -26,           // bool (true/false)
@@ -141,6 +145,12 @@ enum Token {
   // reference type
   tok_ref = -89,              // ref
 
+  // variadic parameter keyword
+  tok_params = -108,          // params
+  tok_get = -109,             // get (property/indexer accessor)
+  tok_set = -110,             // set (property/indexer accessor)
+  tok_value = -111,           // value (setter parameter)
+
   // interpolated string tokens
   tok_interpolated_string_start = -90,    // $"
   tok_interpolated_string_segment = -91,
@@ -154,6 +164,15 @@ enum Token {
   tok_null_array_access = -97,      // ?[ (null-safe array access)
   tok_null_coalescing = -98,        // ?? (null-coalescing operator)
   tok_null_coalescing_assign = -99, // ??= (null-coalescing assignment)
+
+  // ARC / ownership keywords
+  tok_weak = -101,             // weak<T> smart pointer helper
+  tok_unique = -102,           // unique<T> smart pointer helper
+  tok_shared = -103,           // shared<T> smart pointer helper
+  tok_autoreleasepool = -104,  // @autoreleasepool
+  tok_new = -105,              // new keyword (reserved)
+  tok_free = -106,             // free keyword (reserved)
+  tok_tilde_identifier = -107, // ~identifier (destructors)
 
   // error token
   tok_error = -100            // error during lexing

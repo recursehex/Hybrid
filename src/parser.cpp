@@ -1,6 +1,9 @@
+// This file implements the Hybrid language parser that builds AST nodes and manages parsing state.
+
 #include "parser.h"
 #include "lexer.h"
 #include "compiler_session.h"
+#include "toplevel.h"
 #include <cstdio>
 #include <cmath>
 #include <cctype>
@@ -16,6 +19,7 @@
 #define BinopPrecedence (currentParser().binopPrecedence)
 #define StructNames (currentParser().structNames)
 #define ClassNames (currentParser().classNames)
+#define DelegateNames (currentParser().delegateNames)
 #define StructDefinitionStack (currentParser().structDefinitionStack)
 #define ClassDefinitionStack (currentParser().classDefinitionStack)
 #define LoopNestingDepth (currentParser().loopNestingDepth)
@@ -29,13 +33,17 @@
 static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr();
 static void RecoverAfterExpressionError();
 static void SkipNewlines();
-static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args);
+static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args,
+                              std::vector<std::string> &ArgNames,
+                              std::vector<SourceLocation> &ArgNameLocations,
+                              std::vector<SourceLocation> &ArgEqualsLocations);
 static std::string ParseCompleteType();
+static bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef = false);
+static std::unique_ptr<ExprAST> ParseNewExpression();
 static bool ParseGenericParameterList(std::vector<std::string> &parameters);
 static bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
                                              bool allowDisambiguation = false);
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
-
 class GenericParameterScope {
 public:
   explicit GenericParameterScope(const std::vector<std::string> &params)
@@ -74,6 +82,14 @@ private:
   bool active = true;
 };
 
+template <typename T>
+static std::unique_ptr<T> withLocation(std::unique_ptr<T> expr,
+                                       SourceLocation loc) {
+  if (expr)
+    expr->setSourceLocation(loc);
+  return expr;
+}
+
 static std::vector<std::vector<ParserContext::PendingToken> *> &
 tokenCaptureStack() {
   static std::vector<std::vector<ParserContext::PendingToken> *> stack;
@@ -98,7 +114,11 @@ public:
         originalToken(currentParser().curTok),
         originalLocation(currentParser().currentTokenLocation),
         originalPreviousToken(currentParser().previousToken),
-        originalPreviousLocation(currentParser().previousTokenLocation) {
+        originalPreviousLocation(currentParser().previousTokenLocation),
+        originalIdentifier(currentLexer().identifierStr),
+        originalStringLiteral(currentLexer().stringLiteral),
+        originalNumericLiteral(currentLexer().numericLiteral),
+        originalCharLiteral(currentLexer().charLiteral) {
     if (active)
       tokenCaptureStack().push_back(&capturedTokens);
   }
@@ -119,10 +139,10 @@ public:
     parser.currentTokenLocation = originalLocation;
     parser.previousToken = originalPreviousToken;
     parser.previousTokenLocation = originalPreviousLocation;
-    currentLexer().identifierStr.clear();
-    currentLexer().stringLiteral.clear();
-    currentLexer().numericLiteral = NumericLiteral();
-    currentLexer().charLiteral = 0;
+    currentLexer().identifierStr = originalIdentifier;
+    currentLexer().stringLiteral = originalStringLiteral;
+    currentLexer().numericLiteral = originalNumericLiteral;
+    currentLexer().charLiteral = originalCharLiteral;
     for (auto it = capturedTokens.rbegin(); it != capturedTokens.rend(); ++it)
       parser.pushReplayToken(*it);
     tokenCaptureStack().pop_back();
@@ -142,6 +162,10 @@ private:
   SourceLocation originalLocation{};
   int originalPreviousToken = 0;
   SourceLocation originalPreviousLocation{};
+  std::string originalIdentifier;
+  std::string originalStringLiteral;
+  NumericLiteral originalNumericLiteral;
+  char originalCharLiteral = 0;
   std::vector<ParserContext::PendingToken> capturedTokens;
 };
 
@@ -236,16 +260,51 @@ static bool parseGenericArgumentSegment(const std::string &segment,
 
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef) {
   TypeInfo info;
+  std::string_view working(typeName);
+
+  auto trimLeadingWhitespace = [&]() {
+    while (!working.empty() &&
+           std::isspace(static_cast<unsigned char>(working.front())))
+      working.remove_prefix(1);
+  };
+
+  trimLeadingWhitespace();
+
+  OwnershipQualifier parsedOwnership = OwnershipQualifier::Strong;
+  bool hasOwnershipQualifier = false;
+
+  auto tryConsumeQualifier = [&](std::string_view keyword,
+                                 OwnershipQualifier qualifier) -> bool {
+    if (working.size() < keyword.size())
+      return false;
+    if (working.substr(0, keyword.size()) != keyword)
+      return false;
+    if (working.size() > keyword.size()) {
+      unsigned char next =
+          static_cast<unsigned char>(working[keyword.size()]);
+      if (!std::isspace(next))
+        return false;
+    }
+    working.remove_prefix(keyword.size());
+    trimLeadingWhitespace();
+    parsedOwnership = qualifier;
+    hasOwnershipQualifier = true;
+    return true;
+  };
+
+  tryConsumeQualifier("weak", OwnershipQualifier::Weak);
+
+  std::string normalized(working.begin(), working.end());
   std::string sanitized;
-  sanitized.reserve(typeName.size());
+  sanitized.reserve(normalized.size());
 
   bool pendingNullable = false;
   bool arraySeen = false;
   bool explicitNullable = false;
   std::vector<unsigned> arrayRanks;
 
-  for (size_t i = 0; i < typeName.size(); ++i) {
-    char c = typeName[i];
+  for (size_t i = 0; i < normalized.size(); ++i) {
+    char c = normalized[i];
 
     if (c == '?') {
       pendingNullable = true;
@@ -255,8 +314,9 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
     if (c == '@') {
       sanitized.push_back(c);
       ++i;
-      while (i < typeName.size() && std::isdigit(static_cast<unsigned char>(typeName[i]))) {
-        sanitized.push_back(typeName[i]);
+      while (i < normalized.size() &&
+             std::isdigit(static_cast<unsigned char>(normalized[i]))) {
+        sanitized.push_back(normalized[i]);
         ++i;
       }
       --i; // compensate for extra increment in while loop
@@ -268,17 +328,17 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
     }
 
     if (c == '[') {
-      size_t close = typeName.find(']', i);
+      size_t close = normalized.find(']', i);
       if (close == std::string::npos)
         break;
 
       unsigned rank = 1;
       for (size_t j = i + 1; j < close; ++j) {
-        if (typeName[j] == ',')
+        if (normalized[j] == ',')
           ++rank;
       }
 
-      sanitized.append(typeName, i, close - i + 1);
+      sanitized.append(normalized, i, close - i + 1);
       arrayRanks.push_back(rank);
       arraySeen = true;
       if (pendingNullable) {
@@ -338,6 +398,10 @@ static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declared
   info.refStorage = declaredRef ? RefStorageClass::RefValue : RefStorageClass::None;
   info.isMutable = true;
   info.declaredRef = declaredRef;
+  finalizeTypeInfoMetadata(info);
+  info.hasExplicitOwnership = hasOwnershipQualifier;
+  if (hasOwnershipQualifier)
+    info.ownership = parsedOwnership;
   return info;
 }
 
@@ -413,6 +477,7 @@ void exitUnsafeContext() {
 bool IsBuiltInType()
 {
   return CurTok == tok_int || CurTok == tok_float || CurTok == tok_double ||
+         CurTok == tok_decimal ||
          CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool ||
          CurTok == tok_string || CurTok == tok_byte || CurTok == tok_short ||
          CurTok == tok_long || CurTok == tok_sbyte || CurTok == tok_ushort ||
@@ -441,13 +506,21 @@ static bool IsActiveClassName(const std::string &name) {
 /// Helper function to check if current token is a valid type (built-in or struct)
 bool IsValidType()
 {
-  return IsBuiltInType() ||
-         (CurTok == tok_identifier &&
-          (StructNames.contains(IdentifierStr) ||
-           ClassNames.contains(IdentifierStr) ||
-           IsActiveStructName(IdentifierStr) ||
-           IsActiveClassName(IdentifierStr) ||
-           currentParser().isGenericParameter(IdentifierStr)));
+  if (IsBuiltInType())
+    return true;
+
+  if (CurTok == tok_unique || CurTok == tok_shared || CurTok == tok_weak)
+    return true;
+
+  if (CurTok != tok_identifier)
+    return false;
+
+  return StructNames.contains(IdentifierStr) ||
+         ClassNames.contains(IdentifierStr) ||
+         DelegateNames.contains(IdentifierStr) ||
+         IsActiveStructName(IdentifierStr) ||
+         IsActiveClassName(IdentifierStr) ||
+         currentParser().isGenericParameter(IdentifierStr);
 }
 
 enum class AccessSpecifier {
@@ -594,6 +667,32 @@ static MemberModifiers FinalizeMemberModifiers(const PendingMemberModifiers &pen
   return modifiers;
 }
 
+class ScopedValueKeyword {
+  ParserContext &Parser;
+  bool Previous = false;
+
+public:
+  explicit ScopedValueKeyword(bool enable)
+      : Parser(currentParser()), Previous(Parser.allowValueIdentifier) {
+    Parser.allowValueIdentifier = enable;
+  }
+
+  ~ScopedValueKeyword() { Parser.allowValueIdentifier = Previous; }
+};
+
+class ScopedTypeCheckContext {
+  ParserContext &Parser;
+  bool Previous = false;
+
+public:
+  explicit ScopedTypeCheckContext(bool enable)
+      : Parser(currentParser()), Previous(Parser.allowTypeCheck) {
+    Parser.allowTypeCheck = enable;
+  }
+
+  ~ScopedTypeCheckContext() { Parser.allowTypeCheck = Previous; }
+};
+
 static bool isPascalCase(const std::string &name) {
   if (name.empty())
     return false;
@@ -612,6 +711,28 @@ static bool isPascalCase(const std::string &name) {
 
 static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
   while (true) {
+    if (CurTok == tok_null_array_access) {
+      // Treat '?[' as nullable element type followed by array suffix
+      Type += "?";
+      std::string segment = "[";
+      getNextToken(); // advance to the token after '['
+
+      while (CurTok == ',') {
+        segment += ",";
+        getNextToken(); // eat ','
+      }
+
+      if (CurTok != ']') {
+        reportCompilerError("Expected ']' after '[' in array type");
+        return false;
+      }
+
+      getNextToken(); // eat ']'
+      segment += "]";
+      Type += segment;
+      continue;
+    }
+
     if (CurTok == tok_nullable) {
       Type += "?";
       getNextToken();
@@ -620,7 +741,8 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
 
     if (CurTok == tok_at && !pointerSeen) {
       if (!isInUnsafeContext()) {
-        fprintf(stderr, "Error: Pointer types can only be used within unsafe blocks or unsafe functions\n");
+        reportCompilerError(
+            "Pointer types can only be used within unsafe blocks or unsafe functions");
         return false;
       }
 
@@ -629,13 +751,13 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
 
       if (CurTok == tok_number) {
         if (!LexedNumericLiteral.isInteger() || !LexedNumericLiteral.fitsInUnsignedBits(32)) {
-          fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+          reportCompilerError("Pointer level must be a positive integer");
           return false;
         }
 
         uint64_t level = LexedNumericLiteral.getUnsignedValue();
         if (level == 0) {
-          fprintf(stderr, "Error: Pointer level must be a positive integer\n");
+          reportCompilerError("Pointer level must be a positive integer");
           return false;
         }
 
@@ -652,13 +774,34 @@ static bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
       std::string segment = "[";
       getNextToken(); // eat '['
 
-      while (CurTok == ',') {
-        segment += ",";
-        getNextToken(); // eat ','
+      while (CurTok != ']' && CurTok != tok_eof) {
+        if (CurTok == tok_newline) {
+          getNextToken();
+          continue;
+        }
+
+        if (CurTok == ',') {
+          segment += ",";
+          getNextToken(); // eat ','
+          continue;
+        }
+
+        if (CurTok == tok_number) {
+          if (!LexedNumericLiteral.isInteger()) {
+            reportCompilerError("Array bounds in a type must be an integer literal");
+            return false;
+          }
+          segment += LexedNumericLiteral.getSpelling();
+          getNextToken(); // eat number
+          continue;
+        }
+
+        reportCompilerError("Expected ',' or ']' in array type");
+        return false;
       }
 
       if (CurTok != ']') {
-        fprintf(stderr, "Error: Expected ']' after '[' in array type\n");
+        reportCompilerError("Expected ']' after '[' in array type");
         return false;
       }
 
@@ -724,7 +867,7 @@ static bool ParseOptionalGenericArgumentList(std::string &Type,
       return fail("Expected ',' or '>' in generic argument list");
     }
 
-    if (!IsValidType())
+    if (!IsValidType() && CurTok != '(')
       return fail("Expected type argument in generic list");
 
     std::string argument = ParseCompleteType();
@@ -784,27 +927,320 @@ static bool ParseGenericParameterList(std::vector<std::string> &parameters) {
   return true;
 }
 
-/// Helper function to parse a complete type including array and pointer modifiers
-/// Returns the full type string (e.g. "int@", "int@2", "int[]", "float@[]")
+static bool ParseTypeArgumentListForType(std::string &TypeName,
+                                         std::vector<TypeInfo> &TypeArgs) {
+  if (CurTok != tok_lt)
+    return true;
+
+  TemplateAngleScope angleScope;
+  TypeName.push_back('<');
+
+  getNextToken(); // eat '<'
+  SkipNewlines();
+
+  bool expectArgument = true;
+  while (true) {
+    if (CurTok == tok_gt) {
+      if (expectArgument) {
+        reportCompilerError("Expected type argument after '<'");
+        return false;
+      }
+      TypeName.push_back('>');
+      getNextToken();
+      break;
+    }
+
+    if (CurTok == tok_eof) {
+      reportCompilerError("Unterminated generic argument list");
+      return false;
+    }
+
+    if (!expectArgument) {
+      if (CurTok == ',') {
+        TypeName.push_back(',');
+        getNextToken();
+        SkipNewlines();
+        expectArgument = true;
+        continue;
+      }
+      if (CurTok == tok_gt)
+        continue;
+      reportCompilerError("Expected ',' or '>' in generic argument list");
+      return false;
+    }
+
+    if (!IsValidType() && CurTok != '(') {
+      reportCompilerError("Expected type argument in generic list");
+      return false;
+    }
+
+    TypeInfo argInfo;
+    if (!ParseCompleteTypeInfo(argInfo, false)) {
+      reportCompilerError("Failed to parse type argument");
+      return false;
+    }
+
+    TypeArgs.push_back(argInfo);
+    TypeName.append(typeNameFromInfo(argInfo));
+    SkipNewlines();
+    expectArgument = false;
+  }
+
+  return true;
+}
+
+static bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef) {
+  std::string TypeName;
+  std::vector<TypeInfo> parsedTypeArguments;
+  std::vector<std::string> tupleElementNames;
+
+  if (CurTok == '(') {
+    getNextToken(); // eat '('
+    SkipNewlines();
+
+    std::vector<TypeInfo> elementInfos;
+    std::vector<std::string> elementTypeNames;
+    bool sawComma = false;
+
+    if (CurTok != ')') {
+      while (true) {
+        TypeInfo elementInfo;
+        if (!ParseCompleteTypeInfo(elementInfo, false))
+          return false;
+        elementTypeNames.push_back(typeNameFromInfo(elementInfo));
+        elementInfos.push_back(elementInfo);
+
+        SkipNewlines();
+        if (CurTok == tok_identifier) {
+          tupleElementNames.push_back(IdentifierStr);
+          getNextToken();
+          SkipNewlines();
+        } else {
+          tupleElementNames.emplace_back();
+        }
+
+        if (CurTok == ')')
+          break;
+
+        if (CurTok != ',') {
+          reportCompilerError("Expected ')' or ',' in tuple type");
+          return false;
+        }
+
+        sawComma = true;
+        getNextToken(); // eat ','
+        SkipNewlines();
+      }
+    }
+
+    if (CurTok != ')') {
+      reportCompilerError("Expected ')' to close tuple type");
+      return false;
+    }
+    getNextToken(); // eat ')'
+
+    if (!sawComma || elementInfos.size() < 2) {
+      reportCompilerError("Tuple types require at least two elements");
+      return false;
+    }
+
+    TypeName = "tuple<";
+    for (size_t i = 0; i < elementTypeNames.size(); ++i) {
+      if (i > 0)
+        TypeName += ",";
+      TypeName += elementTypeNames[i];
+    }
+    TypeName += ">";
+
+    parsedTypeArguments = std::move(elementInfos);
+  } else {
+    if (!IsValidType())
+      return false;
+
+    TypeName = IdentifierStr;
+    getNextToken(); // eat base type
+
+    if (!ParseTypeArgumentListForType(TypeName, parsedTypeArguments))
+      return false;
+  }
+
+  SkipNewlines();
+
+  bool pointerSeen = false;
+  if (!AppendTypeSuffix(TypeName, pointerSeen))
+    return false;
+
+  outInfo = buildDeclaredTypeInfo(TypeName, declaredRef);
+  if (!parsedTypeArguments.empty()) {
+    outInfo.typeArguments = std::move(parsedTypeArguments);
+    finalizeTypeInfoMetadata(outInfo);
+  }
+  if (!tupleElementNames.empty())
+    outInfo.tupleElementNames = std::move(tupleElementNames);
+  return true;
+}
+
 std::string ParseCompleteType()
 {
-  if (!IsValidType())
+  TypeInfo info;
+  if (!ParseCompleteTypeInfo(info, false))
     return "";
+  return typeNameFromInfo(info);
+}
+
+static bool ParseNewTypeName(std::string &OutType, bool stopBeforeArrayBounds) {
+  if (!IsValidType())
+    return false;
 
   std::string Type = IdentifierStr;
   getNextToken(); // eat base type
 
   if (!ParseOptionalGenericArgumentList(Type))
-    return "";
+    return false;
 
   SkipNewlines();
 
   bool pointerSeen = false;
+  while (true) {
+    if (CurTok == tok_nullable) {
+      Type += "?";
+      getNextToken();
+      continue;
+    }
 
-  if (!AppendTypeSuffix(Type, pointerSeen))
-    return "";
+    if (CurTok == tok_at && !pointerSeen) {
+      if (!isInUnsafeContext()) {
+        reportCompilerError(
+            "Pointer types can only be used within 'unsafe' contexts",
+            "Mark the surrounding function or block as 'unsafe' before using pointer types with 'new'.");
+        return false;
+      }
 
-  return Type;
+      pointerSeen = true;
+      getNextToken(); // eat '@'
+
+      if (CurTok == tok_number) {
+        if (!LexedNumericLiteral.isInteger() ||
+            !LexedNumericLiteral.fitsInUnsignedBits(32) ||
+            LexedNumericLiteral.getUnsignedValue() == 0) {
+          reportCompilerError("Pointer level must be a positive integer");
+          return false;
+        }
+
+        uint64_t level = LexedNumericLiteral.getUnsignedValue();
+        Type += "@";
+        Type += std::to_string(level);
+        getNextToken(); // eat number
+      } else {
+        Type += "@";
+      }
+      SkipNewlines();
+      continue;
+    }
+
+    if (CurTok == '[' && stopBeforeArrayBounds)
+      break;
+
+    break;
+  }
+
+  OutType = std::move(Type);
+  return true;
+}
+
+static std::unique_ptr<ExprAST> ParseNewExpression() {
+  getNextToken(); // consume 'new'
+  SkipNewlines();
+
+  bool sawType = false;
+  std::string typeName;
+
+  if (CurTok != '[' && IsValidType()) {
+    if (!ParseNewTypeName(typeName, /*stopBeforeArrayBounds=*/true))
+      return nullptr;
+    sawType = !typeName.empty();
+    SkipNewlines();
+  }
+
+  if (CurTok == '[') {
+    getNextToken(); // eat '['
+    SkipNewlines();
+
+    if (CurTok == tok_eof || CurTok == tok_newline || CurTok == ']') {
+      return LogError("Expected array size expression after '[' in 'new' expression",
+                      "Provide a length expression like 'new int[5]'.");
+    }
+
+    std::vector<std::unique_ptr<ExprAST>> bounds;
+    while (true) {
+      auto Length = ParseExpression();
+      if (!Length)
+        return nullptr;
+      bounds.push_back(std::move(Length));
+
+      SkipNewlines();
+      if (CurTok != ',')
+        break;
+      getNextToken(); // eat ','
+      SkipNewlines();
+      if (CurTok == tok_eof || CurTok == tok_newline || CurTok == ']') {
+        return LogError("Expected array size expression after ',' in 'new' expression");
+      }
+    }
+
+    if (CurTok != ']') {
+      return LogError("Expected ']' after array bounds in 'new' expression");
+    }
+    getNextToken(); // eat ']'
+
+    auto NewExpr = std::make_unique<NewExprAST>(
+        typeName, std::vector<std::unique_ptr<ExprAST>>{},
+        std::vector<std::string>{}, std::vector<SourceLocation>{},
+        std::vector<SourceLocation>{}, std::move(bounds), true, !sawType);
+    if (!typeName.empty()) {
+      std::string resultType = typeName;
+      if (resultType.find('[') == std::string::npos) {
+        size_t boundCount = NewExpr->getArraySizes().size();
+        if (boundCount > 1) {
+          resultType += "[";
+          resultType.append(boundCount - 1, ',');
+          resultType += "]";
+        } else {
+          resultType += "[]";
+        }
+      }
+      NewExpr->setTypeName(resultType);
+    }
+    NewExpr->markTemporary();
+    return NewExpr;
+  }
+
+  if (CurTok != '(') {
+    if (sawType) {
+      return LogError("Expected constructor arguments after 'new'",
+                      "Add parentheses after 'new " + typeName +
+                          "' to invoke a constructor.");
+    }
+    return LogError("Expected target type or constructor after 'new'",
+                    "Provide a type name (e.g. 'new Box()') or array bounds (e.g. 'new[5]').");
+  }
+
+  std::vector<std::unique_ptr<ExprAST>> Args;
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocs;
+  std::vector<SourceLocation> ArgEqualLocs;
+  if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
+    return nullptr;
+
+  auto NewExpr = std::make_unique<NewExprAST>(
+      typeName, std::move(Args), std::move(ArgNames),
+      std::move(ArgNameLocs), std::move(ArgEqualLocs),
+      std::vector<std::unique_ptr<ExprAST>>{}, false,
+      !sawType);
+  if (!typeName.empty())
+    NewExpr->setTypeName(typeName);
+  NewExpr->markTemporary();
+  return NewExpr;
 }
 
 /// GetTokPrecedence - Get the precedence of the pending binary operator token.
@@ -864,6 +1300,8 @@ int GetTokPrecedence() {
     return BinopPrecedence["\?\?="];
   } else if (CurTok == tok_if) {
     return 4; // Ternary operator precedence (higher than assignment, lower than logical OR)
+  } else if (CurTok == tok_is) {
+    return BinopPrecedence["=="];
   }
 
   // Handle single character operators
@@ -939,7 +1377,6 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
       }
 
       if (CurTok == tok_interpolated_string_end) {
-        segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
         getNextToken(); // consume end token
         break;
       }
@@ -953,7 +1390,6 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
     }
 
     if (CurTok == tok_interpolated_string_end) {
-      segments.push_back(InterpolatedStringExprAST::Segment::makeLiteral(StringVal));
       getNextToken(); // consume end token
       break;
     }
@@ -991,9 +1427,14 @@ static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr() {
   return std::make_unique<InterpolatedStringExprAST>(std::move(merged));
 }
 
-static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
+static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args,
+                              std::vector<std::string> &ArgNames,
+                              std::vector<SourceLocation> &ArgNameLocations,
+                              std::vector<SourceLocation> &ArgEqualsLocations) {
   getNextToken(); // eat '('
   SkipNewlines();
+
+  bool sawNamedArgument = false;
 
   if (CurTok == ')') {
     getNextToken(); // eat ')'
@@ -1001,6 +1442,40 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
   }
 
   while (true) {
+    SkipNewlines();
+
+    std::string argName;
+    SourceLocation argNameLoc{};
+    SourceLocation equalsLoc{};
+    bool isNamed = false;
+
+    if (CurTok == tok_identifier) {
+      TokenReplayScope replay(true);
+      argName = IdentifierStr;
+      argNameLoc = currentParser().currentTokenLocation;
+
+      getNextToken(); // tentative consume identifier
+      SkipNewlines();
+      if (CurTok == '=') {
+        isNamed = true;
+        equalsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        replay.commit();
+      } else {
+        argName.clear();
+        argNameLoc = {};
+        equalsLoc = {};
+        replay.rollback();
+      }
+    }
+
+    if (sawNamedArgument && !isNamed) {
+      reportCompilerError("Positional argument cannot follow a named argument");
+      return false;
+    }
+
+    sawNamedArgument = sawNamedArgument || isNamed;
+
     SkipNewlines();
     bool argIsRef = false;
     if (CurTok == tok_ref) {
@@ -1018,6 +1493,10 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
     else
       Args.push_back(std::move(Arg));
 
+    ArgNames.push_back(std::move(argName));
+    ArgNameLocations.push_back(argNameLoc);
+    ArgEqualsLocations.push_back(equalsLoc);
+
     SkipNewlines();
 
     if (CurTok == ')') {
@@ -1032,6 +1511,34 @@ static bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &Args) {
 
     getNextToken(); // eat ','
     SkipNewlines();
+  }
+
+  return true;
+}
+
+static void setDiagnosticLocation(SourceLocation loc) {
+  if (!loc.isValid())
+    return;
+  currentParser().currentTokenLocation = loc;
+  currentLexer().setTokenStart(loc);
+}
+
+static bool ValidateParameterDefaults(const std::vector<Parameter> &Args) {
+  bool sawDefault = false;
+  for (const auto &param : Args) {
+    if (param.IsParams)
+      return true;
+    if (param.HasDefault) {
+      sawDefault = true;
+      continue;
+    }
+
+    if (sawDefault) {
+      setDiagnosticLocation(param.NameLocation);
+      reportCompilerError(
+          "Parameters with default values must be the trailing parameters");
+      return false;
+    }
   }
 
   return true;
@@ -1092,6 +1599,8 @@ static std::string InferExprType(const ExprAST* expr)
   if (const auto *numExpr = dynamic_cast<const NumberExprAST*>(expr))
   {
     const NumericLiteral &literal = numExpr->getLiteral();
+    if (literal.isDecimal())
+      return "decimal";
     if (literal.isInteger())
     {
       if (literal.fitsInSignedBits(32))
@@ -1120,7 +1629,7 @@ static std::string InferExprType(const ExprAST* expr)
 
   if (dynamic_cast<const NullExprAST*>(expr))
   {
-    return "string"; // null is used for string initialization
+    return ""; // null has no inherent type; defer to contextual typing
   }
 
   // Check for cast expressions
@@ -1132,7 +1641,10 @@ static std::string InferExprType(const ExprAST* expr)
   // Check for array expressions
   if (const ArrayExprAST* arrayExpr = dynamic_cast<const ArrayExprAST*>(expr))
   {
-    return arrayExpr->getElementType() + "[]";
+    const std::string &elemType = arrayExpr->getElementType();
+    if (elemType.empty())
+      return "";
+    return elemType + "[]";
   }
 
   // For other expressions, can't determine type at parse time
@@ -1146,6 +1658,23 @@ static bool AreTypesCompatible(const std::string& type1, const std::string& type
 
   if (type1 == type2) return true;
 
+  auto isIntegerLike = [](const std::string &typeName) {
+    return typeName == "byte" || typeName == "sbyte" ||
+           typeName == "short" || typeName == "ushort" ||
+           typeName == "int" || typeName == "uint" ||
+           typeName == "long" || typeName == "ulong" ||
+           typeName == "char" || typeName == "schar" ||
+           typeName == "lchar";
+  };
+
+  if (type1 == "decimal" || type2 == "decimal") {
+    if (type1 == "decimal" && isIntegerLike(type2))
+      return true;
+    if (type2 == "decimal" && isIntegerLike(type1))
+      return true;
+    return false;
+  }
+
   // Allow int and float to be compatible (will need casting during codegen)
   if ((type1 == "int" || type1 == "float" || type1 == "double") &&
       (type2 == "int" || type2 == "float" || type2 == "double"))
@@ -1158,13 +1687,16 @@ static bool AreTypesCompatible(const std::string& type1, const std::string& type
 
 /// numberexpr ::= number
 std::unique_ptr<ExprAST> ParseNumberExpr() {
+  SourceLocation loc = currentParser().currentTokenLocation;
   auto Result = std::make_unique<NumberExprAST>(LexedNumericLiteral);
+  Result->setSourceLocation(loc);
   getNextToken(); // consume the number
   return std::move(Result);
 }
 
 /// parenexpr ::= '(' expression ')'
 std::unique_ptr<ExprAST> ParseParenExpr() {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat '('
   SkipNewlines();
 
@@ -1197,7 +1729,9 @@ std::unique_ptr<ExprAST> ParseParenExpr() {
   getNextToken(); // eat ')'
 
   bool isTuple = sawComma || Elements.size() != 1;
-  return std::make_unique<ParenExprAST>(std::move(Elements), isTuple);
+  auto expr = std::make_unique<ParenExprAST>(std::move(Elements), isTuple);
+  expr->setSourceLocation(loc);
+  return expr;
 }
 
 // Forward declaration
@@ -1210,6 +1744,7 @@ static void RecoverAfterExpressionError();
 ///   ::= identifier '[' expression ']'
 std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   std::string IdName = IdentifierStr;
+  SourceLocation loc = currentParser().currentTokenLocation;
 
   getNextToken(); // eat identifier.
 
@@ -1219,23 +1754,33 @@ std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 
   if (CurTok == '[') {
     // Array indexing
-    auto ArrayVar = std::make_unique<VariableExprAST>(IdName);
+    auto ArrayVar = withLocation(std::make_unique<VariableExprAST>(IdName),
+                                 loc);
     return ParseArrayIndex(std::move(ArrayVar));
   }
 
   if (CurTok != '(') // Simple variable ref.
-    return std::make_unique<VariableExprAST>(IdName);
+    return withLocation(std::make_unique<VariableExprAST>(IdName), loc);
 
   std::vector<std::unique_ptr<ExprAST>> Args;
-  if (!ParseArgumentList(Args))
+  std::vector<std::string> ArgNames;
+  std::vector<SourceLocation> ArgNameLocs;
+  std::vector<SourceLocation> ArgEqualLocs;
+  if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
     return nullptr;
 
-  return std::make_unique<CallExprAST>(IdName, std::move(Args));
+  auto call = std::make_unique<CallExprAST>(IdName, std::move(Args),
+                                            std::move(ArgNames),
+                                            std::move(ArgNameLocs),
+                                            std::move(ArgEqualLocs));
+  call->setSourceLocation(loc);
+  return call;
 }
 
 /// unaryexpr ::= ('-' | '!') primary
 /// arrayexpr ::= '[' expression* ']'
 std::unique_ptr<ExprAST> ParseArrayExpr() {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat [
 
   std::vector<std::unique_ptr<ExprAST>> Elements;
@@ -1270,6 +1815,7 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
   std::string ElementType = "";
   std::string CommonType = "";
   bool hasFloat = false;
+  bool hasDecimal = false;
 
   // Check all elements for type compatibility
   for (const auto& elem : Elements)
@@ -1296,26 +1842,35 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
       {
         hasFloat = true;
       }
+      if (elemType == "decimal")
+      {
+        hasDecimal = true;
+      }
     }
   }
 
+  if (hasDecimal) {
+    ElementType = "decimal";
+  }
+
   // If mixed int/float, promote to double
-  if (hasFloat && (ElementType == "int" || ElementType == "float" || ElementType == "double"))
+  if (!hasDecimal &&
+      hasFloat &&
+      (ElementType == "int" || ElementType == "float" || ElementType == "double"))
   {
     ElementType = "double";
   }
 
-  // Default to int if couldn't determine type
-  if (ElementType.empty())
-  {
-    ElementType = "int";
-  }
+  // Leave ElementType empty when inference failed so codegen can use context or diagnose
 
-  return std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
+  auto expr = std::make_unique<ArrayExprAST>(ElementType, std::move(Elements));
+  expr->setSourceLocation(loc);
+  return expr;
 }
 
 /// arrayindex ::= expr '[' expression ']'
 std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat '['
 
   std::vector<std::unique_ptr<ExprAST>> Indices;
@@ -1339,6 +1894,7 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
   getNextToken(); // eat ']'
 
   auto Result = std::make_unique<ArrayIndexExprAST>(std::move(Array), std::move(Indices));
+  Result->setSourceLocation(loc);
 
   if (CurTok == '[') {
     return ParseArrayIndex(std::move(Result));
@@ -1348,6 +1904,7 @@ std::unique_ptr<ExprAST> ParseArrayIndex(std::unique_ptr<ExprAST> Array) {
 }
 
 std::unique_ptr<ExprAST> ParseNullSafeElementAccess(std::unique_ptr<ExprAST> Array) {
+  SourceLocation loc = currentParser().currentTokenLocation;
   getNextToken(); // eat '?['
 
   auto Index = ParseExpression();
@@ -1358,7 +1915,11 @@ std::unique_ptr<ExprAST> ParseNullSafeElementAccess(std::unique_ptr<ExprAST> Arr
     return LogError("Expected ']' after null-safe array index");
   getNextToken(); // eat ']'
 
-  return std::make_unique<NullSafeElementAccessExprAST>(std::move(Array), std::move(Index));
+  auto expr =
+      std::make_unique<NullSafeElementAccessExprAST>(std::move(Array),
+                                                    std::move(Index));
+  expr->setSourceLocation(loc);
+  return expr;
 }
 
 std::unique_ptr<ExprAST> ParseUnaryExpr() {
@@ -1369,6 +1930,8 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
   }
 
   int Opc = CurTok;
+  bool parsedInUnsafe = false;
+  SourceLocation opLoc = currentParser().currentTokenLocation;
   std::string OpStr;
   if (Opc == '-') OpStr = "-";
   else if (Opc == tok_not) OpStr = "!";
@@ -1376,17 +1939,11 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
   else if (Opc == tok_dec) OpStr = "--";
   else if (Opc == tok_hash) {
     OpStr = "#";  // Address-of operator
-    if (!isInUnsafeContext()) {
-      LogError("Address-of operator (#) can only be used within unsafe blocks or unsafe functions");
-      return nullptr;
-    }
+    parsedInUnsafe = isInUnsafeContext();
   }
   else if (Opc == tok_at) {
     OpStr = "@";    // Dereference operator
-    if (!isInUnsafeContext()) {
-      LogError("Dereference operator (@) can only be used within unsafe blocks or unsafe functions");
-      return nullptr;
-    }
+    parsedInUnsafe = isInUnsafeContext();
   }
 
   getNextToken(); // eat the operator.
@@ -1399,9 +1956,19 @@ std::unique_ptr<ExprAST> ParseUnaryExpr() {
 
   if (OpStr == "-") {
       // Represent -x as 0 - x
-      return std::make_unique<BinaryExprAST>("-", std::make_unique<NumberExprAST>(NumericLiteral::fromSigned(0)), std::move(Operand));
+      auto zero = withLocation(
+          std::make_unique<NumberExprAST>(NumericLiteral::fromSigned(0)),
+          opLoc);
+      auto expr = std::make_unique<BinaryExprAST>("-", std::move(zero),
+                                                  std::move(Operand));
+      expr->setSourceLocation(opLoc);
+      return expr;
   }
-  return std::make_unique<UnaryExprAST>(OpStr, std::move(Operand), true /* isPrefix */);
+  auto expr =
+      std::make_unique<UnaryExprAST>(OpStr, std::move(Operand),
+                                     true /* isPrefix */, parsedInUnsafe);
+  expr->setSourceLocation(opLoc);
+  return expr;
 }
 
 /// primary
@@ -1416,6 +1983,7 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   // Check for type casting: type: expr
   if (IsBuiltInType()) {
     std::string TypeName = IdentifierStr;
+    SourceLocation typeLoc = currentParser().currentTokenLocation;
     int SavedTok = CurTok;
     getNextToken(); // consume type
     
@@ -1427,7 +1995,9 @@ std::unique_ptr<ExprAST> ParsePrimary() {
         RecoverAfterExpressionError();
         return nullptr;
       }
-      return std::make_unique<CastExprAST>(TypeName, std::move(Operand));
+      auto cast = std::make_unique<CastExprAST>(TypeName, std::move(Operand));
+      cast->setSourceLocation(typeLoc);
+      return cast;
     } else {
       // Not a cast, restore state and continue with default handling
       // This shouldn't happen in normal parsing flow, but handle it gracefully
@@ -1437,43 +2007,128 @@ std::unique_ptr<ExprAST> ParsePrimary() {
   }
   
   switch (CurTok) {
+  case tok_error:
+    // Token already produced a diagnostic at the lexer layer; just advance.
+    getNextToken();
+    return nullptr;
   default:
+    // Avoid cascading generic expression errors immediately after a lexer error.
+    if (currentParser().previousToken == tok_error) {
+      RecoverAfterExpressionError();
+      return nullptr;
+    }
     return LogError(
         "Unexpected token while parsing an expression",
         "Insert an expression or remove the unexpected token.");
+  case tok_unique:
+  case tok_shared:
+  case tok_weak:
+    return ParseIdentifierExpr();
+  case tok_value:
+    {
+      if (!currentParser().allowValueIdentifier) {
+        reportCompilerError("'value' may only be used inside property or indexer setters");
+        getNextToken();
+        return nullptr;
+      }
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'value'
+      auto expr = std::make_unique<VariableExprAST>("value");
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_identifier:
+  case tok_get:
+  case tok_set:
     return ParseIdentifierExpr();
   case tok_this:
-    getNextToken(); // consume 'this'
-    return std::make_unique<ThisExprAST>();
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'this'
+      auto expr = std::make_unique<ThisExprAST>();
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_base:
-    getNextToken(); // consume 'base'
-    return std::make_unique<BaseExprAST>();
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'base'
+      auto expr = std::make_unique<BaseExprAST>();
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_number:
     return ParseNumberExpr();
   case tok_true:
-    getNextToken(); // consume 'true'
-    return std::make_unique<BoolExprAST>(true);
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'true'
+      auto expr = std::make_unique<BoolExprAST>(true);
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_false:
-    getNextToken(); // consume 'false'
-    return std::make_unique<BoolExprAST>(false);
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'false'
+      auto expr = std::make_unique<BoolExprAST>(false);
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_null:
-    getNextToken(); // consume 'null'
-    return std::make_unique<NullExprAST>();
+    {
+      SourceLocation loc = currentParser().currentTokenLocation;
+      getNextToken(); // consume 'null'
+      auto expr = std::make_unique<NullExprAST>();
+      expr->setSourceLocation(loc);
+      return expr;
+    }
   case tok_string_literal:
     {
-      auto Result = std::make_unique<StringExprAST>(StringVal);
+      std::string literal = StringVal;
+      SourceLocation loc = currentParser().currentTokenLocation;
+      auto Result = std::make_unique<StringExprAST>(literal);
+      Result->setSourceLocation(loc);
       getNextToken(); // consume the string literal
+      if (CurTok == '(') {
+        std::vector<std::unique_ptr<ExprAST>> Args;
+        std::vector<std::string> ArgNames;
+        std::vector<SourceLocation> ArgNameLocs;
+        std::vector<SourceLocation> ArgEqualLocs;
+        if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
+          return nullptr;
+        auto call = std::make_unique<CallExprAST>(literal, std::move(Args),
+                                                  std::move(ArgNames),
+                                                  std::move(ArgNameLocs),
+                                                  std::move(ArgEqualLocs));
+        call->setSourceLocation(loc);
+        return call;
+      }
       return std::move(Result);
     }
+  case tok_new:
+    return ParseNewExpression();
   case tok_interpolated_string_start:
     return ParseInterpolatedStringExpr();
   case tok_char_literal:
     {
+      SourceLocation loc = currentParser().currentTokenLocation;
       auto Result = std::make_unique<CharExprAST>(CharVal);
+      Result->setSourceLocation(loc);
       getNextToken(); // consume the character literal
       return std::move(Result);
     }
+  case tok_ref: {
+    SourceLocation loc = currentParser().currentTokenLocation;
+    getNextToken(); // consume 'ref'
+    SkipNewlines();
+    auto Operand = ParsePrimaryWithPostfix();
+    if (!Operand)
+      return nullptr;
+    auto expr = std::make_unique<RefExprAST>(std::move(Operand));
+    expr->setSourceLocation(loc);
+    return expr;
+  }
   case '(':
     return ParseParenExpr();
   case '[':
@@ -1523,7 +2178,58 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
       return ParseTernaryExpression(std::move(LHS));
     }
 
+    if (CurTok == tok_is) {
+      if (!currentParser().allowTypeCheck) {
+        LogError("Type checks with 'is' are only supported in conditional expressions");
+        RecoverAfterExpressionError();
+        return nullptr;
+      }
+
+      SourceLocation opLoc = currentParser().currentTokenLocation;
+      getNextToken(); // eat 'is'
+      SkipNewlines();
+
+      bool isNegated = false;
+      if (CurTok == tok_not_kw) {
+        isNegated = true;
+        getNextToken(); // eat 'not'
+        SkipNewlines();
+      }
+
+      bool targetIsNull = false;
+      TypeInfo targetInfo;
+      if (CurTok == tok_null) {
+        targetIsNull = true;
+        getNextToken(); // eat 'null'
+      } else {
+        if (!ParseCompleteTypeInfo(targetInfo, false)) {
+          RecoverAfterExpressionError();
+          return nullptr;
+        }
+      }
+
+      if (targetIsNull && CurTok == tok_identifier) {
+        LogError("Pattern binding is not supported for 'null' checks");
+        RecoverAfterExpressionError();
+        return nullptr;
+      }
+
+      std::optional<std::string> bindingName;
+      if (!targetIsNull && CurTok == tok_identifier) {
+        bindingName = IdentifierStr;
+        getNextToken(); // eat binding name
+      }
+
+      auto expr = std::make_unique<TypeCheckExprAST>(
+          std::move(LHS), std::move(targetInfo), isNegated,
+          targetIsNull, std::move(bindingName));
+      expr->setSourceLocation(opLoc);
+      LHS = std::move(expr);
+      continue;
+    }
+
     // Now know this is a binop
+    SourceLocation opLoc = currentParser().currentTokenLocation;
     std::string BinOp;
     
     // Convert token to operator string
@@ -1627,6 +2333,7 @@ std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     // Merge LHS/RHS.
     LHS =
         std::make_unique<BinaryExprAST>(BinOp, std::move(LHS), std::move(RHS));
+    LHS->setSourceLocation(opLoc);
   }
 }
 
@@ -1661,16 +2368,28 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
       if (!sameLine || atBoundary)
         break;
       // Postfix increment/decrement
+      SourceLocation opLoc = currentParser().currentTokenLocation;
       std::string OpStr = (CurTok == tok_inc) ? "++" : "--";
       getNextToken(); // eat the operator
       LHS = std::make_unique<UnaryExprAST>(OpStr, std::move(LHS), false);
+      LHS->setSourceLocation(opLoc);
     } else if (CurTok == tok_dot) {
       // Member access
+      SourceLocation dotLoc = currentParser().currentTokenLocation;
       getNextToken(); // eat '.'
       std::string MemberName;
       std::string MemberGenericSuffix;
-      if (CurTok == tok_identifier) {
+      bool isDestructor = false;
+      if (CurTok == tok_tilde_identifier) {
+        isDestructor = true;
         MemberName = IdentifierStr;
+        getNextToken();
+      } else if (CurTok == tok_identifier || CurTok == tok_get ||
+                 CurTok == tok_set) {
+        MemberName = IdentifierStr;
+        getNextToken();
+      } else if (CurTok == tok_weak) {
+        MemberName = "weak";
         getNextToken();
       } else if (CurTok == tok_this) {
         MemberName = "this";
@@ -1679,28 +2398,42 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         LogError("Expected member name after '.'");
         return nullptr;
       }
-      std::string DecoratedName = MemberName;
-      if (!ParseOptionalGenericArgumentList(DecoratedName, true))
-        return nullptr;
-      if (DecoratedName.size() > MemberName.size()) {
-        MemberGenericSuffix = DecoratedName.substr(MemberName.size());
-        SkipNewlines();
-        if (CurTok != '(') {
-          reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
-                              "Use parentheses to invoke the method after specifying explicit type arguments.");
+      if (isDestructor) {
+        LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
+                                                    std::string{}, true);
+        LHS->setSourceLocation(dotLoc);
+      } else {
+        std::string DecoratedName = MemberName;
+        if (!ParseOptionalGenericArgumentList(DecoratedName, true))
           return nullptr;
+        if (DecoratedName.size() > MemberName.size()) {
+          MemberGenericSuffix = DecoratedName.substr(MemberName.size());
+          SkipNewlines();
+          if (CurTok != '(') {
+            reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
+                                "Use parentheses to invoke the method after specifying explicit type arguments.");
+            return nullptr;
+          }
         }
+        LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
+                                                    std::move(MemberGenericSuffix));
+        LHS->setSourceLocation(dotLoc);
       }
-      LHS = std::make_unique<MemberAccessExprAST>(std::move(LHS), MemberName,
-                                                  std::move(MemberGenericSuffix));
     } else if (CurTok == tok_null_safe_access) {
       // Null-safe member access
+      SourceLocation opLoc = currentParser().currentTokenLocation;
       getNextToken(); // eat '?.'
-      if (CurTok != tok_identifier) {
+      if (CurTok == tok_tilde_identifier) {
+        reportCompilerError("Null-safe destructor access is not supported");
+        return nullptr;
+      }
+      if (CurTok != tok_identifier && CurTok != tok_get && CurTok != tok_set &&
+          CurTok != tok_weak) {
         LogError("Expected member name after '?.'");
         return nullptr;
       }
-      std::string MemberName = IdentifierStr;
+      std::string MemberName =
+          (CurTok == tok_weak) ? std::string("weak") : IdentifierStr;
       getNextToken(); // eat member name
       std::string DecoratedName = MemberName;
       if (!ParseOptionalGenericArgumentList(DecoratedName, true))
@@ -1711,41 +2444,74 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
         return nullptr;
       }
       LHS = std::make_unique<NullSafeAccessExprAST>(std::move(LHS), MemberName);
+      LHS->setSourceLocation(opLoc);
     } else if (CurTok == tok_arrow) {
       // Pointer member access (-> is syntactic sugar for (@ptr).member)
-      if (!isInUnsafeContext()) {
-        LogError("Arrow operator (->) can only be used within unsafe blocks or unsafe functions");
-        return nullptr;
-      }
+      const bool allowSafeArrow = !isInUnsafeContext();
+      SourceLocation arrowLoc = currentParser().currentTokenLocation;
       getNextToken(); // eat '->'
-      if (CurTok != tok_identifier) {
+      bool isDestructor = false;
+      if (CurTok == tok_tilde_identifier)
+        isDestructor = true;
+      if (CurTok != tok_identifier && CurTok != tok_get && CurTok != tok_set &&
+          CurTok != tok_tilde_identifier && CurTok != tok_weak) {
         LogError("Expected member name after '->'");
         return nullptr;
       }
-      std::string MemberName = IdentifierStr;
+      std::string MemberName =
+          (CurTok == tok_weak) ? std::string("weak") : IdentifierStr;
       getNextToken(); // eat member name
       std::string MemberGenericSuffix;
-      std::string DecoratedName = MemberName;
-      if (!ParseOptionalGenericArgumentList(DecoratedName, true))
-        return nullptr;
-      if (DecoratedName.size() > MemberName.size()) {
-        MemberGenericSuffix = DecoratedName.substr(MemberName.size());
-        SkipNewlines();
-        if (CurTok != '(') {
-          reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
-                              "Use parentheses to invoke the method after specifying explicit type arguments.");
+      if (!isDestructor) {
+        std::string DecoratedName = MemberName;
+        if (!ParseOptionalGenericArgumentList(DecoratedName, true))
           return nullptr;
+        if (DecoratedName.size() > MemberName.size()) {
+          MemberGenericSuffix = DecoratedName.substr(MemberName.size());
+          SkipNewlines();
+          if (CurTok != '(') {
+            reportCompilerError("Generic argument list must be followed by '(' in member call expressions",
+                                "Use parentheses to invoke the method after specifying explicit type arguments.");
+            return nullptr;
+          }
         }
       }
-      // Create (@ptr).member
-      auto Deref = std::make_unique<UnaryExprAST>("@", std::move(LHS), true);
-      LHS = std::make_unique<MemberAccessExprAST>(std::move(Deref), MemberName,
-                                                  std::move(MemberGenericSuffix));
+      if (allowSafeArrow) {
+        LHS = std::make_unique<MemberAccessExprAST>(
+            std::move(LHS), MemberName, std::move(MemberGenericSuffix),
+            isDestructor, true);
+        LHS->setSourceLocation(arrowLoc);
+      } else {
+        // Create (@ptr).member
+        auto Deref =
+            std::make_unique<UnaryExprAST>("@", std::move(LHS), true, true);
+        Deref->setSourceLocation(arrowLoc);
+        LHS = std::make_unique<MemberAccessExprAST>(
+            std::move(Deref), MemberName, std::move(MemberGenericSuffix),
+            isDestructor, false);
+        LHS->setSourceLocation(arrowLoc);
+      }
     } else if (CurTok == '(') {
       std::vector<std::unique_ptr<ExprAST>> Args;
-      if (!ParseArgumentList(Args))
+      std::vector<std::string> ArgNames;
+      std::vector<SourceLocation> ArgNameLocs;
+      std::vector<SourceLocation> ArgEqualLocs;
+      SourceLocation callLoc = currentParser().currentTokenLocation;
+      if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
         return nullptr;
-      LHS = std::make_unique<CallExprAST>(std::move(LHS), std::move(Args));
+      std::unique_ptr<ExprAST> CalleeExpr = std::move(LHS);
+      auto Call = std::make_unique<CallExprAST>(std::move(CalleeExpr),
+                                                std::move(Args),
+                                                std::move(ArgNames),
+                                                std::move(ArgNameLocs),
+                                                std::move(ArgEqualLocs));
+      if (auto *member =
+              dynamic_cast<MemberAccessExprAST *>(Call->getCalleeExpr())) {
+        if (member->isDestructorAccess())
+          Call->markDestructorCall(member->getMemberName());
+      }
+      Call->setSourceLocation(callLoc);
+      LHS = std::move(Call);
     } else {
       break;
     }
@@ -1757,6 +2523,11 @@ static std::unique_ptr<ExprAST> ParsePrimaryWithPostfix() {
 /// expression
 ///   ::= primary binoprhs
 ///
+static std::unique_ptr<ExprAST> ParseConditionExpression() {
+  ScopedTypeCheckContext allowTypeChecks(true);
+  return ParseExpression();
+}
+
 std::unique_ptr<ExprAST> ParseExpression() {
   auto LHS = ParsePrimaryWithPostfix();
   if (!LHS)
@@ -1797,18 +2568,23 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   }
 
   // Parse return type
-  if (!IsValidType())
+  if (!IsValidType() && CurTok != '(')
     return LogErrorP("Expected return type in prototype");
 
-  std::string ReturnType = ParseCompleteType();
-  if (ReturnType.empty())
+  TypeInfo ReturnTypeInfo;
+  if (!ParseCompleteTypeInfo(ReturnTypeInfo, returnsByRef))
     return LogErrorP("Failed to parse return type");
 
-  if (CurTok != tok_identifier)
+  std::string FnName;
+  if (CurTok == tok_identifier) {
+    FnName = IdentifierStr;
+    getNextToken();
+  } else if (CurTok == tok_string_literal) {
+    FnName = StringVal;
+    getNextToken();
+  } else {
     return LogErrorP("Expected function name in prototype");
-
-  std::string FnName = IdentifierStr;
-  getNextToken();
+  }
 
   std::vector<std::string> GenericParams;
   if (ParseGenericParameterList(GenericParams))
@@ -1823,60 +2599,82 @@ std::unique_ptr<PrototypeAST> ParsePrototype(bool isUnsafe) {
   getNextToken(); // eat '('
   SkipNewlines();
 
-  // Handle empty parameter list
-  if (CurTok == ')') {
-    getNextToken(); // eat ')'
-    TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
-    return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName,
-                                          std::move(Args), isUnsafe, returnsByRef,
-                                          std::move(GenericParams));
-  }
+  if (CurTok != ')') {
+    // Parse parameters
+    while (true) {
+      SkipNewlines();
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
 
-  // Parse parameters
-  while (true) {
-    SkipNewlines();
-    // Check for ref parameter
-    bool paramIsRef = false;
-    if (CurTok == tok_ref) {
-      paramIsRef = true;
-      getNextToken(); // eat 'ref'
+      // Check for ref parameter
+      bool paramIsRef = false;
+      if (CurTok == tok_ref) {
+        paramIsRef = true;
+        getNextToken(); // eat 'ref'
+        SkipNewlines();
+      }
+
+      if (!IsValidType() && CurTok != '(')
+        return LogErrorP("Expected parameter type");
+
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef))
+        return LogErrorP("Failed to parse parameter type");
+
+      if (CurTok != tok_identifier)
+        return LogErrorP("Expected parameter name");
+
+      std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
+      getNextToken();
+
+      Parameter param;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
+      param.Name = ParamName;
+      param.IsRef = paramIsRef;
+      param.IsParams = paramIsParams;
+      param.DeclaredType = std::move(ParamTypeInfo);
+      param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
+
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return nullptr;
+      }
+
+      Args.push_back(std::move(param));
+
+      if (CurTok == ')') {
+        getNextToken(); // eat ')'
+        break;
+      }
+
+      if (CurTok != ',')
+        return LogErrorP("Expected ',' or ')' in parameter list");
+
+      getNextToken(); // eat ','
       SkipNewlines();
     }
-
-    if (!IsValidType())
-      return LogErrorP("Expected parameter type");
-
-    std::string ParamType = ParseCompleteType();
-    if (ParamType.empty())
-      return LogErrorP("Failed to parse parameter type");
-
-    if (CurTok != tok_identifier)
-      return LogErrorP("Expected parameter name");
-
-    std::string ParamName = IdentifierStr;
-    getNextToken();
-
-    Parameter param;
-    param.Type = ParamType;
-    param.Name = ParamName;
-    param.IsRef = paramIsRef;
-    param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
-    Args.push_back(param);
-
-    if (CurTok == ')') {
-      getNextToken(); // eat ')'
-      break;
-    }
-
-    if (CurTok != ',')
-      return LogErrorP("Expected ',' or ')' in parameter list");
-
-    getNextToken(); // eat ','
-    SkipNewlines();
+  } else {
+    getNextToken(); // eat ')'
   }
 
-  TypeInfo returnInfo = buildDeclaredTypeInfo(ReturnType, returnsByRef);
-  return std::make_unique<PrototypeAST>(std::move(returnInfo), FnName,
+  if (!ValidateParameterDefaults(Args))
+    return nullptr;
+
+  return std::make_unique<PrototypeAST>(std::move(ReturnTypeInfo), FnName,
                                         std::move(Args), isUnsafe, returnsByRef,
                                         std::move(GenericParams));
 }
@@ -1900,32 +2698,162 @@ std::unique_ptr<FunctionAST> ParseDefinition() {
   return std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
 }
 
-/// toplevelexpr ::= expression
-std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
-  if (auto E = ParseExpression()) {
-    // Make an anonymous proto.
-    TypeInfo anonReturn = buildDeclaredTypeInfo("void", false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(anonReturn), "__anon_expr",
-                                                std::vector<Parameter>());
-    
-    // Wrap the expression in a return statement and block
-    auto ReturnStmt = std::make_unique<ReturnStmtAST>(std::move(E));
-    std::vector<std::unique_ptr<StmtAST>> Statements;
-    Statements.push_back(std::move(ReturnStmt));
-    auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
-    
-    return std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-  }
-  return nullptr;
-}
-
-/// external ::= 'extern' prototype
+/// external ::= 'extern' ['unsafe'] prototype
 std::unique_ptr<PrototypeAST> ParseExtern() {
   getNextToken(); // eat extern.
-  auto Proto = ParsePrototype();
+  SkipNewlines();
+
+  bool explicitUnsafe = false;
+  if (CurTok == tok_unsafe) {
+    explicitUnsafe = true;
+    getNextToken(); // eat 'unsafe'
+    SkipNewlines();
+    enterUnsafeContext();
+  }
+
+  bool prototypeIsUnsafe = explicitUnsafe || isInUnsafeContext();
+  auto Proto = ParsePrototype(prototypeIsUnsafe);
   if (Proto)
     Proto->markAsExtern();
+
+  if (explicitUnsafe)
+    exitUnsafeContext();
   return Proto;
+}
+
+/// delegate ::= 'delegate' ['ref'] type identifier '(' params? ')'
+std::unique_ptr<DelegateDeclAST> ParseDelegateDefinition() {
+  getNextToken(); // eat 'delegate'
+  SkipNewlines();
+
+  bool returnsByRef = false;
+  if (CurTok == tok_ref) {
+    returnsByRef = true;
+    getNextToken(); // eat 'ref'
+    SkipNewlines();
+  }
+
+  if (!IsValidType() && CurTok != '(') {
+    reportCompilerError("Expected return type in delegate declaration");
+    return nullptr;
+  }
+
+  TypeInfo returnTypeInfo;
+  if (!ParseCompleteTypeInfo(returnTypeInfo, returnsByRef)) {
+    reportCompilerError("Failed to parse delegate return type");
+    return nullptr;
+  }
+
+  if (CurTok != tok_identifier) {
+    reportCompilerError("Expected delegate name after return type");
+    return nullptr;
+  }
+
+  std::string delegateName = IdentifierStr;
+  SourceLocation nameLoc = currentParser().currentTokenLocation;
+  getNextToken();
+
+  if (StructNames.contains(delegateName) || ClassNames.contains(delegateName) ||
+      DelegateNames.contains(delegateName)) {
+    reportCompilerError("Type '" + delegateName + "' is already defined");
+    return nullptr;
+  }
+
+  SkipNewlines();
+  if (CurTok != '(') {
+    reportCompilerError("Expected '(' in delegate declaration");
+    return nullptr;
+  }
+
+  std::vector<Parameter> params;
+  getNextToken(); // eat '('
+  SkipNewlines();
+
+  if (CurTok != ')') {
+    while (true) {
+      SkipNewlines();
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
+      bool paramIsRef = false;
+      if (CurTok == tok_ref) {
+        paramIsRef = true;
+        getNextToken(); // eat 'ref'
+        SkipNewlines();
+      }
+
+      if (!IsValidType() && CurTok != '(') {
+        reportCompilerError("Expected parameter type");
+        return nullptr;
+      }
+
+      TypeInfo paramTypeInfo;
+      if (!ParseCompleteTypeInfo(paramTypeInfo, paramIsRef)) {
+        reportCompilerError("Failed to parse parameter type");
+        return nullptr;
+      }
+
+      if (CurTok != tok_identifier) {
+        reportCompilerError("Expected parameter name");
+        return nullptr;
+      }
+
+      std::string paramName = IdentifierStr;
+      SourceLocation paramNameLoc = currentParser().currentTokenLocation;
+      getNextToken();
+
+      Parameter param;
+      param.Type = typeNameFromInfo(paramTypeInfo);
+      param.Name = paramName;
+      param.IsRef = paramIsRef;
+      param.IsParams = paramIsParams;
+      param.DeclaredType = std::move(paramTypeInfo);
+      param.NameLocation = paramNameLoc;
+      param.ParamsLocation = paramsLoc;
+
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return nullptr;
+      }
+
+      params.push_back(std::move(param));
+
+      if (CurTok == ')') {
+        getNextToken(); // eat ')'
+        break;
+      }
+
+      if (CurTok != ',') {
+        reportCompilerError("Expected ',' or ')' in delegate parameter list");
+        return nullptr;
+      }
+
+      getNextToken(); // eat ','
+      SkipNewlines();
+    }
+  } else {
+    getNextToken(); // eat ')'
+  }
+
+  if (!ValidateParameterDefaults(params))
+    return nullptr;
+
+  DelegateNames.insert(delegateName);
+  return std::make_unique<DelegateDeclAST>(
+      std::move(returnTypeInfo), delegateName, std::move(params),
+      returnsByRef, nameLoc);
 }
 
 /// returnstmt ::= 'return' ['ref'] expression?
@@ -1957,11 +2885,11 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   ParserContext parserBackup = currentParser();
   LexerContext lexerBackup = currentLexer();
 
-  if (!IsValidType())
+  if (!IsValidType() && CurTok != '(')
     return nullptr;
 
-  std::string Type = ParseCompleteType();
-  if (Type.empty()) {
+  TypeInfo declInfo;
+  if (!ParseCompleteTypeInfo(declInfo, isRef)) {
     currentParser() = parserBackup;
     currentLexer() = lexerBackup;
     return nullptr;
@@ -1976,10 +2904,13 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   std::string Name = IdentifierStr;
   getNextToken(); // eat identifier
 
-  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+  if (CurTok == ',') {
+    LogError("Expected '=' after variable name. Multiple variable declarations in a single statement are not allowed");
+  }
 
   if (CurTok != '=') {
-    LogError("Expected '=' after variable name (all variables must be initialized)");
+    LogError("Variable must be initialized",
+             "Add an initializer, for example: `int count = 0`.");
     return nullptr;
   }
 
@@ -2007,6 +2938,22 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   return std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 }
 
+static bool TryParseForTypeHeader(TypeInfo &outInfo, bool declaredRef) {
+  ParserContext parserBackup = currentParser();
+  LexerContext lexerBackup = currentLexer();
+
+  TypeInfo speculativeType;
+  if (ParseCompleteTypeInfo(speculativeType, declaredRef) &&
+      CurTok == tok_identifier) {
+    outInfo = std::move(speculativeType);
+    return true;
+  }
+
+  currentParser() = parserBackup;
+  currentLexer() = lexerBackup;
+  return false;
+}
+
 /// foreachstmt ::= 'for' type identifier 'in' expression block
 std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
   getNextToken(); // eat 'for'
@@ -2022,25 +2969,14 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
     while (CurTok == tok_newline)
       getNextToken();
   }
-  
-  // Parse type
-  if (!IsBuiltInType()) {
-    LogError("Expected type after 'for'");
+
+  TypeInfo declInfo;
+  if (!TryParseForTypeHeader(declInfo, isRef)) {
+    if (isRef)
+      LogError("Expected type after 'ref' in foreach loop");
+    else
+      LogError("Expected type after 'for'");
     return nullptr;
-  }
-  
-  std::string Type = IdentifierStr;
-  getNextToken(); // eat type
-  
-  // Check for array type
-  if (CurTok == '[') {
-    getNextToken(); // eat [
-    if (CurTok != ']') {
-      LogError("Expected ']' after '[' in array type");
-      return nullptr;
-    }
-    getNextToken(); // eat ]
-    Type += "[]"; // Add array indicator to type
   }
   
   // Parse variable name
@@ -2075,8 +3011,6 @@ std::unique_ptr<ForEachStmtAST> ParseForEachStatement() {
     return nullptr;
   }
 
-  TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
-
   return std::make_unique<ForEachStmtAST>(std::move(declInfo), VarName, std::move(Collection), std::move(Body));
 }
 
@@ -2109,7 +3043,7 @@ std::unique_ptr<IfStmtAST> ParseIfStatement() {
     getNextToken();
   
   // Parse condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("Expected condition after 'if'");
     return nullptr;
@@ -2169,7 +3103,7 @@ std::unique_ptr<WhileStmtAST> ParseWhileStatement() {
     getNextToken();
   
   // Parse condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("Expected condition after 'while'");
     return nullptr;
@@ -2216,6 +3150,7 @@ std::unique_ptr<SkipStmtAST> ParseSkipStatement() {
 
 /// assertstmt ::= 'assert' expression
 std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
+  SourceLocation assertLoc = currentLexer().tokenStart();
   getNextToken(); // eat 'assert'
 
   // Skip newlines after 'assert'
@@ -2223,7 +3158,7 @@ std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
     getNextToken();
 
   // Parse the condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("expected expression after 'assert'");
     return nullptr;
@@ -2254,7 +3189,9 @@ std::unique_ptr<AssertStmtAST> ParseAssertStatement() {
     }
   }
 
-  return std::make_unique<AssertStmtAST>(std::move(Condition));
+  return std::make_unique<AssertStmtAST>(std::move(Condition),
+                                         assertLoc.line,
+                                         assertLoc.column);
 }
 
 /// unsafeblock ::= 'unsafe' block
@@ -2425,7 +3362,7 @@ std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> 
     getNextToken();
 
   // Parse condition expression
-  auto Condition = ParseExpression();
+  auto Condition = ParseConditionExpression();
   if (!Condition) {
     LogError("Expected condition after 'if' in ternary expression");
     return nullptr;
@@ -2437,7 +3374,8 @@ std::unique_ptr<TernaryExprAST> ParseTernaryExpression(std::unique_ptr<ExprAST> 
 
   // Expect 'else'
   if (CurTok != tok_else) {
-    LogError("Expected 'else' after condition in ternary expression");
+    LogError("Expected 'else' after condition",
+             "Ternary expressions require both a true and false branch.");
     return nullptr;
   }
 
@@ -2558,10 +3496,6 @@ std::unique_ptr<CaseAST> ParseCase(bool isExpression) {
 
 /// Helper to determine which type of for loop and parse accordingly
 std::unique_ptr<StmtAST> ParseForStatement() {
-  // Save position to peek ahead
-  int savedTok = CurTok;
-  std::string savedIdentifier = IdentifierStr;
-  
   getNextToken(); // eat 'for'
   
   // Skip newlines after 'for'
@@ -2576,136 +3510,128 @@ std::unique_ptr<StmtAST> ParseForStatement() {
       getNextToken();
   }
 
-  // Check if it's a type or something else
-  bool hasType = IsBuiltInType();
-  if (!hasType && isRef) {
-    LogError("Expected type after 'ref' in foreach loop");
+  TypeInfo declInfo;
+  bool parsedTypeHeader = false;
+
+  if (isRef || IsValidType())
+    parsedTypeHeader = TryParseForTypeHeader(declInfo, isRef);
+
+  if (isRef && !parsedTypeHeader) {
+    LogError("Expected type after 'ref' in for loop");
     return nullptr;
   }
-  
-  if (hasType) {
-    std::string type = IdentifierStr;
-    getNextToken(); // eat type
-    
-    // Check for array type
-    if (CurTok == '[') {
-      getNextToken(); // eat [
-      if (CurTok == ']') {
-        getNextToken(); // eat ]
-        type += "[]";
-      }
+
+  if (parsedTypeHeader) {
+    if (CurTok != tok_identifier) {
+      LogError("Expected identifier after type in for loop");
+      return nullptr;
     }
-    
-    // Check if it's an identifier
-    if (CurTok == tok_identifier) {
-      std::string varName = IdentifierStr;
-      getNextToken(); // eat identifier
-      
-      // Now check what comes next: 'in' for foreach, '=' for for-to
-      if (CurTok == tok_in) {
-        // Foreach loop, put tokens back and call ParseForEachStatement
-        // Since already consumed tokens, need to continue parsing here
-        getNextToken(); // eat 'in'
-        
-        // Parse collection expression
-        auto Collection = ParseExpression();
-        if (!Collection) {
-          LogError("Expected expression after 'in' in foreach loop");
-          return nullptr;
-        }
-        
-        // Parse body block
-        LoopNestingDepth++;
-        auto Body = ParseBlock();
-        LoopNestingDepth--;
-        if (!Body) {
-          LogError("Expected block after foreach loop header");
-          return nullptr;
-        }
 
-        TypeInfo declInfo = buildDeclaredTypeInfo(type, isRef);
-        return std::make_unique<ForEachStmtAST>(std::move(declInfo), varName,
-                                                std::move(Collection), std::move(Body));
-      } else if (CurTok == '=') {
-        if (isRef) {
-          LogError("ref is not supported for for-to loops");
-          return nullptr;
-        }
+    std::string type = typeNameFromInfo(declInfo);
+    std::string varName = IdentifierStr;
+    getNextToken(); // eat identifier
 
-        // It's a for-to loop, parse it
-        getNextToken(); // eat '='
-        
-        // Parse initialization expression
-        auto InitExpr = ParseExpression();
-        if (!InitExpr) {
-          LogError("Expected initialization expression after '=' in for loop");
-          return nullptr;
-        }
-        
-        // Expect 'to' keyword
-        if (CurTok != tok_to) {
-          LogError("Expected 'to' after initialization in for loop");
-          return nullptr;
-        }
-        getNextToken(); // eat 'to'
-        
-        // Check if next is the loop variable (for condition syntax)
-        std::unique_ptr<ExprAST> LimitExpr = nullptr;
-        std::unique_ptr<ExprAST> CondExpr = nullptr;
-        
-        if (CurTok == tok_identifier && IdentifierStr == varName) {
-          // This is a condition expression like "i < size"
-          // Parse the full condition expression
-          CondExpr = ParseExpression();
-          if (!CondExpr) {
-            LogError("Expected condition expression after 'to' in for loop");
-            return nullptr;
-          }
-        } else {
-          // This is a regular limit expression
-          LimitExpr = ParseExpression();
-          if (!LimitExpr) {
-            LogError("Expected limit expression after 'to' in for loop");
-            return nullptr;
-          }
-        }
-        
-        // Check for optional 'by' clause
-        std::unique_ptr<ExprAST> StepExpr = nullptr;
-        char StepOp = '+';  // Default to addition
-        if (CurTok == tok_by) {
-          getNextToken(); // eat 'by'
-          
-          // Check for optional operator (* / % -)
-          if (CurTok == '*' || CurTok == '/' || CurTok == '%' || CurTok == '-') {
-            StepOp = CurTok;
-            getNextToken(); // eat operator
-          }
-          
-          StepExpr = ParseExpression();
-          if (!StepExpr) {
-            LogError("Expected step expression after 'by' in for loop");
-            return nullptr;
-          }
-        }
-        
-        // Parse body block
-        LoopNestingDepth++;
-        auto Body = ParseBlock();
-        LoopNestingDepth--;
-        if (!Body) {
-          LogError("Expected block after for loop header");
-          return nullptr;
-        }
+    // Now check what comes next: 'in' for foreach, '=' for for-to
+    if (CurTok == tok_in) {
+      getNextToken(); // eat 'in'
 
-        return std::make_unique<ForLoopStmtAST>(type, varName, std::move(InitExpr),
-                                                 std::move(LimitExpr), std::move(Body),
-                                                 std::move(StepExpr), StepOp,
-                                                 std::move(CondExpr));
-      } else {
-        LogError("Expected 'in' or '=' after variable name in for loop");
+      // Parse collection expression
+      auto Collection = ParseExpression();
+      if (!Collection) {
+        LogError("Expected expression after 'in' in foreach loop");
         return nullptr;
       }
+
+      // Parse body block
+      LoopNestingDepth++;
+      auto Body = ParseBlock();
+      LoopNestingDepth--;
+      if (!Body) {
+        LogError("Expected block after foreach loop header");
+        return nullptr;
+      }
+
+      return std::make_unique<ForEachStmtAST>(std::move(declInfo), varName,
+                                              std::move(Collection), std::move(Body));
+    } else if (CurTok == '=') {
+      if (isRef) {
+        LogError("ref is not supported for for-to loops");
+        return nullptr;
+      }
+
+      // It's a for-to loop, parse it
+      getNextToken(); // eat '='
+
+      // Parse initialization expression
+      auto InitExpr = ParseExpression();
+      if (!InitExpr) {
+        LogError("Expected initialization expression after '=' in for loop");
+        return nullptr;
+      }
+
+      // Expect 'to' keyword
+      if (CurTok != tok_to) {
+        LogError("Expected 'to' after initialization in for loop");
+        return nullptr;
+      }
+      getNextToken(); // eat 'to'
+
+      // Check if next is the loop variable (for condition syntax)
+      std::unique_ptr<ExprAST> LimitExpr = nullptr;
+      std::unique_ptr<ExprAST> CondExpr = nullptr;
+
+      if (CurTok == tok_identifier && IdentifierStr == varName) {
+        // This is a condition expression like "i < size"
+        // Parse the full condition expression
+        CondExpr = ParseExpression();
+        if (!CondExpr) {
+          LogError("Expected condition expression after 'to' in for loop");
+          return nullptr;
+        }
+      } else {
+        // This is a regular limit expression
+        LimitExpr = ParseExpression();
+        if (!LimitExpr) {
+          LogError("Expected limit expression after 'to' in for loop");
+          return nullptr;
+        }
+      }
+
+      // Check for optional 'by' clause
+      std::unique_ptr<ExprAST> StepExpr = nullptr;
+      char StepOp = '+';  // Default to addition
+      if (CurTok == tok_by) {
+        getNextToken(); // eat 'by'
+
+        // Check for optional operator (* / % -)
+        if (CurTok == '*' || CurTok == '/' || CurTok == '%' || CurTok == '-') {
+          StepOp = CurTok;
+          getNextToken(); // eat operator
+        }
+
+        StepExpr = ParseExpression();
+        if (!StepExpr) {
+          LogError("Expected step expression after 'by' in for loop");
+          return nullptr;
+        }
+      }
+
+      // Parse body block
+      LoopNestingDepth++;
+      auto Body = ParseBlock();
+      LoopNestingDepth--;
+      if (!Body) {
+        LogError("Expected block after for loop header");
+        return nullptr;
+      }
+
+      return std::make_unique<ForLoopStmtAST>(type, varName, std::move(InitExpr),
+                                               std::move(LimitExpr), std::move(Body),
+                                               std::move(StepExpr), StepOp,
+                                               std::move(CondExpr));
+    } else {
+      LogError("Expected 'in' or '=' after variable name in for loop");
+      return nullptr;
     }
   }
   
@@ -2799,10 +3725,43 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return ParseSwitchStatement();
   case tok_unsafe:
     return ParseUnsafeBlock();
+  case '{': {
+    auto Block = ParseBlock();
+    if (!Block)
+      return nullptr;
+    return Block;
+  }
+  case tok_autoreleasepool: {
+    getNextToken(); // eat '@autoreleasepool'
+    while (CurTok == tok_newline)
+      getNextToken();
+    if (CurTok == '{') {
+      auto Body = ParseBlock();
+      if (!Body)
+        return nullptr;
+    }
+    return LogErrorS("'@autoreleasepool' is reserved for upcoming ARC support",
+                     "Autorelease pools will lower to runtime helpers in a later ARC phase.");
+  }
+  case tok_free: {
+    getNextToken(); // eat 'free'
+    while (CurTok == tok_newline)
+      getNextToken();
+    if (CurTok == tok_newline || CurTok == ';' || CurTok == '}' ||
+        CurTok == tok_eof) {
+      return LogErrorS("Expected expression after 'free'",
+                       "Provide a reference expression to release.");
+    }
+    auto Expr = ParseExpression();
+    if (!Expr)
+      return nullptr;
+    return std::make_unique<ExpressionStmtAST>(
+        std::make_unique<FreeExprAST>(std::move(Expr)));
+  }
   case tok_ref:
     // Handle ref variable declarations
     getNextToken(); // eat 'ref'
-    if (!IsValidType()) {
+    if (!IsValidType() && CurTok != '(') {
       LogError("Expected type after 'ref'");
       return nullptr;
     }
@@ -2813,7 +3772,10 @@ std::unique_ptr<StmtAST> ParseStatement() {
     return nullptr;
   default:
     // Check for valid types (built-in and struct) for variable declarations
-    if (IsValidType()) {
+    if (CurTok == '(') {
+      if (auto Decl = ParseVariableDeclaration())
+        return Decl;
+    } else if (IsValidType()) {
       if (currentLexer().lastChar != '.')
         if (auto Decl = ParseVariableDeclaration())
           return Decl;
@@ -2844,6 +3806,13 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
     getNextToken();
   
   while (CurTok != '}' && CurTok != tok_eof) {
+    if (currentParser().hadError) {
+      // Stop cascading errors inside this block; fast-forward to the end.
+      while (CurTok != '}' && CurTok != tok_eof)
+        getNextToken();
+      break;
+    }
+
     // Skip newlines between statements
     if (CurTok == tok_newline) {
       getNextToken();
@@ -2853,6 +3822,12 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
     int StartTok = CurTok;
     auto Stmt = ParseStatement();
     if (!Stmt) {
+      if (currentParser().hadError) {
+        // After a reported error, skip the rest of the block to avoid cascades.
+        while (CurTok != '}' && CurTok != tok_eof)
+          getNextToken();
+        break;
+      }
       // Check if hit closing brace
       if (CurTok == '}')
         break;  // Normal end of block
@@ -2886,62 +3861,41 @@ std::unique_ptr<BlockStmtAST> ParseBlock() {
 /// Could be either a variable declaration or function definition
 bool ParseTypeIdentifier(bool isRef) {
   // Parse the complete type (including arrays and pointers)
-  std::string Type = ParseCompleteType();
-  if (Type.empty()) {
+  TypeInfo typeInfo;
+  if (!ParseCompleteTypeInfo(typeInfo, isRef)) {
     return false;
   }
 
   SkipNewlines();
 
+  std::string Type = typeNameFromInfo(typeInfo);
+
   // Handle constructor call (struct name followed directly by '(')
   if (CurTok == '(' && (StructNames.contains(Type) || ClassNames.contains(Type))) {
-    getNextToken(); // eat '('
-    SkipNewlines();
-
     std::vector<std::unique_ptr<ExprAST>> Args;
-    if (CurTok != ')') {
-      while (true) {
-        SkipNewlines();
-        if (auto Arg = ParseExpression()) {
-          Args.push_back(std::move(Arg));
-        } else {
-          fprintf(stderr, "Error: Expected expression in constructor arguments\n");
-          return false;
-        }
-
-        SkipNewlines();
-        if (CurTok == ')')
-          break;
-
-        if (CurTok != ',') {
-          fprintf(stderr, "Error: Expected ')' or ',' in constructor arguments\n");
-          return false;
-        }
-        getNextToken(); // eat ','
-        SkipNewlines();
-      }
-    }
-
-    if (CurTok != ')') {
-      fprintf(stderr, "Error: Expected ')' after constructor arguments\n");
+    std::vector<std::string> ArgNames;
+    std::vector<SourceLocation> ArgNameLocs;
+    std::vector<SourceLocation> ArgEqualLocs;
+    if (!ParseArgumentList(Args, ArgNames, ArgNameLocs, ArgEqualLocs))
       return false;
-    }
-    getNextToken(); // eat ')'
 
-    auto Call = std::make_unique<CallExprAST>(Type, std::move(Args));
+    auto Call = std::make_unique<CallExprAST>(Type, std::move(Args),
+                                              std::move(ArgNames),
+                                              std::move(ArgNameLocs),
+                                              std::move(ArgEqualLocs));
     if (auto CallIR = Call->codegen()) {
       fprintf(stderr, "Generated struct instantiation IR:\n");
       CallIR->print(llvm::errs());
       fprintf(stderr, "\n");
     } else {
-      fprintf(stderr, "Error: Failed to generate struct instantiation\n");
+      reportCompilerError("Failed to generate struct instantiation");
       return false;
     }
     return true;
   }
 
   if (CurTok != tok_identifier) {
-    fprintf(stderr, "Error: Expected identifier after type\n");
+    reportCompilerError("Expected identifier after type");
     return false;
   }
 
@@ -2968,6 +3922,15 @@ bool ParseTypeIdentifier(bool isRef) {
     if (CurTok != ')') {
       while (true) {
         SkipNewlines();
+        bool paramIsParams = false;
+        SourceLocation paramsLoc{};
+        if (CurTok == tok_params) {
+          paramIsParams = true;
+          paramsLoc = currentParser().currentTokenLocation;
+          getNextToken(); // eat 'params'
+          SkipNewlines();
+        }
+
         // Check for ref parameter
         bool paramIsRef = false;
         if (CurTok == tok_ref) {
@@ -2976,31 +3939,45 @@ bool ParseTypeIdentifier(bool isRef) {
           SkipNewlines();
         }
 
-        if (!IsValidType()) {
-          fprintf(stderr, "Error: Expected parameter type\n");
+        if (!IsValidType() && CurTok != '(') {
+          reportCompilerError("Expected parameter type");
           return false;
         }
 
-        std::string ParamType = ParseCompleteType();
-        if (ParamType.empty()) {
-          fprintf(stderr, "Error: Failed to parse parameter type\n");
+        TypeInfo ParamTypeInfo;
+        if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef)) {
+          reportCompilerError("Failed to parse parameter type");
           return false;
         }
 
         if (CurTok != tok_identifier) {
-          fprintf(stderr, "Error: Expected parameter name\n");
+          reportCompilerError("Expected parameter name");
           return false;
         }
 
         std::string ParamName = IdentifierStr;
+        SourceLocation nameLoc = currentParser().currentTokenLocation;
         getNextToken();
 
         Parameter param;
-        param.Type = ParamType;
+        param.Type = typeNameFromInfo(ParamTypeInfo);
         param.Name = ParamName;
         param.IsRef = paramIsRef;
-        param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
-        Args.push_back(param);
+        param.IsParams = paramIsParams;
+        param.DeclaredType = std::move(ParamTypeInfo);
+        param.NameLocation = nameLoc;
+        param.ParamsLocation = paramsLoc;
+        SkipNewlines();
+        if (CurTok == '=') {
+          param.HasDefault = true;
+          param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+          getNextToken(); // eat '='
+          SkipNewlines();
+          param.DefaultValue = ParseExpression();
+          if (!param.DefaultValue)
+            return false;
+        }
+        Args.push_back(std::move(param));
 
         SkipNewlines();
 
@@ -3010,7 +3987,7 @@ bool ParseTypeIdentifier(bool isRef) {
         }
 
         if (CurTok != ',') {
-          fprintf(stderr, "Error: Expected ',' or ')' in parameter list\n");
+          reportCompilerError("Expected ',' or ')' in parameter list");
           return false;
         }
 
@@ -3021,18 +3998,24 @@ bool ParseTypeIdentifier(bool isRef) {
       getNextToken(); // eat ')'
     }
     
+    if (!ValidateParameterDefaults(Args))
+      return false;
+
     // Create prototype
-    TypeInfo returnInfo = buildDeclaredTypeInfo(Type, false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(returnInfo), Name,
-                                                std::move(Args), false, false,
+    auto Proto = std::make_unique<PrototypeAST>(std::move(typeInfo), Name,
+                                                std::move(Args), false, isRef,
                                                 std::move(genericParams));
     
     // Parse the body
     auto Body = ParseBlock();
     if (!Body) {
-      fprintf(stderr, "Error: Expected function body\n");
+      if (!currentParser().hadError)
+        reportCompilerError("Expected function body");
       return false;
     }
+
+    if (currentParser().hadError)
+      return false;
     
     auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     if (Fn->getProto()->getGenericParameters().empty()) {
@@ -3042,7 +4025,7 @@ bool ParseTypeIdentifier(bool isRef) {
         FnIR->print(llvm::errs());
         fprintf(stderr, "\n");
       } else {
-        fprintf(stderr, "Error: Failed to generate IR for function\n");
+        reportCompilerError("Failed to generate IR for function");
       }
     } else {
       RegisterGenericFunctionTemplate(std::move(Fn));
@@ -3053,7 +4036,7 @@ bool ParseTypeIdentifier(bool isRef) {
     getNextToken(); // eat '='
     SkipNewlines();
 
-    TypeInfo declInfo = buildDeclaredTypeInfo(Type, isRef);
+    TypeInfo declInfo = typeInfo;
 
     // Check if the initializer has 'ref' keyword (for linking two variables)
     bool initializerIsRef = false;
@@ -3065,7 +4048,7 @@ bool ParseTypeIdentifier(bool isRef) {
 
     auto Initializer = ParseExpression();
     if (!Initializer) {
-      fprintf(stderr, "Error: Expected expression after '='\n");
+      reportCompilerError("Expected expression after '='");
       return false;
     }
 
@@ -3081,29 +4064,25 @@ bool ParseTypeIdentifier(bool isRef) {
     // Code generation will be handled by HandleVariableDeclaration in toplevel.cpp
     auto VarDecl = std::make_unique<VariableDeclarationStmtAST>(std::move(declInfo), Name, std::move(Initializer), isRef);
 
-    // Need to wrap it in a function for top-level variable declarations
-    TypeInfo anonVarReturn = buildDeclaredTypeInfo("void", false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(anonVarReturn), "__anon_var_decl",
-                                                std::vector<Parameter>());
+    if (IsInteractiveMode())
+      fprintf(stderr, "Parsed variable declaration, generating code...\n");
 
-    // Wrap the variable declaration in a block (no additional return needed)
-    std::vector<std::unique_ptr<StmtAST>> Statements;
-    Statements.push_back(std::move(VarDecl));
-    auto Body = std::make_unique<BlockStmtAST>(std::move(Statements));
-    
-    auto Func = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
-    fprintf(stderr, "Parsed variable declaration, generating code...\n");
-    
-    if (auto FnIR = Func->codegen()) {
-      fprintf(stderr, "Generated variable declaration IR:\n");
-      FnIR->print(llvm::errs());
-      fprintf(stderr, "\n");
+    if (auto VarIR = VarDecl->codegen()) {
+      (void)VarIR;
+      NoteTopLevelStatementEmitted();
+      if (IsInteractiveMode()) {
+        fprintf(stderr, "Generated variable declaration IR:\n");
+        if (auto *TopFunc = getModule()->getFunction("__hybrid_top_level"))
+          TopFunc->print(llvm::errs());
+        fprintf(stderr, "\n");
+      }
     } else {
-      fprintf(stderr, "Error: Failed to generate IR for variable declaration\n");
+      reportCompilerError("Failed to generate IR for variable declaration");
+      return false;
     }
     return true;
   } else {
-    fprintf(stderr, "Error: Expected '(' or '=' after identifier in top-level declaration\n");
+    reportCompilerError("Expected '(' or '=' after identifier in top-level declaration");
     return false;
   }
 }
@@ -3171,18 +4150,18 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     bool expectBaseClass = (kind == AggregateKind::Class);
     bool sawType = false;
     while (true) {
-      if (!IsValidType()) {
+      if (!IsValidType() && CurTok != '(') {
         LogError("Expected type name after 'inherits'");
         return nullptr;
       }
 
-      std::string typeName = ParseCompleteType();
-      if (typeName.empty())
+      TypeInfo clauseInfo;
+      if (!ParseCompleteTypeInfo(clauseInfo, false))
         return nullptr;
       sawType = true;
       SkipNewlines();
 
-      TypeInfo clauseInfo = buildDeclaredTypeInfo(typeName, false);
+      std::string typeName = typeNameFromInfo(clauseInfo);
       baseTypeInfos.push_back(clauseInfo);
 
       if (expectBaseClass) {
@@ -3205,6 +4184,12 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       LogError("Expected at least one type after 'inherits'");
       return nullptr;
     }
+  } else if ((kind == AggregateKind::Class || kind == AggregateKind::Interface) &&
+             CurTok == tok_colon) {
+    reportCompilerError(
+        "Use 'inherits' to declare base types",
+        "Replace ':' with 'inherits' before listing base interfaces or classes.");
+    return nullptr;
   }
 
   if (baseClass)
@@ -3239,9 +4224,14 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     getNextToken();
 
   std::vector<std::unique_ptr<FieldAST>> Fields;
+  std::vector<std::unique_ptr<PropertyAST>> Properties;
   std::vector<MethodDefinition> Methods;
+  std::vector<std::unique_ptr<DelegateDeclAST>> Delegates;
   bool seenThisOverride = false;
   bool hasConstructor = false;
+  bool hasDestructor = false;
+  int destructorIndex = -1;
+  bool hasIndexer = false;
 
   auto parseConstructor = [&](MemberModifiers modifiers,
                               std::vector<std::string> ctorGenericParams) -> bool {
@@ -3252,13 +4242,22 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     std::vector<Parameter> Args;
     while (CurTok != ')' && CurTok != tok_eof) {
       SkipNewlines();
-      if (!IsValidType()) {
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
+      if (!IsValidType() && CurTok != '(') {
         LogError("Expected parameter type");
         return false;
       }
 
-      std::string ParamType = ParseCompleteType();
-      if (ParamType.empty()) {
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, false)) {
         LogError("Failed to parse parameter type");
         return false;
       }
@@ -3269,13 +4268,27 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       }
 
       std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
       getNextToken();
 
       Parameter param;
-      param.Type = ParamType;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
       param.Name = ParamName;
       param.IsRef = false;
-      param.DeclaredType = buildDeclaredTypeInfo(ParamType, false);
+      param.IsParams = paramIsParams;
+      param.DeclaredType = std::move(ParamTypeInfo);
+      param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return false;
+      }
       Args.push_back(std::move(param));
 
       SkipNewlines();
@@ -3296,6 +4309,27 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       return false;
     }
     getNextToken();
+
+    if (!ValidateParameterDefaults(Args))
+      return false;
+
+    std::vector<ConstructorInitializer> ctorInitializers;
+
+    if (CurTok == tok_colon) {
+      LogError("Expected '{' after constructor declaration");
+      int braceDepth = 0;
+      do {
+        getNextToken();
+        if (CurTok == '{')
+          ++braceDepth;
+        else if (CurTok == '}') {
+          if (braceDepth == 0)
+            break;
+          --braceDepth;
+        }
+      } while (CurTok != tok_eof);
+      return false;
+    }
 
     while (CurTok == tok_newline)
       getNextToken();
@@ -3315,11 +4349,12 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         false, false, std::move(ctorGenericParams));
     auto Constructor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     Methods.emplace_back(std::move(Constructor), modifiers, MethodKind::Constructor, compositeName);
+    Methods.back().setConstructorInitializers(std::move(ctorInitializers));
     hasConstructor = true;
     return true;
   };
 
-  auto parseCompositeMethod = [&](const std::string &ReturnType,
+  auto parseCompositeMethod = [&](TypeInfo ReturnTypeInfo,
                                   const std::string &MethodName,
                                   MemberModifiers modifiers,
                                   MethodKind methodKind,
@@ -3329,6 +4364,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
     std::vector<Parameter> Args;
     while (CurTok != ')' && CurTok != tok_eof) {
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
       bool paramIsRef = false;
       if (CurTok == tok_ref) {
         paramIsRef = true;
@@ -3336,12 +4380,16 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         SkipNewlines();
       }
 
-      if (!IsValidType()) {
+      if (!IsValidType() && CurTok != '(') {
         LogError("Expected parameter type");
         return false;
       }
 
-      std::string ParamType = ParseCompleteType();
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef)) {
+        LogError("Failed to parse parameter type");
+        return false;
+      }
 
       if (CurTok != tok_identifier) {
         LogError("Expected parameter name");
@@ -3349,13 +4397,27 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       }
 
       std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
       getNextToken();
 
       Parameter param;
-      param.Type = ParamType;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
       param.Name = ParamName;
       param.IsRef = paramIsRef;
-      param.DeclaredType = buildDeclaredTypeInfo(ParamType, paramIsRef);
+      param.IsParams = paramIsParams;
+      param.DeclaredType = std::move(ParamTypeInfo);
+      param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
+      SkipNewlines();
+      if (CurTok == '=') {
+        param.HasDefault = true;
+        param.DefaultEqualsLocation = currentParser().currentTokenLocation;
+        getNextToken(); // eat '='
+        SkipNewlines();
+        param.DefaultValue = ParseExpression();
+        if (!param.DefaultValue)
+          return false;
+      }
       Args.push_back(std::move(param));
 
       if (CurTok == ')')
@@ -3374,6 +4436,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     }
     getNextToken();
 
+    if (!ValidateParameterDefaults(Args))
+      return false;
+
     while (CurTok == tok_newline)
       getNextToken();
 
@@ -3382,8 +4447,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
     const bool requiresBody = !modifiers.isAbstract && kind != AggregateKind::Interface;
     std::string QualifiedName = compositeName + "." + MethodName;
-    TypeInfo methodReturn = buildDeclaredTypeInfo(ReturnType, false);
-    auto Proto = std::make_unique<PrototypeAST>(std::move(methodReturn), QualifiedName,
+    auto Proto = std::make_unique<PrototypeAST>(std::move(ReturnTypeInfo), QualifiedName,
                                                 std::move(Args), false, false,
                                                 std::move(methodGenericParams));
 
@@ -3410,6 +4474,242 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     return true;
   };
 
+  auto memberNameCollides = [&](const std::string &name) -> bool {
+    for (const auto &field : Fields) {
+      if (field && field->getName() == name)
+        return true;
+    }
+    for (const auto &prop : Properties) {
+      if (prop && prop->getName() == name)
+        return true;
+    }
+    for (const auto &method : Methods) {
+      if (method.getDisplayName() == name)
+        return true;
+    }
+    return false;
+  };
+
+  auto parseIndexerParameters = [&](std::vector<Parameter> &params) -> bool {
+    if (CurTok != '[') {
+      reportCompilerError("Expected '[' after 'this' in indexer declaration");
+      return false;
+    }
+    getNextToken(); // eat '['
+    SkipNewlines();
+    while (CurTok != ']' && CurTok != tok_eof) {
+      bool paramIsParams = false;
+      SourceLocation paramsLoc{};
+      if (CurTok == tok_params) {
+        paramIsParams = true;
+        paramsLoc = currentParser().currentTokenLocation;
+        getNextToken(); // eat 'params'
+        SkipNewlines();
+      }
+
+      bool paramIsRef = false;
+      if (CurTok == tok_ref) {
+        paramIsRef = true;
+        getNextToken(); // eat 'ref'
+        SkipNewlines();
+      }
+
+      if (!IsValidType() && CurTok != '(') {
+        LogError("Expected parameter type");
+        return false;
+      }
+
+      TypeInfo ParamTypeInfo;
+      if (!ParseCompleteTypeInfo(ParamTypeInfo, paramIsRef)) {
+        LogError("Failed to parse parameter type");
+        return false;
+      }
+
+      if (CurTok != tok_identifier) {
+        LogError("Expected parameter name");
+        return false;
+      }
+
+      std::string ParamName = IdentifierStr;
+      SourceLocation nameLoc = currentParser().currentTokenLocation;
+      getNextToken();
+
+      if (ParamName == "value") {
+        reportCompilerError("Indexer parameter name 'value' is reserved");
+        return false;
+      }
+
+      if (paramIsParams) {
+        reportCompilerError("Indexers cannot declare 'params' parameters");
+        return false;
+      }
+
+      Parameter param;
+      param.Type = typeNameFromInfo(ParamTypeInfo);
+      param.Name = ParamName;
+      param.IsRef = paramIsRef;
+      param.IsParams = paramIsParams;
+      param.DeclaredType = std::move(ParamTypeInfo);
+      param.NameLocation = nameLoc;
+      param.ParamsLocation = paramsLoc;
+      SkipNewlines();
+      if (CurTok == '=') {
+        reportCompilerError("Indexer parameters cannot declare default values");
+        return false;
+      }
+      params.push_back(std::move(param));
+
+      SkipNewlines();
+      if (CurTok == ']')
+        break;
+      if (CurTok != ',') {
+        LogError("Expected ']' or ',' in indexer parameter list");
+        return false;
+      }
+      getNextToken(); // eat ','
+      SkipNewlines();
+    }
+
+    if (CurTok != ']') {
+      LogError("Expected ']' after indexer parameters");
+      return false;
+    }
+    getNextToken(); // eat ']'
+
+    if (!ValidateParameterDefaults(params))
+      return false;
+
+    if (params.empty()) {
+      reportCompilerError("Indexers must declare at least one parameter");
+      return false;
+    }
+
+    return true;
+  };
+
+  auto parseAccessorBlock =
+      [&](std::unique_ptr<AccessorAST> &getter,
+          std::unique_ptr<AccessorAST> &setter) -> bool {
+    if (CurTok != '{') {
+      reportCompilerError("Expected '{' to begin accessor block");
+      return false;
+    }
+    getNextToken(); // eat '{'
+    SkipNewlines();
+
+    while (CurTok != '}' && CurTok != tok_eof) {
+      if (CurTok == tok_newline) {
+        getNextToken();
+        continue;
+      }
+
+      bool isGetter = false;
+      if (CurTok == tok_get) {
+        isGetter = true;
+      } else if (CurTok == tok_set) {
+        isGetter = false;
+      } else {
+        reportCompilerError("Expected 'get' or 'set' accessor");
+        return false;
+      }
+
+      SourceLocation keywordLoc = currentParser().currentTokenLocation;
+      getNextToken(); // eat accessor keyword
+      SkipNewlines();
+
+      std::unique_ptr<ExprAST> exprBody;
+      std::unique_ptr<BlockStmtAST> blockBody;
+      bool isImplicit = false;
+
+      if (CurTok == '{') {
+        ScopedValueKeyword valueScope(!isGetter);
+        blockBody = ParseBlock();
+        if (!blockBody)
+          return false;
+      } else if (CurTok == tok_get || CurTok == tok_set || CurTok == '}' ||
+                 CurTok == tok_newline) {
+        isImplicit = true;
+      } else {
+        ScopedValueKeyword valueScope(!isGetter);
+        exprBody = ParseExpression();
+        if (!exprBody)
+          return false;
+      }
+
+      if (isGetter) {
+        if (getter) {
+          reportCompilerError("Duplicate 'get' accessor");
+          return false;
+        }
+        getter = std::make_unique<AccessorAST>(
+            AccessorKind::Get, keywordLoc, std::move(exprBody),
+            std::move(blockBody), isImplicit);
+      } else {
+        if (setter) {
+          reportCompilerError("Duplicate 'set' accessor");
+          return false;
+        }
+        setter = std::make_unique<AccessorAST>(
+            AccessorKind::Set, keywordLoc, std::move(exprBody),
+            std::move(blockBody), isImplicit);
+      }
+
+      SkipNewlines();
+    }
+
+    if (CurTok != '}') {
+      LogError("Expected '}' after accessor block");
+      return false;
+    }
+    getNextToken(); // eat '}'
+    return true;
+  };
+
+  auto applyAccessorAccessDefaults =
+      [&](MemberModifiers &modifiers,
+          const PendingMemberModifiers &pending,
+          const std::string &memberName,
+          bool hasGetter,
+          bool hasSetter,
+          bool isIndexer) -> bool {
+    if (!isIndexer && pending.hasExplicitAccess &&
+        (pending.access == AccessSpecifier::Private ||
+         pending.access == AccessSpecifier::Protected)) {
+      const char *accessName =
+          pending.access == AccessSpecifier::Private ? "private" : "protected";
+      std::string effect;
+      if (hasGetter && hasSetter)
+        effect = "getting and setting";
+      else if (hasGetter)
+        effect = "getting";
+      else if (hasSetter)
+        effect = "setting";
+      else
+        effect = "accessing";
+      reportCompilerError("Property '" + memberName + "' cannot be declared " +
+                              accessName + " because it prevents " + effect,
+                          std::string("Remove the ") + accessName +
+                              " modifier or the accessor block.");
+      return false;
+    }
+
+    if (!pending.hasExplicitAccess && hasSetter)
+      modifiers.access = MemberAccess::PublicReadWrite();
+
+    return true;
+  };
+
+  auto validateDelegateModifiers =
+      [&](const PendingMemberModifiers &pending) -> bool {
+        if (pending.hasExplicitAccess || pending.isStatic || pending.isConst ||
+            pending.isAbstract || pending.isVirtual || pending.isOverride) {
+          reportCompilerError(
+              "Delegate declarations cannot use member modifiers");
+          return false;
+        }
+        return true;
+      };
+
   while (CurTok != '}' && CurTok != tok_eof) {
     SkipNewlines();
     if (CurTok == '}')
@@ -3419,7 +4719,107 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     if (!ParsePendingMemberModifiers(pendingMods))
       return nullptr;
 
+    if (CurTok == tok_delegate) {
+      if (!validateDelegateModifiers(pendingMods))
+        return nullptr;
+      auto delegateDecl = ParseDelegateDefinition();
+      if (!delegateDecl)
+        return nullptr;
+      if (delegateDecl->getName() == compositeName) {
+        reportCompilerError("Delegate '" + delegateDecl->getName() +
+                            "' conflicts with enclosing type '" +
+                            compositeName + "'");
+        return nullptr;
+      }
+      Delegates.push_back(std::move(delegateDecl));
+      continue;
+    }
+
+    if (CurTok == tok_tilde_identifier) {
+      if (kind == AggregateKind::Interface) {
+        reportCompilerError("Interfaces cannot declare destructors");
+        return nullptr;
+      }
+      if (hasDestructor) {
+        reportCompilerError("Type '" + compositeName + "' already declares a destructor");
+        return nullptr;
+      }
+
+      std::string dtorTarget = IdentifierStr;
+      getNextToken(); // eat '~Name'
+      SkipNewlines();
+
+      if (dtorTarget != compositeName) {
+        reportCompilerError("Destructor name must match its enclosing type",
+                            "Use '~" + compositeName + "()' to declare a destructor for '" +
+                                compositeName + "'.");
+        return nullptr;
+      }
+
+      std::string decoratedName = dtorTarget;
+      if (!ParseOptionalGenericArgumentList(decoratedName, true))
+        return nullptr;
+      if (decoratedName != dtorTarget) {
+        reportCompilerError("Destructors cannot declare generic parameters");
+        return nullptr;
+      }
+
+      if (CurTok != '(') {
+        LogError("Expected '(' after destructor name");
+        return nullptr;
+      }
+      getNextToken(); // eat '('
+      SkipNewlines();
+      if (CurTok != ')') {
+        reportCompilerError("Destructors cannot declare parameters");
+        return nullptr;
+      }
+      getNextToken(); // eat ')'
+      SkipNewlines();
+
+      MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+      if ((modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+        reportCompilerError("Destructors cannot be static");
+        return nullptr;
+      }
+      if ((modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+        reportCompilerError("Destructors cannot be const-qualified");
+        return nullptr;
+      }
+      if (modifiers.isAbstract) {
+        reportCompilerError("Destructors cannot be abstract");
+        return nullptr;
+      }
+      if (modifiers.isVirtual || modifiers.isOverride) {
+        reportCompilerError("Destructors do not support virtual or override modifiers");
+        return nullptr;
+      }
+
+      if (CurTok != '{') {
+        LogError("Expected '{' after destructor declaration");
+        return nullptr;
+      }
+
+      auto Body = ParseBlock();
+      if (!Body)
+        return nullptr;
+
+      TypeInfo dtorReturn = buildDeclaredTypeInfo("void", false);
+      std::string functionName = compositeName + ".~" + compositeName;
+      auto Proto = std::make_unique<PrototypeAST>(
+          std::move(dtorReturn), functionName, std::vector<Parameter>{},
+          false, false);
+      auto Dtor = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
+      Methods.emplace_back(std::move(Dtor), modifiers, MethodKind::Destructor,
+                           "~" + compositeName);
+      destructorIndex = static_cast<int>(Methods.size()) - 1;
+      hasDestructor = true;
+      continue;
+    }
+
+    TypeInfo memberTypeInfo;
     std::string Type;
+    bool hasMemberTypeInfo = false;
 
     if (CurTok == tok_identifier && IdentifierStr == compositeName) {
       getNextToken();
@@ -3458,18 +4858,22 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       bool pointerSeen = false;
       if (!AppendTypeSuffix(Type, pointerSeen))
         return nullptr;
-    } else if (IsValidType()) {
-      Type = ParseCompleteType();
-      if (Type.empty()) {
+      memberTypeInfo = buildDeclaredTypeInfo(Type, false);
+      hasMemberTypeInfo = true;
+    } else if (IsValidType() || CurTok == '(') {
+      if (!ParseCompleteTypeInfo(memberTypeInfo, false)) {
         LogError("Failed to parse member type");
         return nullptr;
       }
+      Type = typeNameFromInfo(memberTypeInfo);
+      hasMemberTypeInfo = true;
     } else {
       LogError("Expected field or method declaration inside type definition");
       return nullptr;
     }
 
     std::string MemberName;
+    SourceLocation memberNameLoc = currentParser().currentTokenLocation;
     if (CurTok == tok_identifier) {
       MemberName = IdentifierStr;
       getNextToken();
@@ -3489,6 +4893,94 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       SkipNewlines();
     if (!methodGenericParams.empty())
       maybeWarnGenericArity(methodGenericParams, MemberName, "Method");
+
+    if (MemberName == "this" && CurTok == '[') {
+      if (!methodGenericParams.empty()) {
+        reportCompilerError("Indexers cannot declare generic parameter lists");
+        return nullptr;
+      }
+      if (memberNameCollides(MemberName)) {
+        reportCompilerError("Type '" + compositeName +
+                            "' already declares member '" + MemberName + "'");
+        return nullptr;
+      }
+      if (hasIndexer) {
+        reportCompilerError("Type '" + compositeName +
+                            "' already declares an indexer");
+        return nullptr;
+      }
+
+      std::vector<Parameter> indexerParams;
+      if (!parseIndexerParameters(indexerParams))
+        return nullptr;
+
+      MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+      modifiers.isProperty = true;
+
+      if ((modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+        reportCompilerError("Indexers must be instance members");
+        return nullptr;
+      }
+
+      if (kind == AggregateKind::Interface && !modifiers.isAbstract)
+        modifiers.isAbstract = true;
+
+      SkipNewlines();
+      std::unique_ptr<AccessorAST> getter;
+      std::unique_ptr<AccessorAST> setter;
+      if (!parseAccessorBlock(getter, setter))
+        return nullptr;
+
+      if (!getter && !setter) {
+        reportCompilerError("Indexers must declare at least one accessor");
+        return nullptr;
+      }
+
+      if (setter && !getter) {
+        reportCompilerError("Indexer on type '" + compositeName +
+                            "' does not define a getter");
+        return nullptr;
+      }
+
+      if (!applyAccessorAccessDefaults(modifiers, pendingMods, MemberName,
+                                       getter != nullptr, setter != nullptr,
+                                       true))
+        return nullptr;
+
+      auto hasAccessorBody = [](const std::unique_ptr<AccessorAST> &accessor) {
+        return accessor &&
+               (accessor->hasBlockBody() || accessor->hasExpressionBody());
+      };
+
+      if ((kind == AggregateKind::Interface || modifiers.isAbstract) &&
+          (hasAccessorBody(getter) || hasAccessorBody(setter))) {
+        reportCompilerError("Abstract indexers cannot declare accessor bodies");
+        return nullptr;
+      }
+
+      if (!modifiers.isAbstract &&
+          ((getter && getter->isImplicit()) ||
+           (setter && setter->isImplicit()))) {
+        reportCompilerError("Indexer accessors must declare a body");
+        return nullptr;
+      }
+
+      if (setter &&
+          (modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+        reportCompilerError("Const indexers cannot declare a setter");
+        return nullptr;
+      }
+
+      TypeInfo indexerInfo =
+          hasMemberTypeInfo ? memberTypeInfo : buildDeclaredTypeInfo(Type, false);
+      auto Indexer = std::make_unique<PropertyAST>(
+          typeNameFromInfo(indexerInfo), std::move(indexerInfo), MemberName,
+          modifiers, nullptr, std::move(indexerParams), memberNameLoc,
+          std::move(getter), std::move(setter));
+      Properties.push_back(std::move(Indexer));
+      hasIndexer = true;
+      continue;
+    }
 
     if (!methodGenericParams.empty() && CurTok != '(') {
       reportCompilerError("Generic parameter list must be followed by '(' in method declarations");
@@ -3530,7 +5022,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
                               "Rename '" + MemberName + "' to PascalCase for consistency");
       }
 
-      if (!parseCompositeMethod(Type, MemberName, modifiers, methodKind,
+      if (!parseCompositeMethod(memberTypeInfo, MemberName, modifiers, methodKind,
                                 std::move(methodGenericParams)))
         return nullptr;
     } else {
@@ -3539,11 +5031,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         return nullptr;
       }
       if (MemberName == "this") {
-        reportCompilerError("'this' can only be used as a formatter method name");
-        return nullptr;
-      }
-      if (kind == AggregateKind::Interface) {
-        reportCompilerError("Interfaces cannot declare fields");
+        reportCompilerError("'this' can only be used as a formatter method name or indexer");
         return nullptr;
       }
       std::unique_ptr<ExprAST> MemberInitializer;
@@ -3554,6 +5042,95 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         if (!MemberInitializer)
           return nullptr;
       }
+      SkipNewlines();
+
+      if (CurTok == '{') {
+        if (memberNameCollides(MemberName)) {
+          reportCompilerError("Type '" + compositeName +
+                              "' already declares member '" + MemberName + "'");
+          return nullptr;
+        }
+
+        std::unique_ptr<AccessorAST> getter;
+        std::unique_ptr<AccessorAST> setter;
+        if (!parseAccessorBlock(getter, setter))
+          return nullptr;
+
+        if (!getter && !setter) {
+          reportCompilerError("Properties must declare at least one accessor");
+          return nullptr;
+        }
+
+        MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
+        modifiers.isProperty = true;
+
+        if (!applyAccessorAccessDefaults(modifiers, pendingMods, MemberName,
+                                         getter != nullptr, setter != nullptr,
+                                         false))
+          return nullptr;
+
+        if (kind == AggregateKind::Interface && !modifiers.isAbstract)
+          modifiers.isAbstract = true;
+
+        if (kind == AggregateKind::Interface &&
+            (modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+          reportCompilerError("Interfaces cannot declare static properties");
+          return nullptr;
+        }
+
+        auto hasAccessorBody = [](const std::unique_ptr<AccessorAST> &accessor) {
+          return accessor &&
+                 (accessor->hasBlockBody() || accessor->hasExpressionBody());
+        };
+
+        if ((kind == AggregateKind::Interface || modifiers.isAbstract) &&
+            (hasAccessorBody(getter) || hasAccessorBody(setter))) {
+          reportCompilerError("Abstract properties cannot declare accessor bodies");
+          return nullptr;
+        }
+
+        if (setter &&
+            (modifiers.storage & StorageFlag::Const) != StorageFlag::None) {
+          reportCompilerError("Const properties cannot declare a setter");
+          return nullptr;
+        }
+
+        if (MemberInitializer &&
+            (modifiers.storage & StorageFlag::Static) == StorageFlag::None) {
+          reportCompilerError("Only static members may specify declaration initializers",
+                              "Assign non-static members inside constructors instead");
+          return nullptr;
+        }
+
+        if (kind == AggregateKind::Interface && MemberInitializer) {
+          reportCompilerError("Interfaces cannot declare property initializers");
+          return nullptr;
+        }
+
+        TypeInfo propInfo =
+            hasMemberTypeInfo ? memberTypeInfo : buildDeclaredTypeInfo(Type, false);
+        std::string propTypeName = typeNameFromInfo(propInfo);
+        if (kind != AggregateKind::Interface) {
+          auto Field = std::make_unique<FieldAST>(propTypeName, propInfo, MemberName,
+                                                  modifiers,
+                                                  std::move(MemberInitializer));
+          Fields.push_back(std::move(Field));
+        } else {
+          MemberInitializer.reset();
+        }
+
+        auto Property = std::make_unique<PropertyAST>(
+            propTypeName, std::move(propInfo), MemberName, modifiers, nullptr,
+            std::vector<Parameter>{}, memberNameLoc,
+            std::move(getter), std::move(setter));
+        Properties.push_back(std::move(Property));
+        continue;
+      }
+
+      if (kind == AggregateKind::Interface) {
+        reportCompilerError("Interfaces cannot declare fields");
+        return nullptr;
+      }
       MemberModifiers modifiers = FinalizeMemberModifiers(pendingMods, kind);
       if (MemberInitializer &&
           (modifiers.storage & StorageFlag::Static) == StorageFlag::None) {
@@ -3561,7 +5138,12 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
                             "Assign non-static members inside constructors instead");
         return nullptr;
       }
-      auto Field = std::make_unique<FieldAST>(Type, MemberName, modifiers, std::move(MemberInitializer));
+      TypeInfo fieldInfo =
+          hasMemberTypeInfo ? memberTypeInfo : buildDeclaredTypeInfo(Type, false);
+      std::string fieldTypeName = typeNameFromInfo(fieldInfo);
+      auto Field = std::make_unique<FieldAST>(fieldTypeName, std::move(fieldInfo),
+                                              MemberName, modifiers,
+                                              std::move(MemberInitializer));
       Fields.push_back(std::move(Field));
     }
   }
@@ -3590,7 +5172,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   }
 
   auto Result = std::make_unique<StructAST>(
-      kind, compositeName, std::move(Fields), std::move(Methods),
+      kind, compositeName, std::move(Delegates), std::move(Fields),
+      std::move(Properties),
+      std::move(Methods),
       std::move(baseTypes), std::move(genericParameters));
   Result->setBaseClass(std::move(baseClass));
   Result->setInterfaces(std::move(interfaceTypes));
@@ -3598,11 +5182,37 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   Result->setBaseClassInfo(std::move(baseClassInfo));
   Result->setInterfaceTypeInfos(std::move(interfaceTypeInfos));
   Result->setAbstract(isAbstractComposite);
+  ClassInheritanceMetadata inheritance;
+  inheritance.baseClassName = Result->getBaseClass();
+  inheritance.interfaceNames = Result->getInterfaces();
+  if (kind == AggregateKind::Struct) {
+    inheritance.defaultMemberAccess = MemberAccess::PublicReadWrite();
+  } else {
+    inheritance.defaultMemberAccess = MemberAccess::ReadPublicWritePrivate();
+  }
+  for (const auto &method : Result->getMethods()) {
+    if (method.getKind() == MethodKind::Constructor)
+      inheritance.constructorAccesses.push_back(method.getModifiers().access);
+  }
+  Result->setInheritanceMetadata(std::move(inheritance));
+  if (destructorIndex >= 0)
+    Result->setDestructorIndex(destructorIndex);
   return Result;
 }
 // Evaluate constant expressions at compile time
-bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
+bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result,
+                                SourceLocation *firstErrorLocation) {
   if (!expr) return false;
+
+  auto noteFailure = [&](const ExprAST *node) {
+    if (!firstErrorLocation || !node)
+      return;
+    if (firstErrorLocation->isValid())
+      return;
+    SourceLocation loc = node->getSourceLocation();
+    if (loc.isValid())
+      *firstErrorLocation = loc;
+  };
 
   auto toDouble = [](const ConstantValue &cv) -> double {
     switch (cv.type) {
@@ -3640,15 +5250,19 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
   }
 
   if (auto parenExpr = dynamic_cast<const ParenExprAST*>(expr)) {
-    if (parenExpr->isTuple() || parenExpr->size() != 1)
+    if (parenExpr->isTuple() || parenExpr->size() != 1) {
+      noteFailure(parenExpr);
       return false;
-    return EvaluateConstantExpression(parenExpr->getElement(0), result);
+    }
+    return EvaluateConstantExpression(parenExpr->getElement(0), result,
+                                      firstErrorLocation);
   }
 
   if (auto binExpr = dynamic_cast<const BinaryExprAST*>(expr)) {
     ConstantValue lhs(0LL), rhs(0LL);
-    if (!EvaluateConstantExpression(binExpr->getLHS(), lhs) ||
-        !EvaluateConstantExpression(binExpr->getRHS(), rhs)) {
+    if (!EvaluateConstantExpression(binExpr->getLHS(), lhs, firstErrorLocation) ||
+        !EvaluateConstantExpression(binExpr->getRHS(), rhs, firstErrorLocation)) {
+      noteFailure(binExpr);
       return false;
     }
 
@@ -3675,6 +5289,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       } else if (op == "!=") {
         compResult = leftVal != rightVal;
       } else {
+        noteFailure(binExpr);
         return false;
       }
 
@@ -3684,6 +5299,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
 
     if (op == "&&" || op == "||") {
       if (lhs.type != ConstantValue::BOOLEAN || rhs.type != ConstantValue::BOOLEAN) {
+        noteFailure(binExpr);
         return false;
       }
 
@@ -3693,7 +5309,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       return true;
     }
 
-    if (op == "+" || op == "-" || op == "*" || op == "/") {
+    if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
       if (isSignedInt(lhs) && isSignedInt(rhs)) {
         long long arithResult = 0;
         if (op == "+") {
@@ -3703,8 +5319,17 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
         } else if (op == "*") {
           arithResult = lhs.intVal * rhs.intVal;
         } else if (op == "/") {
-          if (rhs.intVal == 0) return false;
+          if (rhs.intVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
           arithResult = lhs.intVal / rhs.intVal;
+        } else if (op == "%") {
+          if (rhs.intVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
+          arithResult = lhs.intVal % rhs.intVal;
         }
         result = ConstantValue(arithResult);
         return true;
@@ -3719,16 +5344,31 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
         } else if (op == "*") {
           arithResult = lhs.uintVal * rhs.uintVal;
         } else if (op == "/") {
-          if (rhs.uintVal == 0) return false;
+          if (rhs.uintVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
           arithResult = lhs.uintVal / rhs.uintVal;
+        } else if (op == "%") {
+          if (rhs.uintVal == 0) {
+            noteFailure(binExpr);
+            return false;
+          }
+          arithResult = lhs.uintVal % rhs.uintVal;
         }
         result = ConstantValue(arithResult);
         return true;
       }
 
+      if (op == "%") {
+        noteFailure(binExpr);
+        return false;
+      }
+
       double leftVal = toDouble(lhs);
       double rightVal = toDouble(rhs);
       if (op == "/" && rightVal == 0.0) {
+        noteFailure(binExpr);
         return false;
       }
 
@@ -3746,11 +5386,64 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
       result = ConstantValue(floatResult);
       return true;
     }
+
+    if (op == "<<" || op == ">>") {
+      if (lhs.type == ConstantValue::INTEGER && rhs.type == ConstantValue::INTEGER) {
+        if (op == "<<")
+          result = ConstantValue(lhs.intVal << rhs.intVal);
+        else
+          result = ConstantValue(lhs.intVal >> rhs.intVal);
+        return true;
+      }
+      if (lhs.type == ConstantValue::UNSIGNED_INTEGER &&
+          rhs.type == ConstantValue::UNSIGNED_INTEGER) {
+        if (op == "<<")
+          result = ConstantValue(lhs.uintVal << rhs.uintVal);
+        else
+          result = ConstantValue(lhs.uintVal >> rhs.uintVal);
+        return true;
+      }
+      noteFailure(binExpr);
+      return false;
+    }
+
+    if (op == "&" || op == "|" || op == "^") {
+      if (lhs.type == ConstantValue::INTEGER && rhs.type == ConstantValue::INTEGER) {
+        long long value = lhs.intVal;
+        if (op == "&")
+          value &= rhs.intVal;
+        else if (op == "|")
+          value |= rhs.intVal;
+        else
+          value ^= rhs.intVal;
+        result = ConstantValue(value);
+        return true;
+      }
+      if (lhs.type == ConstantValue::UNSIGNED_INTEGER &&
+          rhs.type == ConstantValue::UNSIGNED_INTEGER) {
+        unsigned long long value = lhs.uintVal;
+        if (op == "&")
+          value &= rhs.uintVal;
+        else if (op == "|")
+          value |= rhs.uintVal;
+        else
+          value ^= rhs.uintVal;
+        result = ConstantValue(value);
+        return true;
+      }
+      noteFailure(binExpr);
+      return false;
+    }
+
+    noteFailure(binExpr);
+    return false;
   }
 
   if (auto unaryExpr = dynamic_cast<const UnaryExprAST*>(expr)) {
     ConstantValue operand(0LL);
-    if (!EvaluateConstantExpression(unaryExpr->getOperand(), operand)) {
+    if (!EvaluateConstantExpression(unaryExpr->getOperand(), operand,
+                                    firstErrorLocation)) {
+      noteFailure(unaryExpr);
       return false;
     }
 
@@ -3783,6 +5476,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
     }
   }
 
+  noteFailure(expr);
   return false;
 }
 
@@ -3794,6 +5488,7 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result) {
 #undef LoopNestingDepth
 #undef StructNames
 #undef ClassNames
+#undef DelegateNames
 #undef StructDefinitionStack
 #undef ClassDefinitionStack
 #undef BinopPrecedence

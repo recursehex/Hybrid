@@ -56,10 +56,27 @@ int copy = linked
 assert copy == 42   // copy should be 42 (value copied, not linked)
 
 // Test 8: Reference type returning function
-ref int getRef()
+ref int aliasParameter(ref int source)
 {
-    int local = 42
-    return ref local
+    return ref source
 }
 
-assert getRef() == 42
+int refSource = 7
+int copied = aliasParameter(ref refSource)
+assert copied == 7
+
+ref int viaParam = ref refSource
+viaParam = 9
+assert refSource == 9 && viaParam == 9
+
+// Test 9: Ref rebinding with explicit 'ref'
+int lhs = 10
+int rhs = 20
+ref int cursor = ref lhs
+assert cursor == 10 && lhs == 10 && rhs == 20
+cursor = 15
+assert lhs == 15 && rhs == 20
+cursor = ref rhs   // Rebind to rhs
+assert cursor == 20 && lhs == 15 && rhs == 20
+cursor = 25
+assert lhs == 15 && rhs == 25 && cursor == 25

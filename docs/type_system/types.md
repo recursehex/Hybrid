@@ -9,6 +9,7 @@
 | `int` | 32-bit signed integer | `i32` | `int x = 42` |
 | `float` | 32-bit floating point | `float` | `float pi = 3.14f` |
 | `double` | 64-bit floating point | `double` | `double e = 2.71828` |
+| `decimal` | 128-bit decimal payload (runtime-backed) | `{ i64, i64 }` | `decimal price = 12.34` |
 | `char` | 16-bit Unicode character | `i16` | `char ch = 'A'` |
 | `bool` | 8-bit boolean value | `i8` | `bool flag = true` |
 | `void` | No value (functions only) | `void` | `void func() { }` |
@@ -33,6 +34,9 @@
 | `schar` | 8-bit signed character | `i8` | `schar sc = 'A'` |
 | `lchar` | 32-bit Unicode character | `i32` | `lchar lc = '\u03a9'` |
 
+> [!IMPORTANT]
+> `char` is a 16-bit UTF-16 code unit. Emoji and other codepoints above U+FFFF require `lchar`, and string data always lives in UTF-16, so plan interop accordingly if you expect UTF-8 payloads.
+
 ## Nullable Types
 
 All value and reference types are non-nullable by default. Append `?` to any type name to allow `null` assignments and propagate nullable results, like `string? maybeAlias = null`. Nullable annotations apply anywhere a type appears, including arrays (`int?[]` vs `int[]?`) and function signatures, while pointer types (`int@`, `float@2`, etc.) always allow `null`. Assigning a nullable expression to a non-nullable target is a compile-time error. Use helper functions or explicit conversions that validate nullability. Accessing members on a nullable struct requires the null-safe access operator `?.`. The compiler performs flow-sensitive narrowing to treat guarded variables as non-nullable within reachable branches.
@@ -51,9 +55,35 @@ string[] names = ["Alice", "Bob", "Charlie"]
 
 Arrays are implemented as structs containing a pointer to elements and a size in LLVM IR. Array literals regenerate their elements to match the declared element type, so `float[] temps = [98.6, 100.0]` stores true 32-bit floats even though the literal syntax defaults to `double`. The same width-aware regeneration applies to character arrays, so `schar[] ascii = ['A', 'B']` produces 8-bit code units while `lchar[]` stores full 32-bit values.
 
+## Tuple Types
+
+Tuple types bundle a fixed number of values into a single aggregate without declaring a named struct. Use parentheses in the type position, and include at least two elements:
+
+```cs
+(int, string) pair = (8, "hello")
+((int, int), string) point = ((1, 2), "origin")
+```
+
+Tuple elements can be named for readability and dot access:
+
+```cs
+(int count, string greeting) message = (2, "hi")
+int c = message.count
+```
+
+Element names are metadata only: they do not change the tuple's layout or assignment compatibility, which is structural by element types.
+Tuple elements are mutable, so you can assign through indexing or named access when the tuple itself is mutable.
+
 ## Strings and Unicode
 
 `string` values are stored as UTF-16 sequences. Every string literal is validated and converted from its UTF-8 spelling during lexing, then emitted as a 16-bit array that shares a single global instance: identical literals point at the same address, so pointer equality works while still representing Unicode text correctly. Character literals adopt the consumer's width, so `'😊'` becomes a 32-bit `lchar` in wide contexts, but narrows to `char`/`schar` if it fits the target range, otherwise invalid UTF-8 triggers a diagnostic. Use the sized character aliases (`schar`, `char`, `lchar`) when you need to control storage explicitly.
+
+Strings expose a `.size` property that returns the length of the string in characters (UTF-16 code units).
+
+```cs
+string title = "Hybrid"
+int length = title.size   // 6
+```
 
 ## Custom Types
 

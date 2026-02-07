@@ -4,6 +4,7 @@ While types must be explicitly declared, the compiler performs automatic type in
 
 - Whole numbers without decimal points become `int` (i32) by default
 - Numbers with decimal points become `double`
+- Numeric literals become `decimal` when context requires `decimal` (assignment, parameter, return, etc.)
 - Character literals in single quotes become `char`
 - String literals in double quotes become `string`
 - `true` and `false` become `bool`
@@ -13,9 +14,16 @@ While types must be explicitly declared, the compiler performs automatic type in
   - `0o` / `0O` for octal (`0o755` = 493)
   - `0x` / `0X` for hexadecimal (`0xDEAD` = 57005)
   - Scientific notation is accepted for floating point (`6.022e23`, `1.2E-3`)
+  - Decimal-context literals also support exponent forms (`1e-3`, `2.5E4`)
 
 > [!NOTE]
 > Leading-dot literals such as `.5` are interpreted as floating-point numbers (`0.5`).
+
+> [!IMPORTANT]
+> Inference only regenerates literals; it never inserts implicit casts for stored values. Declarations need an explicit type, and narrowing assignments (e.g. `int` to `byte`) require `type: expr`.
+
+> [!NOTE]
+> Numeric literals are contextually re-emitted as `decimal` when the target type is known to be `decimal` (for example in `decimal` assignments, parameters, and returns).
 
 ## Context-Aware Literal Type Inference
 
@@ -112,7 +120,7 @@ byte overflow = 256     // Error: 256 exceeds byte range [0-255]
 
 // Overflow detection in literals
 byte b = 200
-assert b == 256         // Error: 256 out of range for byte
+assert b == 256         // Error: 256 exceeds byte range [0-255]
 
 // Requires explicit casts for converting to smaller types
 short s = 100

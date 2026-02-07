@@ -1,6 +1,6 @@
 # Variable Declarations
 
-All variables must be initialized when declared, except for struct members given they are initialized in all constructors:
+All variables must be initialized when declared, except for struct or class members given they are initialized in all constructors:
 
 ```cs
 // Valid declarations
@@ -11,7 +11,7 @@ string message = "Hello"
 string? empty = null    // Nullable string
 
 // Invalid - no initialization
-int x       // Error: variable must be initialized
+int x       // Error: Variable must be initialized
 
 // Valid struct member constructor initialization
 struct Point
@@ -32,13 +32,35 @@ struct Rectangle
     Point topLeft
     Point bottomRight
 
-    // Error: both members must be initialized in all constructors
+    // ERROR: both members must be initialized in all constructors
     Rectangle(Point topLeft)
     {
         this.topLeft = topLeft
     }
 }
+
+class Person
+{
+    string name
+    int age
+
+    // Valid constructor initializing all members
+    Person(string name, int age)
+    {
+        this.name = name
+        this.age = age
+    }
+
+    // ERROR: Invalid constructor missing age initialization
+    Person(string name)
+    {
+        this.name = name
+    }
+}
 ```
+
+> [!IMPORTANT]
+> Hybrid never allows uninitialized locals. If you see a declaration without an initializer, move the calculation into the initializer or refactor the control flow until every path sets the value.
 
 ## Nullable Types
 
@@ -55,7 +77,7 @@ Address? address = user?.primaryAddress
 - Pointer types (`int@`, `float@2`, etc.) implicitly allow `null` regardless of annotation because they are raw references.
 - Assigning a nullable expression to a non-nullable target is a compile-time error. Use helper functions or explicit conversions that validate nullability.
 - Accessing members on a nullable struct requires the null-safe access operator `?.`. See [Structs](structs.md) and [Expressions](expressions.md) for examples.
-- The compiler performs flow-sensitive narrowing. After guards like `if maybeAlias != null` (and the symmetric `if maybeAlias == null` in the `else`) the guarded variable is treated as its non-nullable type for the remainder of the reachable branch. The same analysis applies to `while maybeAlias != null` loops and survives across early returns that prove a variable is null.
+- The compiler performs flow-sensitive narrowing. After guards like `if maybeAlias != null` or `if maybeAlias is not null` (and the symmetric `if maybeAlias == null` in the `else`) the guarded variable is treated as its non-nullable type for the remainder of the reachable branch. The same analysis applies to `while maybeAlias != null` and `while maybeAlias is not null` loops and survives across early returns that prove a variable is null.
 
 ## Global vs Local Variables
 
@@ -80,4 +102,4 @@ int localExample() {
 }
 ```
 
-Global variables are stored as LLVM global variables and persist for the program's lifetime.
+Global variables are stored as LLVM global variables and persist for the program's lifetime. Local variables are allocated on the stack when the function is called and deallocated when it returns.

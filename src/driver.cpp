@@ -1,7 +1,11 @@
+// This file implements the command-line driver that configures compiler sessions, parses inputs, and compiles source files.
+
 #include "parser.h"
 #include "toplevel.h"
 #include "ast.h"
 #include "compiler_session.h"
+#include "optimizer/arc_optimizer.h"
+#include "optimizer/escape_analysis.h"
 
 #include <algorithm>
 #include <cctype>
@@ -15,10 +19,14 @@
 #include <system_error>
 #include <vector>
 #include <limits>
+#include <optional>
+#include <unistd.h>
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace {
@@ -106,6 +114,16 @@ void printUsage() {
   fprintf(stderr, "                     Fail when total generic instantiations exceed <n>\n");
   fprintf(stderr, "  --max-nested-generics <n>\n");
   fprintf(stderr, "                     Fail when nested generic depth exceeds <n>\n");
+  fprintf(stderr, "  --arc-optimizer    Enable ARC retain/release peephole pass\n");
+  fprintf(stderr, "  --arc-trace-retains\n");
+  fprintf(stderr, "                     Emit per-function retain/release/autorelease counts\n");
+  fprintf(stderr, "  --arc-escape-debug Enable ARC escape analysis logging\n");
+  fprintf(stderr, "  --arc-enabled=<bool>\n");
+  fprintf(stderr, "                     Toggle ARC insertion (default: true)\n");
+  fprintf(stderr, "  --arc-debug        Enable runtime ARC debugging (trace, verify, leaks)\n");
+  fprintf(stderr, "  --arc-leak-detect  Track live ARC objects and dump leaks on exit\n");
+  fprintf(stderr, "  --arc-verify-runtime\n");
+  fprintf(stderr, "                     Enable runtime ARC header/descriptor verification\n");
 }
 
 bool shouldEnableGenericsMetrics() {
@@ -163,6 +181,27 @@ bool parseUnsignedValue(const std::string &text, T &out) {
   return true;
 }
 
+bool parseBoolOption(const std::string &text, bool &out) {
+  std::string lowered;
+  lowered.reserve(text.size());
+  for (char ch : text) {
+    lowered.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+
+  if (lowered == "1" || lowered == "true" || lowered == "on" ||
+      lowered == "yes") {
+    out = true;
+    return true;
+  }
+  if (lowered == "0" || lowered == "false" || lowered == "off" ||
+      lowered == "no") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 void emitGenericsMetricsSummary(const CodegenContext &context) {
   const auto &metrics = context.genericsMetrics;
   const auto &diag = context.genericsDiagnostics;
@@ -197,6 +236,40 @@ void emitGenericsMetricsSummary(const CodegenContext &context) {
   }
 }
 
+static void emitArcTraceSummary(const CodegenContext &context) {
+  const ArcTraceState &trace = context.arcTrace;
+  if (!trace.traceEnabled)
+    return;
+
+  auto printEntry = [](const char *phase, const std::string &name,
+                       const ArcRetainCounts &counts) {
+    fprintf(stderr, "[arc-trace] %s %s retains=%llu releases=%llu autoreleases=%llu\n",
+            phase, name.c_str(),
+            static_cast<unsigned long long>(counts.retains),
+            static_cast<unsigned long long>(counts.releases),
+            static_cast<unsigned long long>(counts.autoreleases));
+  };
+
+  for (const auto &entry : trace.preOptimizationCounts)
+    printEntry("pre", entry.first, entry.second);
+
+  if (!trace.optimizerRan)
+    return;
+
+  std::map<std::string, ArcRetainCounts> merged = trace.postOptimizationCounts;
+  for (const auto &entry : trace.preOptimizationCounts) {
+    merged.emplace(entry.first, ArcRetainCounts{});
+  }
+
+  for (const auto &entry : merged) {
+    auto it = trace.postOptimizationCounts.find(entry.first);
+    const ArcRetainCounts &counts =
+        it != trace.postOptimizationCounts.end() ? it->second
+                                                 : ArcRetainCounts{};
+    printEntry("post", entry.first, counts);
+  }
+}
+
 }
 
 int main(int argc, char **argv) {
@@ -209,6 +282,15 @@ int main(int argc, char **argv) {
   uint64_t maxGenericInstantiations = 0;
   unsigned maxNestedGenerics = 0;
   unsigned maxGenericDepth = 0;
+  bool enableArcOptimizer = false;
+  bool enableArcTrace = false;
+  bool enableArcEscapeDebug = false;
+  bool enableArcRuntimeTrace = false;
+  bool enableArcLeakDetect = false;
+  bool enableArcVerifyRuntime = false;
+  bool enableArcDebugUmbrella = false;
+  bool enableArcPoolDebug = false;
+  bool arcEnabledFlag = true;
 
   session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
@@ -307,6 +389,42 @@ int main(int argc, char **argv) {
         popCompilerSession();
         return 1;
       }
+    } else if (arg == "--arc-optimizer") {
+      enableArcOptimizer = true;
+    } else if (arg == "--arc-trace-retains") {
+      enableArcTrace = true;
+      enableArcRuntimeTrace = true;
+    } else if (arg == "--arc-escape-debug") {
+      enableArcEscapeDebug = true;
+    } else if (arg == "--arc-enabled") {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --arc-enabled requires a value\n");
+        printUsage();
+        popCompilerSession();
+        return 1;
+      }
+      if (!parseBoolOption(argv[++i], arcEnabledFlag)) {
+        fprintf(stderr, "Error: Invalid value for --arc-enabled (expected true/false)\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg.rfind("--arc-enabled=", 0) == 0) {
+      std::string value = arg.substr(std::strlen("--arc-enabled="));
+      if (!parseBoolOption(value, arcEnabledFlag)) {
+        fprintf(stderr, "Error: Invalid value for --arc-enabled (expected true/false)\n");
+        popCompilerSession();
+        return 1;
+      }
+    } else if (arg == "--arc-debug") {
+      enableArcDebugUmbrella = true;
+      enableArcRuntimeTrace = true;
+      enableArcLeakDetect = true;
+      enableArcVerifyRuntime = true;
+      enableArcPoolDebug = true;
+    } else if (arg == "--arc-leak-detect") {
+      enableArcLeakDetect = true;
+    } else if (arg == "--arc-verify-runtime") {
+      enableArcVerifyRuntime = true;
     } else if (arg == "-o") {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: -o requires an output path\n");
@@ -339,6 +457,66 @@ int main(int argc, char **argv) {
     diagConfig.instantiationBudget = maxGenericInstantiations;
   if (maxNestedGenerics)
     diagConfig.nestedDepthBudget = maxNestedGenerics;
+  if (enableArcTrace)
+    codegenCtx.arcTrace.traceEnabled = true;
+  if (enableArcOptimizer)
+    codegenCtx.arcTrace.optimizerEnabled = true;
+  codegenCtx.arcDebug.runtimeTracing =
+      enableArcRuntimeTrace || enableArcDebugUmbrella;
+  codegenCtx.arcDebug.leakDetection =
+      enableArcLeakDetect || enableArcDebugUmbrella;
+  codegenCtx.arcDebug.runtimeVerify =
+      enableArcVerifyRuntime || enableArcDebugUmbrella;
+  codegenCtx.arcDebug.poolDebug =
+      enableArcPoolDebug || enableArcDebugUmbrella;
+  codegenCtx.arcEnabled = arcEnabledFlag;
+
+  auto runArcPasses = [&](llvm::Module *module) {
+    if (!codegenCtx.arcEnabled)
+      return;
+    if (!module)
+      return;
+    const bool arcDebug = std::getenv("HYBRID_ARC_OPT_DEBUG") != nullptr;
+    const bool escapeDebug = enableArcEscapeDebug || arcDebug;
+    if (codegenCtx.arcTrace.traceEnabled)
+      collectArcRetainReleaseCounts(
+          *module, codegenCtx.arcTrace.preOptimizationCounts);
+
+    bool arcPassesRan = false;
+    if (codegenCtx.arcTrace.optimizerEnabled || escapeDebug) {
+      if (arcDebug)
+        fprintf(stderr, "[arc-opt] begin escape analysis\n");
+      ArcEscapeSummary escapeSummary{};
+      bool escapeChanged =
+          runARCEscapeAnalysis(*module, escapeDebug, &escapeSummary);
+      arcPassesRan = arcPassesRan || escapeChanged || escapeDebug;
+      if (arcDebug && escapeSummary.removedCalls == 0 && !escapeChanged)
+        fprintf(stderr, "[arc-opt] escape analysis made no changes\n");
+    }
+
+    if (codegenCtx.arcTrace.optimizerEnabled) {
+      if (arcDebug)
+        fprintf(stderr, "[arc-opt] begin optimization pass\n");
+      runARCOptimizationPass(*module);
+      arcPassesRan = true;
+      if (arcDebug) {
+        if (llvm::verifyModule(*module, &llvm::errs()))
+          fprintf(stderr,
+                  "[arc-opt] module verification failed after optimizer\n");
+        else
+          fprintf(stderr, "[arc-opt] module verification succeeded\n");
+      }
+    }
+
+    if (arcPassesRan && codegenCtx.arcTrace.traceEnabled) {
+      if (arcDebug)
+        fprintf(stderr, "[arc-opt] collecting post-optimization counts\n");
+      collectArcRetainReleaseCounts(
+          *module, codegenCtx.arcTrace.postOptimizationCounts);
+    }
+    codegenCtx.arcTrace.optimizerRan =
+        codegenCtx.arcTrace.optimizerRan || arcPassesRan;
+  };
 
   if (!outputPath.empty())
     emitLLVM = emitLLVM || outputPath == "-" || endsWith(outputPath, ".ll") || endsWith(outputPath, ".bc");
@@ -357,6 +535,8 @@ int main(int argc, char **argv) {
 
     for (std::size_t idx = 0; idx < sourceFiles.size(); ++idx) {
       std::string source;
+      if (std::getenv("HYBRID_ARC_OPT_DEBUG"))
+        fprintf(stderr, "[arc-opt] compiling %s\n", sourceFiles[idx].c_str());
       if (!loadSourceFile(sourceFiles[idx].c_str(), source)) {
         fprintf(stderr, "Error: Failed to open source file '%s'\n", sourceFiles[idx].c_str());
         hadFailure = true;
@@ -377,91 +557,208 @@ int main(int argc, char **argv) {
 
     if (!hadFailure) {
       FinalizeTopLevelExecution();
-      llvm::Module *module = getModule();
-
-      std::string targetOutput;
-      if (!outputPath.empty())
-        targetOutput = outputPath;
-      else if (emitLLVM)
-        targetOutput = deriveOutputPath(sourceFiles.back());
-      else
-        targetOutput = "a.out";
-
-      std::string cachedModuleIR;
-      bool cachedModuleValid = false;
-      auto captureModuleIR = [&]() {
-        if (cachedModuleValid)
-          return;
-        if (!codegenCtx.genericsDiagnostics.diagnosticsEnabled)
-          return;
-        llvm::raw_string_ostream buffer(cachedModuleIR);
-        module->print(buffer, nullptr);
-        buffer.flush();
-        cachedModuleValid = true;
-        codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint =
-            cachedModuleIR.size();
-      };
-
-      auto writeModuleIR = [&](llvm::raw_ostream &os) {
-        if (codegenCtx.genericsDiagnostics.diagnosticsEnabled) {
-          captureModuleIR();
-          os << cachedModuleIR;
-          return;
-        }
-        module->print(os, nullptr);
-      };
-
-      auto emitTextFile = [&](const std::string &path) -> bool {
-        std::error_code ec;
-        llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_Text);
-        if (ec) {
-          fprintf(stderr, "Error: Failed to write LLVM IR to '%s': %s\n",
-                  path.c_str(), ec.message().c_str());
-          return false;
-        }
-        writeModuleIR(out);
-        return true;
-      };
-
-      auto shouldEmitIR = [&](const std::string &path) {
-        return emitLLVM || path == "-" || endsWith(path, ".ll") || endsWith(path, ".bc");
-      };
-
-      if (shouldEmitIR(targetOutput)) {
-        if (targetOutput == "-") {
-          writeModuleIR(llvm::outs());
-        } else {
-          if (!emitTextFile(targetOutput))
-            hadFailure = true;
-        }
-        if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
-          codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
-              codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
+      if (currentParser().hadError) {
+        hadFailure = true;
       } else {
-        llvm::SmallString<128> tempPath;
-        int tempFD;
-        if (auto ec = llvm::sys::fs::createTemporaryFile("hybrid_ir", ".ll", tempFD, tempPath)) {
-          fprintf(stderr, "Error: Failed to create temporary file: %s\n", ec.message().c_str());
-          hadFailure = true;
-        } else {
-          std::string tempPathStr = tempPath.str().str();
-          {
-            llvm::raw_fd_ostream tempStream(tempFD, true);
-            writeModuleIR(tempStream);
+        if (std::getenv("HYBRID_ARC_OPT_DEBUG"))
+          fprintf(stderr, "[arc-opt] finalized module\n");
+        llvm::Module *module = getModule();
+        runArcPasses(module);
+
+        std::string targetOutput;
+        if (!outputPath.empty())
+          targetOutput = outputPath;
+        else if (emitLLVM)
+          targetOutput = deriveOutputPath(sourceFiles.back());
+        else
+          targetOutput = "a.out";
+
+        std::string cachedModuleIR;
+        bool cachedModuleValid = false;
+        auto captureModuleIR = [&]() {
+          if (cachedModuleValid)
+            return;
+          if (!codegenCtx.genericsDiagnostics.diagnosticsEnabled)
+            return;
+          llvm::raw_string_ostream buffer(cachedModuleIR);
+          module->print(buffer, nullptr);
+          buffer.flush();
+          cachedModuleValid = true;
+          codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint =
+              cachedModuleIR.size();
+        };
+
+        auto writeModuleIR = [&](llvm::raw_ostream &os) {
+          // LLVM's module printer emits type declarations after functions, but LLVM's
+          // textual IR parser requires types to be declared before use. We work around
+          // this by capturing the IR, extracting type declarations, and re-ordering them.
+          std::string moduleIR;
+          llvm::raw_string_ostream buffer(moduleIR);
+
+          if (codegenCtx.genericsDiagnostics.diagnosticsEnabled) {
+            captureModuleIR();
+            moduleIR = cachedModuleIR;
+          } else {
+            module->print(buffer, nullptr);
+            buffer.flush();
+          }
+
+          // Extract and reorder: module metadata, then types, then everything else
+          std::istringstream iss(moduleIR);
+          std::string line;
+          std::vector<std::string> moduleMetadata;
+          std::vector<std::string> typeDecls;
+          std::vector<std::string> otherLines;
+          bool inMetadata = true;
+
+          while (std::getline(iss, line)) {
+            // Module metadata lines start with ';' or are special directives
+            if (inMetadata && (line.empty() || line[0] == ';' ||
+                line.find("source_filename") == 0 ||
+                line.find("target datalayout") == 0 ||
+                line.find("target triple") == 0)) {
+              moduleMetadata.push_back(line);
+              continue;
+            }
+            inMetadata = false;
+
+            // Type declarations match pattern: %TypeName = type { ... }
+            size_t firstNonSpace = line.find_first_not_of(" \t");
+            if (firstNonSpace != std::string::npos && line[firstNonSpace] == '%') {
+              size_t typePos = line.find(" = type ");
+              if (typePos != std::string::npos) {
+                typeDecls.push_back(line);
+                continue;
+              }
+            }
+            otherLines.push_back(line);
+          }
+
+          // Emit in correct order: metadata, types, then everything else
+          for (const auto &meta : moduleMetadata) {
+            os << meta << "\n";
+          }
+          for (const auto &decl : typeDecls) {
+            os << decl << "\n";
+          }
+          for (const auto &other : otherLines) {
+            os << other << "\n";
+          }
+        };
+
+        auto emitTextFile = [&](const std::string &path) -> bool {
+          std::error_code ec;
+          llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_Text);
+          if (ec) {
+            fprintf(stderr, "Error: Failed to write LLVM IR to '%s': %s\n",
+                    path.c_str(), ec.message().c_str());
+            return false;
+          }
+          writeModuleIR(out);
+          return true;
+        };
+
+        auto shouldEmitIR = [&](const std::string &path) {
+          return emitLLVM || path == "-" || endsWith(path, ".ll") || endsWith(path, ".bc");
+        };
+
+        if (shouldEmitIR(targetOutput)) {
+          if (targetOutput == "-") {
+            writeModuleIR(llvm::outs());
+          } else {
+            if (!emitTextFile(targetOutput))
+              hadFailure = true;
           }
           if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
             codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
                 codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
-
-          std::string command = "clang \"" + tempPathStr + "\" -o \"" + targetOutput + "\"";
-          int status = std::system(command.c_str());
-          if (status != 0) {
-            fprintf(stderr, "Error: clang failed when generating '%s' (exit code %d)\n",
-                    targetOutput.c_str(), status);
+        } else {
+          llvm::SmallString<128> tempPath;
+          int tempFD;
+          if (auto ec = llvm::sys::fs::createTemporaryFile("hybrid_ir", ".ll", tempFD, tempPath)) {
+            fprintf(stderr, "Error: Failed to create temporary file: %s\n", ec.message().c_str());
             hadFailure = true;
-          }
+          } else {
+            std::string tempPathStr = tempPath.str().str();
+            {
+              llvm::raw_fd_ostream tempStream(tempFD, true);
+              writeModuleIR(tempStream);
+            }
+            if (codegenCtx.genericsDiagnostics.diagnosticsEnabled)
+              codegenCtx.genericsDiagnostics.moduleIRBytesAfterPrint =
+                  codegenCtx.genericsDiagnostics.moduleIRBytesBeforePrint;
 
-          llvm::sys::fs::remove(tempPath);
+#ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
+            const char *linkerName = "clang++";
+#else
+            const char *linkerName = "clang";
+#endif
+            auto linkerPath = llvm::sys::findProgramByName(linkerName);
+            if (!linkerPath) {
+              fprintf(stderr, "Error: failed to find '%s': %s\n", linkerName,
+                      linkerPath.getError().message().c_str());
+              hadFailure = true;
+            } else {
+              std::vector<std::string> linkerArgs;
+              linkerArgs.push_back(linkerPath.get());
+              linkerArgs.push_back(tempPathStr);
+#ifdef HYBRID_RUNTIME_SUPPORT_SOURCE
+              linkerArgs.push_back(HYBRID_RUNTIME_SUPPORT_SOURCE);
+#ifdef HYBRID_ARC_RUNTIME_SOURCE
+              linkerArgs.push_back(HYBRID_ARC_RUNTIME_SOURCE);
+#endif
+#ifdef HYBRID_REFCOUNT_SOURCE
+              linkerArgs.push_back(HYBRID_REFCOUNT_SOURCE);
+#endif
+#ifdef HYBRID_WEAK_TABLE_SOURCE
+              linkerArgs.push_back(HYBRID_WEAK_TABLE_SOURCE);
+#endif
+#ifdef HYBRID_SOURCE_DIR
+              linkerArgs.push_back("-I");
+              linkerArgs.push_back(HYBRID_SOURCE_DIR);
+#endif
+#ifdef HYBRID_RUNTIME_INCLUDE_DIR
+              linkerArgs.push_back("-I");
+              linkerArgs.push_back(HYBRID_RUNTIME_INCLUDE_DIR);
+#else
+#ifdef HYBRID_SOURCE_DIR
+              linkerArgs.push_back("-I");
+              linkerArgs.push_back(std::string(HYBRID_SOURCE_DIR) +
+                                   "/../runtime/include");
+#endif
+#endif
+              linkerArgs.push_back("-std=c++17");
+#endif
+              linkerArgs.push_back("-o");
+              linkerArgs.push_back(targetOutput);
+
+              std::vector<llvm::StringRef> linkerArgRefs;
+              linkerArgRefs.reserve(linkerArgs.size());
+              for (const auto &arg : linkerArgs)
+                linkerArgRefs.emplace_back(arg);
+
+              std::string execError;
+              bool executionFailed = false;
+              int status = llvm::sys::ExecuteAndWait(
+                  linkerPath.get(), linkerArgRefs, std::nullopt, {}, 0, 0,
+                  &execError, &executionFailed);
+              if (status != 0 || executionFailed) {
+                if (!execError.empty()) {
+                  fprintf(stderr,
+                          "Error: %s failed when generating '%s' (status %d): %s\n",
+                          linkerName, targetOutput.c_str(), status,
+                          execError.c_str());
+                } else {
+                  fprintf(stderr,
+                          "Error: %s failed when generating '%s' (status %d)\n",
+                          linkerName, targetOutput.c_str(), status);
+                }
+                hadFailure = true;
+              }
+            }
+
+            llvm::sys::fs::remove(tempPath);
+          }
         }
       }
 
@@ -472,20 +769,24 @@ int main(int argc, char **argv) {
     if (hadFailure)
       exitCode = 1;
   } else {
-    SetInteractiveMode(true);
+    bool interactiveInput = isatty(fileno(stdin));
+    SetInteractiveMode(interactiveInput);
 
-    fprintf(stderr, "ready> ");
+    if (interactiveInput)
+      fprintf(stderr, "ready> ");
     getNextToken();
     MainLoop();
 
     if (!currentParser().hadError) {
       FinalizeTopLevelExecution();
+      runArcPasses(getModule());
       fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
       getModule()->print(llvm::errs(), nullptr);
     }
   }
 
   emitGenericsMetricsSummary(session.codegen());
+  emitArcTraceSummary(session.codegen());
   popCompilerSession();
 
   return exitCode;

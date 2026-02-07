@@ -1,3 +1,5 @@
+// This file implements top-level handlers that drive parsing and LLVM IR emission in interactive or batch mode.
+
 #include "toplevel.h"
 #include "parser.h"
 #include "lexer.h"
@@ -16,10 +18,15 @@ static bool gInteractiveMode = true;
 
 #define CurTok (currentParser().curTok)
 #define StructNames (currentParser().structNames)
+#define DelegateNames (currentParser().delegateNames)
 #define IdentifierStr (currentLexer().identifierStr)
 
 void SetInteractiveMode(bool enabled) {
   gInteractiveMode = enabled;
+}
+
+bool IsInteractiveMode() {
+  return gInteractiveMode;
 }
 
 void HandleDefinition() {
@@ -35,10 +42,10 @@ void HandleDefinition() {
       FnIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
     } else {
-      fprintf(stderr, "Error: Failed to generate IR for function\n");
+      reportCompilerError("Failed to generate IR for function");
     }
   } else {
-    fprintf(stderr, "Error: Failed to parse function definition\n");
+    reportCompilerError("Failed to parse function definition");
     // Skip token for error recovery.
     getNextToken();
   }
@@ -60,17 +67,20 @@ void HandleExtern() {
 }
 
 void HandleTopLevelExpression() {
-  // Evaluate a top-level expression into an anonymous function.
-  if (auto FnAST = ParseTopLevelExpr()) {
-    if (auto FnIR = FnAST->codegen()) {
-      if (gInteractiveMode) fprintf(stderr, "Generated top-level expression IR:\n");
-      FnIR->print(llvm::errs());
-      if (gInteractiveMode) fprintf(stderr, "\n");
-    }
-  }
- else {
-    // Skip token for error recovery.
+  auto Expr = ParseExpression();
+  if (!Expr) {
     getNextToken();
+    return;
+  }
+
+  auto Stmt = std::make_unique<ExpressionStmtAST>(std::move(Expr));
+  if (auto Value = Stmt->codegen()) {
+    NoteTopLevelStatementEmitted();
+    if (gInteractiveMode) {
+      fprintf(stderr, "Generated top-level expression IR:\n");
+      Value->print(llvm::errs());
+      fprintf(stderr, "\n");
+    }
   }
 }
 
@@ -80,6 +90,7 @@ void HandleVariableDeclaration() {
       if (gInteractiveMode) fprintf(stderr, "Generated variable declaration IR:\n");
       VarIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
+      NoteTopLevelStatementEmitted();
     }
   }
  else {
@@ -88,11 +99,19 @@ void HandleVariableDeclaration() {
   }
 }
 
-void HandleForEachStatement() {
-  auto ForEach = ParseForEachStatement();
-  if (ForEach) {
-    ForEach->print();
+void HandleForStatement() {
+  if (auto ForAST = ParseForStatement()) {
+    if (gInteractiveMode) fprintf(stderr, "Parsed for statement successfully, generating code...\n");
+    if (auto ForIR = ForAST->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) fprintf(stderr, "Generated for statement IR:\n");
+      ForIR->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    } else {
+      reportCompilerError("Failed to generate IR for for statement");
+    }
   } else {
+    reportCompilerError("Failed to parse for statement");
     // Skip token for error recovery.
     getNextToken();
   }
@@ -102,6 +121,7 @@ void HandleAssertStatement() {
   auto Assert = ParseAssertStatement();
   if (Assert) {
     if (auto AssertIR = Assert->codegen()) {
+      NoteTopLevelStatementEmitted();
       if (gInteractiveMode) fprintf(stderr, "Generated top-level assert IR:\n");
       AssertIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
@@ -112,10 +132,52 @@ void HandleAssertStatement() {
   }
 }
 
+void HandleIfStatement() {
+  if (auto IfAST = ParseIfStatement()) {
+    if (gInteractiveMode) fprintf(stderr, "Parsed if statement successfully, generating code...\n");
+    if (auto IfIR = IfAST->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) fprintf(stderr, "Generated if statement IR:\n");
+      IfIR->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    } else {
+      reportCompilerError("Failed to generate IR for if statement");
+    }
+  } else {
+    reportCompilerError("Failed to parse if statement");
+    getNextToken();
+  }
+}
+
+void HandleWhileStatement() {
+  if (auto WhileAST = ParseWhileStatement()) {
+    if (gInteractiveMode) fprintf(stderr, "Parsed while statement successfully, generating code...\n");
+    if (auto WhileIR = WhileAST->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) fprintf(stderr, "Generated while statement IR:\n");
+      WhileIR->print(llvm::errs());
+      if (gInteractiveMode) fprintf(stderr, "\n");
+    } else {
+      reportCompilerError("Failed to generate IR for while statement");
+    }
+  } else {
+    reportCompilerError("Failed to parse while statement");
+    getNextToken();
+  }
+}
+
 void HandleUseStatement() {
   auto Use = ParseUseStatement();
   if (Use) {
     if (gInteractiveMode) fprintf(stderr, "Parsed a use statement: %s\n", Use->getModule().c_str());
+    if (auto UseIR = Use->codegen()) {
+      NoteTopLevelStatementEmitted();
+      if (gInteractiveMode) {
+        fprintf(stderr, "Generated use statement IR:\n");
+        UseIR->print(llvm::errs());
+        fprintf(stderr, "\n");
+      }
+    }
   } else {
     // Skip token for error recovery.
     getNextToken();
@@ -171,6 +233,15 @@ void HandleInterfaceDefinition(bool isAbstract = false) {
   }
 }
 
+void HandleDelegateDefinition() {
+  if (auto DelegateAST = ParseDelegateDefinition()) {
+    if (!DelegateAST->codegen())
+      reportCompilerError("Failed to register delegate type");
+  } else {
+    getNextToken();
+  }
+}
+
 void HandleAbstractComposite() {
   getNextToken(); // eat 'abstract'
   while (CurTok == tok_newline)
@@ -201,6 +272,11 @@ void HandleUnsafe() {
     enterUnsafeContext();
     HandleInterfaceDefinition();
     exitUnsafeContext();
+  } else if (CurTok == tok_extern) {
+    // Support 'unsafe extern' prototypes.
+    enterUnsafeContext();
+    HandleExtern();
+    exitUnsafeContext();
   } else {
     // Handle unsafe function definition
     enterUnsafeContext();
@@ -213,21 +289,22 @@ void HandleSwitchStatement() {
   if (auto SwitchAST = ParseSwitchStatement()) {
     if (gInteractiveMode) fprintf(stderr, "Parsed switch statement successfully, generating code...\n");
     if (auto SwitchIR = SwitchAST->codegen()) {
+      NoteTopLevelStatementEmitted();
       if (gInteractiveMode) fprintf(stderr, "Generated switch statement IR:\n");
       SwitchIR->print(llvm::errs());
       if (gInteractiveMode) fprintf(stderr, "\n");
     } else {
-      fprintf(stderr, "Error: Failed to generate IR for switch statement\n");
+      reportCompilerError("Failed to generate IR for switch statement");
     }
   } else {
-    fprintf(stderr, "Error: Failed to parse switch statement\n");
+    reportCompilerError("Failed to parse switch statement");
     // Skip token for error recovery.
     getNextToken();
   }
 }
 
 
-/// top ::= definition | external | expression | variabledecl | foreachstmt | usestmt | ';' | '\n'
+/// top ::= definition | external | expression | variabledecl | forstmt | usestmt | ';' | '\n'
 void MainLoop() {
   while (true) {
     if (gInteractiveMode)
@@ -246,7 +323,13 @@ void MainLoop() {
       HandleUseStatement();
       break;
     case tok_for:
-      HandleForEachStatement();
+      HandleForStatement();
+      break;
+    case tok_if:
+      HandleIfStatement();
+      break;
+    case tok_while:
+      HandleWhileStatement();
       break;
     case tok_assert:
       HandleAssertStatement();
@@ -259,6 +342,9 @@ void MainLoop() {
       break;
     case tok_interface:
       HandleInterfaceDefinition();
+      break;
+    case tok_delegate:
+      HandleDelegateDefinition();
       break;
     case tok_abstract:
       HandleAbstractComposite();
@@ -280,6 +366,7 @@ void MainLoop() {
     case tok_int:
     case tok_float:
     case tok_double:
+    case tok_decimal:
     case tok_char:
     case tok_void:
     case tok_bool:
@@ -301,7 +388,8 @@ void MainLoop() {
       break;
     case tok_identifier:
       {
-        if (StructNames.contains(IdentifierStr)) {
+        if (StructNames.contains(IdentifierStr) ||
+            DelegateNames.contains(IdentifierStr)) {
           if (!ParseTypeIdentifier()) {
             // If parsing as a type-prefixed declaration failed,
             // consume the current token to avoid stalling
@@ -323,4 +411,5 @@ void MainLoop() {
 
 #undef IdentifierStr
 #undef StructNames
+#undef DelegateNames
 #undef CurTok

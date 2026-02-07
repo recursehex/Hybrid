@@ -33,20 +33,20 @@ int main()
     
     bool logical1 = flag1 && flag2 || flag3
     assert logical1 == true  // (true && false) || true = false || true = true
-    print(int: logical1)
+    print(1 if logical1 else 0)
 
     bool logical2 = flag1 || flag2 && flag3
     assert logical2 == true  // true || (false && true) = true || false = true
-    print(int: logical2)
+    print(1 if logical2 else 0)
     
     bool comparison1 = a < b && c > d
-    print(int: comparison1)
+    print(1 if comparison1 else 0)
     
     bool comparison2 = a + b < c * d
-    print(int: comparison2)
+    print(1 if comparison2 else 0)
     
     bool comparison3 = a == b || c != d
-    print(int: comparison3)
+    print(1 if comparison3 else 0)
     
     int bitwise1 = 12 & 10 | 5
     print(bitwise1)
@@ -73,10 +73,10 @@ int main()
     print(complex2)
     
     bool complex3 = a < b && c > 0 || d == 5
-    print(int: complex3)
+    print(1 if complex3 else 0)
     
     bool complex4 = (a < b) && (c > 0 || d == 5)
-    print(int: complex4)
+    print(1 if complex4 else 0)
     
     int unary1 = -a + b
     print(unary1)
@@ -85,10 +85,10 @@ int main()
     print(unary2)
     
     bool unary3 = !flag1 || flag2
-    print(int: unary3)
+    print(1 if unary3 else 0)
     
     bool unary4 = !(flag1 || flag2)
-    print(int: unary4)
+    print(1 if unary4 else 0)
     
     int increment = 10
     int inc_result1 = ++increment * 2
@@ -97,8 +97,8 @@ int main()
     int inc_result2 = increment++ * 2
     print(inc_result2)
     
-    int mixed = a + b * c > d && flag1 || !flag2
-    print(int: mixed)
+    bool mixed = a + b * c > d && flag1 || !flag2
+    print(1 if mixed else 0)
     
     return 0
 }

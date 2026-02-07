@@ -16,8 +16,18 @@ The primary way to run tests is using the platform-specific test runner:
 # Run all tests
 ./run_tests.sh
 
+# Run single-file tests in parallel (compact failures-only mode)
+./run_tests.sh -j 4
+
 # Run tests with verbose output
 ./run_tests.sh -v
+
+# Run all tests with ARC lowering disabled
+./run_tests.sh -a off
+
+# Link runtime test binaries with AddressSanitizer
+# (use with an ASan-built compiler binary)
+./run_tests.sh --asan arc
 
 # Run specific test or pattern
 ./run_tests.sh expr             # Runs expr.hy
@@ -28,6 +38,9 @@ The primary way to run tests is using the platform-specific test runner:
 ./run_tests.sh -h
 ```
 
+> [!NOTE]
+> `-j/--jobs` parallelizes single-file tests and is currently intended for compact failures-only runs. If you also pass `-v` or `-f`, the runner falls back to serial execution to preserve readable output ordering.
+
 #### Windows
 
 ```cmd
@@ -36,6 +49,9 @@ run_tests.bat
 
 # Run tests with verbose output
 run_tests.bat -v
+
+# Run single-file tests in parallel (compact failures-only mode)
+run_tests.bat -j 4
 
 # Run specific test or pattern
 run_tests.bat expr          # Runs expr.hy
@@ -73,6 +89,59 @@ build\hybrid.exe < test\expr.hy > output.txt
 build\hybrid.exe < test\fail.hy 2>&1
 ```
 
+## ARC runtime and diagnostics
+
+- The CMake build now emits reusable runtime archives in `build/`: `libhybrid_test_stub.a` and `libhybrid_runtime_test.a`.
+- The test harness prefers those archives for runtime linking. If they are missing, it falls back to on-the-fly runtime compilation so local workflows still work.
+- For non-ARC runtime tests, the harness links the lightweight stub runtime. If generated IR references ARC/smart-pointer helpers (`hybrid_retain`, `__hybrid_shared_control`, smart pointer shims) or any of `HYBRID_ARC_DEBUG`, `HYBRID_ARC_TRACE_RUNTIME`, `HYBRID_ARC_LEAK_DETECT`, or `HYBRID_ARC_VERIFY_RUNTIME` are set, it links the full ARC runtime archive instead.
+- Toggle ARC lowering with `./run_tests.sh -a on|off` or `// RUN_OPTS: --arc-enabled=false`; with ARC disabled the compiler omits retain/release insertion and ARC-specific diagnostics so fixtures can demonstrate the difference between ARC-on and ARC-off behavior.
+- Set `HYBRID_EXEC=<path/to/hybrid>` to run tests against a non-default compiler binary (for example an ASan build under `build-asan/`).
+- Pass `--asan` (or set `HYBRID_TEST_SANITIZER=address`) to link runtime test binaries with AddressSanitizer flags.
+
+## ARC ASan lane
+
+Use the helper script to configure an ASan build and run ARC suites against it:
+
+```bash
+# Defaults to running: arc/memory, arc/arc_off, arc/debug, and errors/arc
+./scripts/run_arc_asan.sh
+
+# Run a specific category or pattern
+./scripts/run_arc_asan.sh arc/memory
+```
+
+Manual setup is also available:
+
+```bash
+./build.sh --asan -d
+HYBRID_EXEC=./build/hybrid ./run_tests.sh --asan arc
+```
+
+Notes:
+- The script configures `build-asan/` with `-DHYBRID_ENABLE_ASAN=ON`.
+- It runs tests with `HYBRID_EXEC=./build-asan/hybrid` and `--asan` so ARC runtime paths are exercised with sanitizer instrumentation.
+
+## ARC Valgrind lane (Linux)
+
+Run ARC suites under valgrind on Linux:
+
+```bash
+# Defaults to running: arc/memory, arc/arc_off, arc/debug, and errors/arc
+./scripts/run_arc_valgrind.sh
+
+# Run a specific category or pattern
+./scripts/run_arc_valgrind.sh arc/debug
+```
+
+Notes:
+- This path is Linux-only and requires `valgrind` in `PATH`.
+- `run_tests.sh --valgrind` wraps runtime binaries in valgrind with:
+  - `--leak-check=full`
+  - `--show-leak-kinds=all`
+  - `--errors-for-leak-kinds=none`
+  - `--error-exitcode=101`
+- Leak-only fixtures remain valid under this mode because leak kinds are reported but not counted as hard errors.
+
 ## Test Suite Features
 
 ### Automatic Test Discovery
@@ -90,17 +159,26 @@ The test runner automatically finds all `.hy` files in the `test/` directory:
 - Directories whose name ends with `_fail` (or that contain an `EXPECT_FAIL` file) are expected to fail.
 - These directory-based tests can be run in isolation via `./run_tests.sh multi_unit`.
 
+> [!IMPORTANT]
+> When adding a multi-file test that should fail, be sure the directory name ends with `_fail` or `_error` (or includes `EXPECT_FAIL`). Otherwise, the harness will expect the suite to pass and will flag the run as a regression.
+
 ### Binary Execution
 
 The test suite compiles and executes generated LLVM IR:
 
+- **Direct IR emission for runtime tests**: For tests that require runtime execution, the harness invokes `hybrid <test.hy> -o <temp>.ll` and links the emitted IR directly. This avoids scraping IR from interactive stderr output on the fast path.
 - **Automatic compilation**: If `clang` is available, tests are compiled to native binaries
-- **Runtime library**: A temporary runtime library is created with support functions (e.g. `print()`)
+- **Runtime library selection**: The harness links either the stub archive or the full ARC runtime archive depending on referenced symbols/options
 - **Execution verification**: Tests are run and exit codes are checked. A Hybrid program that returns a non-zero status from `int main()` is reported as a failing test.
 - **Assert detection**: Runtime aborts (exit code 134/SIGABRT) are detected as test failures
 - **Cleanup**: All temporary files are automatically removed
 
 This ensures that generated code not only compiles but also executes correctly.
+
+### Performance Notes
+
+- `./run_tests.sh -j N` can reduce wall-clock time significantly by running single-file tests concurrently.
+- The `Timing (runtime tests only)` summary is aggregated per-test runtime duration, not wall-clock elapsed for the whole suite. In parallel mode this number can be higher than actual end-to-end time because multiple tests run at once.
 
 ### Error Detection
 
@@ -129,14 +207,29 @@ Error reporting is centralized through `reportCompilerError()` in `compiler_sess
 - Emit diagnostics with contextual hints by calling `LogError`, `LogErrorS`, `LogErrorP`, or `LogErrorV` so messages stay consistent.
 - Add regression coverage in `test/errors/` whenever a new diagnostic string is introduced to ensure the test runner continues to recognize expected failures.
 
+> [!IMPORTANT]
+> Every new diagnostic message needs a matching `test/errors/` fixture. Without it, the wording can drift silently, breaking IDE/CLI consumers that parse Hybrid's standardized error format.
+
 Treat descriptive errors as a first-class requirement. Pipe new failure paths through the shared helpers instead of printing ad-hoc messages.
 
 ### Test Classification
 
 Tests are classified by their expected behavior:
 - **Passing Tests**: Should compile without errors
-- **Failing Tests**: Names containing "fail" are expected to produce errors
+- **Failing Tests**: Names containing "fail" or "error" are expected to produce compile-time failures by default
 - **Feature Tests**: Demonstrate specific language features
+
+You can override the default classification with inline annotations:
+- `// EXPECT_FAIL: compile|runtime|any` to require a specific failure kind (defaults to `compile` when omitted)
+- `// EXPECT_PASS` to force a test to be treated as passing even if the filename contains `fail`/`error`
+- `// EXPECT_EXIT: <code|nonzero|zero|abort>` to assert the runtime exit status when a program is executed
+- `// EXPECT_DIAGNOSTIC: <text>` (or `// EXPECT_ERROR: <text>`) to declare an expected compile diagnostic
+
+For compile-failure tests, diagnostic matching is strict:
+- Every expected diagnostic must appear.
+- Any additional compile diagnostic marks the test as failed.
+- There is no fallback source; compile-failure tests must declare diagnostics inline.
+- Prefer stable message fragments (for example, `Unknown variable name: x`) and avoid location suffixes like `(near ...)`.
 
 ### Output Format
 
@@ -275,6 +368,26 @@ int useUndefined()
     return x  // Error: x is not defined
 }
 ```
+
+For precise failure assertions, prefer explicit diagnostic expectations:
+
+```c
+// EXPECT_DIAGNOSTIC: Unknown variable name: x
+```
+
+If the failure should occur at runtime (for example, a non-zero `main` return),
+add an explicit expectation:
+
+```c
+// EXPECT_FAIL: runtime
+// EXPECT_EXIT: 1
+```
+
+If a file name contains `fail`/`error` for non-failure reasons (for example, ARC
+escape analysis fixtures), add `// EXPECT_PASS` to force a passing expectation.
+
+Compile-failure fixtures should always include explicit `EXPECT_DIAGNOSTIC` lines
+in the file itself so expectation updates travel with the test.
 
 ## Test Coverage
 

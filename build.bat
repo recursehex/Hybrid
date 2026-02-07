@@ -1,15 +1,15 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal EnableExtensions EnableDelayedExpansion
 
 :: Hybrid Compiler Build Script for Windows
 :: Mirrors the behaviour of build.sh
 
-:: ANSI colors (supported on modern Windows terminals)
-set BLUE=[34m
-set GREEN=[32m
-set YELLOW=[33m
-set RED=[31m
-set NC=[0m
+:: ANSI color markers (kept minimal for portability)
+set BLUE=[94m
+set GREEN=[92m
+set YELLOW=[93m
+set RED=[91m
+set NC=[0m
 
 :: Defaults
 set BUILD_TYPE=Release
@@ -62,8 +62,10 @@ if /i "%~1"=="-d" (
     set VERBOSE_BUILD=1
 ) else if /i "%~1"=="-h" (
     call :show_help
+    exit /b 0
 ) else if /i "%~1"=="--help" (
     call :show_help
+    exit /b 0
 ) else (
     echo %RED%Unknown option: %~1%NC%
     echo Use -h or --help for usage information.
