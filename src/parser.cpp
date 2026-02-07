@@ -477,6 +477,7 @@ void exitUnsafeContext() {
 bool IsBuiltInType()
 {
   return CurTok == tok_int || CurTok == tok_float || CurTok == tok_double ||
+         CurTok == tok_decimal ||
          CurTok == tok_char || CurTok == tok_void || CurTok == tok_bool ||
          CurTok == tok_string || CurTok == tok_byte || CurTok == tok_short ||
          CurTok == tok_long || CurTok == tok_sbyte || CurTok == tok_ushort ||
@@ -1598,6 +1599,8 @@ static std::string InferExprType(const ExprAST* expr)
   if (const auto *numExpr = dynamic_cast<const NumberExprAST*>(expr))
   {
     const NumericLiteral &literal = numExpr->getLiteral();
+    if (literal.isDecimal())
+      return "decimal";
     if (literal.isInteger())
     {
       if (literal.fitsInSignedBits(32))
@@ -1654,6 +1657,23 @@ static bool AreTypesCompatible(const std::string& type1, const std::string& type
   if (type1.empty() || type2.empty()) return true; // Can't determine, assume compatible
 
   if (type1 == type2) return true;
+
+  auto isIntegerLike = [](const std::string &typeName) {
+    return typeName == "byte" || typeName == "sbyte" ||
+           typeName == "short" || typeName == "ushort" ||
+           typeName == "int" || typeName == "uint" ||
+           typeName == "long" || typeName == "ulong" ||
+           typeName == "char" || typeName == "schar" ||
+           typeName == "lchar";
+  };
+
+  if (type1 == "decimal" || type2 == "decimal") {
+    if (type1 == "decimal" && isIntegerLike(type2))
+      return true;
+    if (type2 == "decimal" && isIntegerLike(type1))
+      return true;
+    return false;
+  }
 
   // Allow int and float to be compatible (will need casting during codegen)
   if ((type1 == "int" || type1 == "float" || type1 == "double") &&
@@ -1795,6 +1815,7 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
   std::string ElementType = "";
   std::string CommonType = "";
   bool hasFloat = false;
+  bool hasDecimal = false;
 
   // Check all elements for type compatibility
   for (const auto& elem : Elements)
@@ -1821,11 +1842,21 @@ std::unique_ptr<ExprAST> ParseArrayExpr() {
       {
         hasFloat = true;
       }
+      if (elemType == "decimal")
+      {
+        hasDecimal = true;
+      }
     }
   }
 
+  if (hasDecimal) {
+    ElementType = "decimal";
+  }
+
   // If mixed int/float, promote to double
-  if (hasFloat && (ElementType == "int" || ElementType == "float" || ElementType == "double"))
+  if (!hasDecimal &&
+      hasFloat &&
+      (ElementType == "int" || ElementType == "float" || ElementType == "double"))
   {
     ElementType = "double";
   }

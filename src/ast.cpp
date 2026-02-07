@@ -28,16 +28,19 @@
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <cmath>
+#include <cerrno>
 #include <climits>
 #include <map>
 #include <sstream>
 #include <iomanip>
 #include <cstdio>
+#include <cstdlib>
 #include <ranges>
 #include <string_view>
 #include <optional>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <set>
 #include <functional>
 #include <limits>
@@ -249,6 +252,10 @@ static llvm::PointerType *pointerType(llvm::Type * /*elementType*/,
 }
 
 static llvm::Type *getSizeType();
+static llvm::StructType *getDecimalStorageType();
+static bool isDecimalLLVMType(llvm::Type *type);
+static bool isDecimalTypeName(std::string_view typeName);
+static bool isIntegerLikeTypeName(std::string_view typeName);
 static const TypeInfo *lookupLocalTypeInfo(const std::string &name);
 static const TypeInfo *lookupGlobalTypeInfo(const std::string &name);
 static const TypeInfo *lookupTypeInfo(const std::string &name);
@@ -274,6 +281,21 @@ static llvm::FunctionCallee getHybridArrayReleaseArraySlotFunction();
 static llvm::FunctionCallee getHybridArcDebugConfigFunction();
 static llvm::FunctionCallee getHybridArcTraceLabelFunction();
 static llvm::FunctionCallee getHybridArcVerifyRuntimeFunction();
+[[maybe_unused]] static llvm::FunctionCallee getDecimalParseFunction();
+static llvm::FunctionCallee getDecimalToStringFunction();
+static llvm::FunctionCallee getDecimalAddFunction();
+static llvm::FunctionCallee getDecimalSubFunction();
+static llvm::FunctionCallee getDecimalMulFunction();
+static llvm::FunctionCallee getDecimalDivFunction();
+static llvm::FunctionCallee getDecimalRemFunction();
+static llvm::FunctionCallee getDecimalCmpFunction();
+static llvm::FunctionCallee getDecimalNegFunction();
+static llvm::FunctionCallee getDecimalFromI64Function();
+static llvm::FunctionCallee getDecimalFromU64Function();
+static llvm::FunctionCallee getDecimalToI64Function();
+static llvm::FunctionCallee getDecimalToU64Function();
+static llvm::FunctionCallee getDecimalFromDoubleFunction();
+static llvm::FunctionCallee getDecimalToDoubleFunction();
 static llvm::Value *emitArcRetain(llvm::Value *value, const TypeInfo &info,
                                   std::string_view label);
 static void emitArcRelease(llvm::Value *value, const TypeInfo &info,
@@ -311,6 +333,7 @@ static TypeInfo makeTypeInfo(std::string typeName,
                              bool isMutable = true,
                              bool declaredRef = false);
 static std::string sanitizeCompositeLookupName(const std::string &typeName);
+static std::string sanitizeBaseTypeName(std::string_view typeName);
 
 static bool ensureNoDuplicateGenericParameters(const std::vector<std::string> &params,
                                                const std::string &contextDescription);
@@ -425,6 +448,7 @@ static bool isBuiltinValueTypeName(std::string_view baseName) {
   static constexpr std::string_view primitives[] = {
       "void",  "bool", "byte",  "sbyte", "short", "ushort",
       "int",   "uint", "long",  "ulong", "float", "double",
+      "decimal",
       "char",  "char16", "char32", "string"};
   for (std::string_view candidate : primitives) {
     if (candidate == baseName)
@@ -1737,6 +1761,30 @@ static llvm::StructType *getStringStorageType() {
   storageTy->setBody(
       {headerTy, sizeTy, sizeTy, sizeTy, opaquePtr, bytePtr});
   return storageTy;
+}
+
+static llvm::StructType *getDecimalStorageType() {
+  if (auto *existing = llvm::StructType::getTypeByName(
+          *TheContext, "__HybridDecimalStorage"))
+    return existing;
+  auto *decimalTy =
+      llvm::StructType::create(*TheContext, "__HybridDecimalStorage");
+  decimalTy->setBody({llvm::Type::getInt64Ty(*TheContext),
+                      llvm::Type::getInt64Ty(*TheContext)});
+  return decimalTy;
+}
+
+static bool isDecimalLLVMType(llvm::Type *type) {
+  auto *structTy = llvm::dyn_cast_or_null<llvm::StructType>(type);
+  if (!structTy)
+    return false;
+  llvm::StructType *decimalTy = getDecimalStorageType();
+  if (structTy == decimalTy)
+    return true;
+  if (structTy->getNumElements() != 2)
+    return false;
+  return structTy->getElementType(0)->isIntegerTy(64) &&
+         structTy->getElementType(1)->isIntegerTy(64);
 }
 
 static std::uint64_t getArrayPayloadOffsetBytes() {
@@ -3659,6 +3707,8 @@ static bool numericLiteralEquals(const NumericLiteral &lhs,
     return false;
   if (lhs.isInteger() && rhs.isInteger())
     return lhs.getIntegerValue() == rhs.getIntegerValue();
+  if (lhs.isDecimal() && rhs.isDecimal())
+    return lhs.getSpelling() == rhs.getSpelling();
   if (lhs.isFloating() && rhs.isFloating())
     return lhs.getFloatValue().compare(rhs.getFloatValue()) ==
            llvm::APFloat::cmpEqual;
@@ -9483,6 +9533,22 @@ constexpr bool isUnsignedType(std::string_view TypeStr) {
          TypeStr == "ulong" || TypeStr == "schar" || TypeStr == "lchar";
 }
 
+static bool isDecimalTypeName(std::string_view typeName) {
+  if (typeName.empty())
+    return false;
+  return sanitizeBaseTypeName(typeName) == "decimal";
+}
+
+[[maybe_unused]] static bool isIntegerLikeTypeName(std::string_view typeName) {
+  std::string clean = sanitizeBaseTypeName(typeName);
+  if (clean.empty())
+    return false;
+  return clean == "byte" || clean == "sbyte" || clean == "short" ||
+         clean == "ushort" || clean == "int" || clean == "uint" ||
+         clean == "long" || clean == "ulong" || clean == "char" ||
+         clean == "schar" || clean == "lchar";
+}
+
 static std::string sanitizeBaseTypeName(std::string_view typeName) {
   if (typeName.empty())
     return {};
@@ -9965,6 +10031,8 @@ static std::string describeTypeForDiagnostic(llvm::Type *type) {
     return "float";
   if (type->isDoubleTy())
     return "double";
+  if (isDecimalLLVMType(type))
+    return "decimal";
   if (type->isPointerTy())
     return "pointer";
   return "value";
@@ -10202,6 +10270,8 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
     return llvm::Type::getFloatTy(*TheContext);
   else if (CleanType == "double")
     return llvm::Type::getDoubleTy(*TheContext);
+  else if (CleanType == "decimal")
+    return getDecimalStorageType();
   else if (CleanType == "char")
     return llvm::Type::getInt16Ty(*TheContext);
   else if (CleanType == "bool")
@@ -10288,6 +10358,38 @@ llvm::Type *getTypeFromString(const std::string &TypeStr) {
   return nullptr;
 }
 
+struct PackedDecimalBits {
+  uint64_t lo = 0;
+  uint64_t hi = 0;
+};
+
+static PackedDecimalBits packDecimalBits(long double value) {
+  PackedDecimalBits bits{};
+  std::memcpy(&bits, &value, std::min(sizeof(bits), sizeof(value)));
+  return bits;
+}
+
+static llvm::Constant *buildDecimalConstantFromLongDouble(long double value) {
+  PackedDecimalBits bits = packDecimalBits(value);
+  llvm::Constant *lo =
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(*TheContext), bits.lo);
+  llvm::Constant *hi =
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(*TheContext), bits.hi);
+  return llvm::ConstantStruct::get(getDecimalStorageType(), {lo, hi});
+}
+
+static llvm::Constant *buildDecimalConstantFromSpelling(
+    const std::string &spelling) {
+  errno = 0;
+  char *end = nullptr;
+  long double value = std::strtold(spelling.c_str(), &end);
+  if (end != spelling.c_str() + spelling.size() || errno == ERANGE ||
+      !std::isfinite(value)) {
+    return buildDecimalConstantFromLongDouble(0.0L);
+  }
+  return buildDecimalConstantFromLongDouble(value);
+}
+
 // Helper to get array struct type for a given element type
 llvm::StructType *getArrayStructType(llvm::Type *ElementType, unsigned rank) {
   llvm::Type *PtrType = llvm::PointerType::get(*TheContext, 0);
@@ -10315,6 +10417,11 @@ void ForLoopStmtAST::print() const {
 
 // Generate code for number expressions
 llvm::Value *NumberExprAST::codegen() {
+  if (Literal.isDecimal()) {
+    setTypeName("decimal");
+    return buildDecimalConstantFromSpelling(Literal.getSpelling());
+  }
+
   if (Literal.isInteger()) {
     const llvm::APInt &value = Literal.getIntegerValue();
     unsigned requiredBits = Literal.getRequiredBitWidth();
@@ -10351,6 +10458,22 @@ llvm::Value *NumberExprAST::codegen() {
 
 // Generate code for numeric literal with target type context
 llvm::Value *NumberExprAST::codegen_with_target(llvm::Type *TargetType) {
+  if (isDecimalLLVMType(TargetType)) {
+    setTypeName("decimal");
+    if (Literal.isDecimal())
+      return buildDecimalConstantFromSpelling(Literal.getSpelling());
+    if (Literal.isInteger()) {
+      long double numeric = 0.0L;
+      if (Literal.fitsInSignedBits(64))
+        numeric = static_cast<long double>(Literal.getSignedValue());
+      else
+        numeric = static_cast<long double>(Literal.getUnsignedValue());
+      return buildDecimalConstantFromLongDouble(numeric);
+    }
+    return buildDecimalConstantFromLongDouble(
+        static_cast<long double>(Literal.toDouble()));
+  }
+
   if (TargetType->isFloatingPointTy()) {
     setTypeName(TargetType->isFloatTy() ? "float" : "double");
     return llvm::ConstantFP::get(TargetType, Literal.toDouble());
@@ -10914,6 +11037,123 @@ static llvm::FunctionCallee getDoubleToStringFunction() {
   return TheModule->getOrInsertFunction("__hybrid_string_from_double", fnType);
 }
 
+static llvm::FunctionCallee getDecimalToStringFunction() {
+  llvm::Type *stringPtrTy = getTypeFromString("string");
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::Type *boolTy = llvm::Type::getInt1Ty(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(stringPtrTy, {decimalTy, int32Ty, boolTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_to_string", fnType);
+}
+
+[[maybe_unused]] static llvm::FunctionCallee getDecimalParseFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *charPtrTy = pointerType(llvm::Type::getInt8Ty(*TheContext));
+  llvm::Type *sizeTy = getSizeType();
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {charPtrTy, sizeTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_parse", fnType);
+}
+
+static llvm::FunctionCallee getDecimalAddFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {decimalTy, decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_add", fnType);
+}
+
+static llvm::FunctionCallee getDecimalSubFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {decimalTy, decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_sub", fnType);
+}
+
+static llvm::FunctionCallee getDecimalMulFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {decimalTy, decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_mul", fnType);
+}
+
+static llvm::FunctionCallee getDecimalDivFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {decimalTy, decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_div", fnType);
+}
+
+static llvm::FunctionCallee getDecimalRemFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {decimalTy, decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_rem", fnType);
+}
+
+static llvm::FunctionCallee getDecimalCmpFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(int32Ty, {decimalTy, decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_cmp", fnType);
+}
+
+static llvm::FunctionCallee getDecimalNegFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_neg", fnType);
+}
+
+static llvm::FunctionCallee getDecimalFromI64Function() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {int64Ty}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_from_i64", fnType);
+}
+
+static llvm::FunctionCallee getDecimalFromU64Function() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {int64Ty}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_from_u64", fnType);
+}
+
+static llvm::FunctionCallee getDecimalToI64Function() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(int64Ty, {decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_to_i64", fnType);
+}
+
+static llvm::FunctionCallee getDecimalToU64Function() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(int64Ty, {decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_to_u64", fnType);
+}
+
+static llvm::FunctionCallee getDecimalFromDoubleFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *doubleTy = llvm::Type::getDoubleTy(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(decimalTy, {doubleTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_from_double", fnType);
+}
+
+static llvm::FunctionCallee getDecimalToDoubleFunction() {
+  llvm::Type *decimalTy = getTypeFromString("decimal");
+  llvm::Type *doubleTy = llvm::Type::getDoubleTy(*TheContext);
+  llvm::FunctionType *fnType =
+      llvm::FunctionType::get(doubleTy, {decimalTy}, false);
+  return TheModule->getOrInsertFunction("__hybrid_decimal_to_double", fnType);
+}
+
 static llvm::FunctionCallee getCharToStringFunction() {
   llvm::Type *stringPtrTy = getTypeFromString("string");
   llvm::Type *int32Ty = llvm::Type::getInt32Ty(*TheContext);
@@ -11402,9 +11642,12 @@ static llvm::Value *convertValueToString(llvm::Value *value,
                                          const std::optional<std::string> &formatSpec) {
   const bool isFloatType = value->getType()->isFloatingPointTy() ||
                            typeName == "float" || typeName == "double";
+  const bool isDecimalType =
+      isDecimalLLVMType(value->getType()) || isDecimalTypeName(typeName);
 
-  if (formatSpec.has_value() && !isFloatType) {
-    return LogErrorV("Format specifiers are only supported for floating point interpolation");
+  if (formatSpec.has_value() && !isFloatType && !isDecimalType) {
+    return LogErrorV(
+        "Format specifiers are only supported for floating point and decimal interpolation");
   }
 
   if (typeName == "string") {
@@ -11446,6 +11689,28 @@ static llvm::Value *convertValueToString(llvm::Value *value,
         value = Builder->CreateZExtOrTrunc(value, targetType, "charext");
     }
     return Builder->CreateCall(getCharToStringFunction(), {value}, "charstr");
+  }
+
+  if (isDecimalType) {
+    int precision = 0;
+    bool hasPrecision = false;
+    if (formatSpec.has_value()) {
+      try {
+        precision = std::stoi(*formatSpec);
+        hasPrecision = true;
+      } catch (...) {
+        return LogErrorV(
+            "Invalid decimal format specifier in interpolated string");
+      }
+    }
+
+    llvm::Value *precisionVal = llvm::ConstantInt::get(
+        llvm::Type::getInt32Ty(*TheContext), precision);
+    llvm::Value *hasPrecisionVal = llvm::ConstantInt::get(
+        llvm::Type::getInt1Ty(*TheContext), hasPrecision ? 1 : 0);
+    return Builder->CreateCall(getDecimalToStringFunction(),
+                               {value, precisionVal, hasPrecisionVal},
+                               "decimalstr");
   }
 
   if (value->getType()->isFloatingPointTy()) {
@@ -11629,11 +11894,173 @@ llvm::Value *CharExprAST::codegen() {
 llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType);
 llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::string& targetTypeName);
 
+static llvm::Value *emitIntegerToDecimalValue(llvm::Value *value,
+                                              std::string_view sourceTypeName) {
+  if (!value || !value->getType()->isIntegerTy())
+    return nullptr;
+
+  llvm::Value *asI64 = value;
+  llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+  unsigned bits = value->getType()->getIntegerBitWidth();
+  bool useUnsigned =
+      unsignedHintFromTypeName(sanitizeBaseTypeName(sourceTypeName)).value_or(false);
+
+  if (bits < 64) {
+    if (useUnsigned)
+      asI64 = Builder->CreateZExt(value, int64Ty, "dec.zext");
+    else
+      asI64 = Builder->CreateSExt(value, int64Ty, "dec.sext");
+  } else if (bits > 64) {
+    asI64 = Builder->CreateTrunc(value, int64Ty, "dec.trunc");
+  }
+
+  if (useUnsigned)
+    return Builder->CreateCall(getDecimalFromU64Function(), {asI64}, "dec.fromu64");
+  return Builder->CreateCall(getDecimalFromI64Function(), {asI64}, "dec.fromi64");
+}
+
+static llvm::Value *emitDecimalToFloatingValue(llvm::Value *value,
+                                               llvm::Type *targetType) {
+  if (!value || !targetType || !isDecimalLLVMType(value->getType()) ||
+      !targetType->isFloatingPointTy())
+    return nullptr;
+
+  llvm::Value *asDouble =
+      Builder->CreateCall(getDecimalToDoubleFunction(), {value}, "dec.todouble");
+  if (targetType->isDoubleTy())
+    return asDouble;
+  return Builder->CreateFPTrunc(asDouble, targetType, "dec.tofloat");
+}
+
+static llvm::Value *emitDecimalToIntegerValue(llvm::Value *value,
+                                              llvm::Type *targetType,
+                                              std::string_view targetTypeName) {
+  if (!value || !targetType || !isDecimalLLVMType(value->getType()) ||
+      !targetType->isIntegerTy())
+    return nullptr;
+
+  bool targetUnsigned =
+      unsignedHintFromTypeName(sanitizeBaseTypeName(targetTypeName)).value_or(false);
+  llvm::Value *asI64 = nullptr;
+  if (targetUnsigned)
+    asI64 = Builder->CreateCall(getDecimalToU64Function(), {value}, "dec.tou64");
+  else
+    asI64 = Builder->CreateCall(getDecimalToI64Function(), {value}, "dec.toi64");
+
+  llvm::Type *int64Ty = llvm::Type::getInt64Ty(*TheContext);
+  if (targetType == int64Ty)
+    return asI64;
+  if (targetType->getIntegerBitWidth() < 64)
+    return Builder->CreateTrunc(asI64, targetType, "dec.toint.trunc");
+  if (targetUnsigned)
+    return Builder->CreateZExt(asI64, targetType, "dec.toint.zext");
+  return Builder->CreateSExt(asI64, targetType, "dec.toint.sext");
+}
+
+static llvm::Value *emitFloatingToDecimalValue(llvm::Value *value) {
+  if (!value || !value->getType()->isFloatingPointTy())
+    return nullptr;
+
+  llvm::Value *asDouble = value;
+  if (!value->getType()->isDoubleTy()) {
+    asDouble =
+        Builder->CreateFPExt(value, llvm::Type::getDoubleTy(*TheContext),
+                             "dec.fromfloat");
+  }
+  return Builder->CreateCall(getDecimalFromDoubleFunction(), {asDouble},
+                             "dec.fromdouble");
+}
+
+static llvm::Value *emitDecimalArithmeticBinary(char op,
+                                                llvm::Value *lhs,
+                                                llvm::Value *rhs) {
+  if (!lhs || !rhs)
+    return nullptr;
+
+  const bool lhsDecimal = isDecimalLLVMType(lhs->getType());
+  const bool rhsDecimal = isDecimalLLVMType(rhs->getType());
+  if (!lhsDecimal || !rhsDecimal) {
+    if (lhsDecimal || rhsDecimal)
+      LogErrorV("Cannot mix decimal with float/double without an explicit cast");
+    else
+      LogErrorV("Decimal arithmetic requires decimal operands");
+    return nullptr;
+  }
+
+  switch (op) {
+  case '+':
+    return Builder->CreateCall(getDecimalAddFunction(), {lhs, rhs}, "dec.add");
+  case '-':
+    return Builder->CreateCall(getDecimalSubFunction(), {lhs, rhs}, "dec.sub");
+  case '*':
+    return Builder->CreateCall(getDecimalMulFunction(), {lhs, rhs}, "dec.mul");
+  case '/':
+    return Builder->CreateCall(getDecimalDivFunction(), {lhs, rhs}, "dec.div");
+  case '%':
+    return Builder->CreateCall(getDecimalRemFunction(), {lhs, rhs}, "dec.rem");
+  default:
+    LogErrorV("Unknown decimal arithmetic operator");
+    return nullptr;
+  }
+}
+
+static llvm::Value *emitDecimalComparisonI1(std::string_view op,
+                                            llvm::Value *lhs,
+                                            llvm::Value *rhs) {
+  if (!lhs || !rhs)
+    return nullptr;
+
+  const bool lhsDecimal = isDecimalLLVMType(lhs->getType());
+  const bool rhsDecimal = isDecimalLLVMType(rhs->getType());
+  if (!lhsDecimal || !rhsDecimal) {
+    if (lhsDecimal || rhsDecimal)
+      LogErrorV("Cannot mix decimal with float/double without an explicit cast");
+    else
+      LogErrorV("Decimal comparison requires decimal operands");
+    return nullptr;
+  }
+
+  llvm::Value *cmpResult =
+      Builder->CreateCall(getDecimalCmpFunction(), {lhs, rhs}, "dec.cmp");
+  llvm::Value *zero = llvm::ConstantInt::get(cmpResult->getType(), 0);
+
+  if (op == "==")
+    return Builder->CreateICmpEQ(cmpResult, zero, "dec.cmpeq");
+  if (op == "!=")
+    return Builder->CreateICmpNE(cmpResult, zero, "dec.cmpne");
+  if (op == "<")
+    return Builder->CreateICmpSLT(cmpResult, zero, "dec.cmplt");
+  if (op == ">")
+    return Builder->CreateICmpSGT(cmpResult, zero, "dec.cmpgt");
+  if (op == "<=")
+    return Builder->CreateICmpSLE(cmpResult, zero, "dec.cmple");
+  if (op == ">=")
+    return Builder->CreateICmpSGE(cmpResult, zero, "dec.cmpge");
+
+  LogErrorV("Unknown decimal comparison operator");
+  return nullptr;
+}
+
 // Helper to check if types are compatible for implicit conversion
 // No implicit conversion between different sized integers
 bool areTypesCompatible(llvm::Type* type1, llvm::Type* type2) {
   if (type1 == type2)
     return true;
+
+  const bool type1IsDecimal = isDecimalLLVMType(type1);
+  const bool type2IsDecimal = isDecimalLLVMType(type2);
+  if (type1IsDecimal || type2IsDecimal) {
+    if (type1IsDecimal && type2IsDecimal)
+      return true;
+
+    if (type1IsDecimal && type2->isIntegerTy() && !type2->isIntegerTy(1))
+      return true;
+    if (type2IsDecimal && type1->isIntegerTy() && !type1->isIntegerTy(1))
+      return true;
+
+    // decimal never mixes implicitly with float/double or bool.
+    return false;
+  }
   
   if (type1->isIntegerTy() && type2->isIntegerTy()) {
     const bool isBool1 = type1->isIntegerTy(1);
@@ -13083,6 +13510,26 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType) {
   if (sourceType->isPointerTy() && targetType->isPointerTy()) {
     return Builder->CreateBitCast(value, targetType, "ptrcast");
   }
+
+  const bool sourceIsDecimal = isDecimalLLVMType(sourceType);
+  const bool targetIsDecimal = isDecimalLLVMType(targetType);
+  if (sourceIsDecimal || targetIsDecimal) {
+    if (sourceIsDecimal && targetIsDecimal)
+      return value;
+
+    if (targetIsDecimal && sourceType->isIntegerTy() &&
+        !sourceType->isIntegerTy(1)) {
+      if (llvm::Value *converted = emitIntegerToDecimalValue(value, ""))
+        return converted;
+    }
+
+    std::string sourceLabel = describeTypeForDiagnostic(sourceType);
+    std::string targetLabel = describeTypeForDiagnostic(targetType);
+    reportCompilerError("Cannot implicitly convert '" + sourceLabel +
+                        "' to '" + targetLabel + "'",
+                        "Use an explicit cast with ':'");
+    return llvm::UndefValue::get(targetType);
+  }
   
   // Check if types are compatible for implicit casting
   if (!areTypesCompatible(sourceType, targetType)) {
@@ -13179,6 +13626,28 @@ llvm::Value* castToType(llvm::Value* value, llvm::Type* targetType, const std::s
 
   if (sourceType->isPointerTy() && targetType->isPointerTy()) {
     return Builder->CreateBitCast(value, targetType, "ptrcast");
+  }
+
+  const bool sourceIsDecimal = isDecimalLLVMType(sourceType);
+  const bool targetIsDecimal = isDecimalLLVMType(targetType);
+  if (sourceIsDecimal || targetIsDecimal) {
+    if (sourceIsDecimal && targetIsDecimal)
+      return value;
+
+    if (targetIsDecimal && sourceType->isIntegerTy() &&
+        !sourceType->isIntegerTy(1)) {
+      if (llvm::Value *converted = emitIntegerToDecimalValue(value, ""))
+        return converted;
+    }
+
+    std::string cleanTarget = sanitizeBaseTypeName(targetTypeName);
+    if (cleanTarget.empty())
+      cleanTarget = describeTypeForDiagnostic(targetType);
+    std::string sourceLabel = describeTypeForDiagnostic(sourceType);
+    reportCompilerError("Cannot implicitly convert '" + sourceLabel +
+                        "' to '" + cleanTarget + "'",
+                        "Use an explicit cast with ':'");
+    return llvm::UndefValue::get(targetType);
   }
 
   // For non-constant values, add runtime range checking for integer narrowing
@@ -13304,11 +13773,30 @@ std::pair<llvm::Value*, llvm::Value*> promoteTypes(llvm::Value* L, llvm::Value* 
                "': cannot implicitly convert between '" + LTypeStr + "' and '" +
                RTypeStr + "'")
                   .c_str());
-    return {L, R}; // Return original values, error already logged
+    return {nullptr, nullptr};
   }
 
   std::string lhsClean = sanitizeBaseTypeName(lhsTypeName);
   std::string rhsClean = sanitizeBaseTypeName(rhsTypeName);
+
+  const bool lhsDecimal = isDecimalLLVMType(LType);
+  const bool rhsDecimal = isDecimalLLVMType(RType);
+  if (lhsDecimal || rhsDecimal) {
+    if (lhsDecimal && rhsDecimal)
+      return {L, R};
+
+    if (lhsDecimal && RType->isIntegerTy() && !RType->isIntegerTy(1)) {
+      R = emitIntegerToDecimalValue(R, rhsClean);
+      return {L, R};
+    }
+    if (rhsDecimal && LType->isIntegerTy() && !LType->isIntegerTy(1)) {
+      L = emitIntegerToDecimalValue(L, lhsClean);
+      return {L, R};
+    }
+
+    LogErrorV("Cannot mix decimal with float/double without an explicit cast");
+    return {nullptr, nullptr};
+  }
 
   // Handle integer promotions explicitly
   if (LType->isIntegerTy() && RType->isIntegerTy()) {
@@ -13621,6 +14109,17 @@ llvm::Value *BinaryExprAST::codegen() {
       }
 
       if (!rhsVal)
+        if (targetInfo) {
+          std::string targetTypeName = typeNameFromInfo(*targetInfo);
+          llvm::Type *targetType =
+              targetTypeName.empty() ? nullptr : getTypeFromString(targetTypeName);
+          if (targetType && isDecimalLLVMType(targetType)) {
+            if (auto *num = dynamic_cast<NumberExprAST *>(getRHS()))
+              rhsVal = num->codegen_with_target(targetType);
+          }
+        }
+
+      if (!rhsVal)
         rhsVal = getRHS()->codegen();
 
       R = rhsVal;
@@ -13646,6 +14145,15 @@ llvm::Value *BinaryExprAST::codegen() {
 
         auto [PromotedCurrent, PromotedR] = promoteTypes(
             currentVal, rhsValue, lhsPromoteType, rhsPromoteType);
+        if (!PromotedCurrent || !PromotedR)
+          return nullptr;
+        if (isDecimalLLVMType(PromotedCurrent->getType())) {
+          llvm::Value *Result =
+              emitDecimalArithmeticBinary(Op[0], PromotedCurrent, PromotedR);
+          if (!Result)
+            return nullptr;
+          return Result;
+        }
         bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
         auto lhsUnsigned = unsignedHintFromTypeName(
             sanitizeBaseTypeName(lhsPromoteType));
@@ -13714,12 +14222,16 @@ llvm::Value *BinaryExprAST::codegen() {
 
       if (isCompoundBitwise) {
         if (currentVal->getType()->isFloatingPointTy() ||
-            rhsValue->getType()->isFloatingPointTy())
+            rhsValue->getType()->isFloatingPointTy() ||
+            isDecimalLLVMType(currentVal->getType()) ||
+            isDecimalLLVMType(rhsValue->getType()))
           return LogErrorV(
               "Bitwise compound assignment requires integer operands");
 
         auto [PromotedCurrent, PromotedR] = promoteTypes(
             currentVal, rhsValue, lhsPromoteType, rhsPromoteType);
+        if (!PromotedCurrent || !PromotedR)
+          return nullptr;
         auto lhsUnsigned = unsignedHintFromTypeName(
             sanitizeBaseTypeName(lhsPromoteType));
         auto rhsUnsigned = unsignedHintFromTypeName(
@@ -14426,6 +14938,30 @@ llvm::Value *BinaryExprAST::codegen() {
 
           auto [PromotedCurrent, PromotedR] =
               promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+          if (!PromotedCurrent || !PromotedR)
+            return nullptr;
+          if (isDecimalLLVMType(PromotedCurrent->getType())) {
+            llvm::Value *Result =
+                emitDecimalArithmeticBinary(Op[0], PromotedCurrent, PromotedR);
+            if (!Result)
+              return nullptr;
+
+            llvm::Value *ResultToStore = Result;
+            if (ResultToStore->getType() != fieldInfo.fieldType) {
+              std::string castTargetName =
+                  !lhsPromoteType.empty() ? lhsPromoteType : member.getTypeName();
+              ResultToStore =
+                  castToType(ResultToStore, fieldInfo.fieldType, castTargetName);
+              if (!ResultToStore)
+                return nullptr;
+            }
+
+            Builder->CreateStore(ResultToStore, fieldInfo.fieldPtr);
+            noteMemberAssignment(fieldInfo.structName, member.getMemberName(),
+                                 fieldInfo.isStatic);
+            setTypeName("void");
+            return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+          }
           bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
           auto lhsUnsigned =
               unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
@@ -14600,6 +15136,13 @@ llvm::Value *BinaryExprAST::codegen() {
       if (!R)
         return LogErrorV("Internal error: RHS missing before compound assignment");
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+      if (!PromotedCurrent || !PromotedR)
+        return nullptr;
+      if (isDecimalLLVMType(PromotedCurrent->getType())) {
+        Result = emitDecimalArithmeticBinary(baseOp, PromotedCurrent, PromotedR);
+        if (!Result)
+          return nullptr;
+      } else {
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
       auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
       auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
@@ -14645,6 +15188,7 @@ llvm::Value *BinaryExprAST::codegen() {
           break;
         default:
           return LogErrorV("Unknown compound assignment operator");
+      }
       }
       
       // Cast result back to the original storage type if needed
@@ -14707,6 +15251,13 @@ llvm::Value *BinaryExprAST::codegen() {
       // Promote types for the operation
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
+      if (!PromotedCurrent || !PromotedR)
+        return nullptr;
+      if (isDecimalLLVMType(PromotedCurrent->getType())) {
+        Result = emitDecimalArithmeticBinary(baseOp, PromotedCurrent, PromotedR);
+        if (!Result)
+          return nullptr;
+      } else {
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
       auto elementUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(elementTypeNameForPromotion));
       auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
@@ -14753,6 +15304,7 @@ llvm::Value *BinaryExprAST::codegen() {
         default:
           return LogErrorV("Unknown compound assignment operator");
       }
+      }
       
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
@@ -14775,19 +15327,25 @@ llvm::Value *BinaryExprAST::codegen() {
 
   llvm::Type *resultType = nullptr;
   bool isFloat = false;
+  bool isDecimal = false;
 
   if (!isAssignmentOp) {
     // Promote types to compatible types
     auto promoted = promoteTypes(L, R, leftTypeName, rightTypeName);
     L = promoted.first;
     R = promoted.second;
+    if (!L || !R)
+      return nullptr;
 
-    // Check if working with floating point or integer types
+    // Check if working with floating point, decimal, or integer types
     resultType = L->getType();
     isFloat = resultType->isFloatingPointTy();
+    isDecimal = isDecimalLLVMType(resultType);
 
     // Set result type name based on the promoted type
-    if (isFloat) {
+    if (isDecimal) {
+      setTypeName("decimal");
+    } else if (isFloat) {
       setTypeName(resultType->isFloatTy() ? "float" : "double");
     } else {
       const unsigned bitWidth = resultType->getIntegerBitWidth();
@@ -14854,21 +15412,29 @@ llvm::Value *BinaryExprAST::codegen() {
   if (Op.length() == 1) {
     switch (Op[0]) {
     case '+':
+      if (isDecimal)
+        return emitDecimalArithmeticBinary('+', L, R);
       if (isFloat)
         return Builder->CreateFAdd(L, R, "addtmp");
       else
         return Builder->CreateAdd(L, R, "addtmp");
     case '-':
+      if (isDecimal)
+        return emitDecimalArithmeticBinary('-', L, R);
       if (isFloat)
         return Builder->CreateFSub(L, R, "subtmp");
       else
         return Builder->CreateSub(L, R, "subtmp");
     case '*':
+      if (isDecimal)
+        return emitDecimalArithmeticBinary('*', L, R);
       if (isFloat)
         return Builder->CreateFMul(L, R, "multmp");
       else
         return Builder->CreateMul(L, R, "multmp");
     case '/':
+      if (isDecimal)
+        return emitDecimalArithmeticBinary('/', L, R);
       if (isFloat)
         return Builder->CreateFDiv(L, R, "divtmp");
       else if (preferUnsigned)
@@ -14876,6 +15442,8 @@ llvm::Value *BinaryExprAST::codegen() {
       else
         return Builder->CreateSDiv(L, R, "divtmp");
     case '%':
+      if (isDecimal)
+        return emitDecimalArithmeticBinary('%', L, R);
       if (isFloat)
         return Builder->CreateFRem(L, R, "modtmp");
       else if (preferUnsigned)
@@ -14884,6 +15452,13 @@ llvm::Value *BinaryExprAST::codegen() {
         return Builder->CreateSRem(L, R, "modtmp");
     case '<':
       setTypeName("bool");
+      if (isDecimal) {
+        llvm::Value *cmp = emitDecimalComparisonI1("<", L, R);
+        if (!cmp)
+          return nullptr;
+        return Builder->CreateZExt(cmp, llvm::Type::getInt8Ty(*TheContext),
+                                   "booltmp");
+      }
       if (isFloat) {
         L = Builder->CreateFCmpULT(L, R, "cmptmp");
       } else {
@@ -14896,6 +15471,13 @@ llvm::Value *BinaryExprAST::codegen() {
       return Builder->CreateZExt(L, llvm::Type::getInt8Ty(*TheContext), "booltmp");
     case '>':
       setTypeName("bool");
+      if (isDecimal) {
+        llvm::Value *cmp = emitDecimalComparisonI1(">", L, R);
+        if (!cmp)
+          return nullptr;
+        return Builder->CreateZExt(cmp, llvm::Type::getInt8Ty(*TheContext),
+                                   "booltmp");
+      }
       if (isFloat) {
         L = Builder->CreateFCmpUGT(L, R, "cmptmp");
       } else {
@@ -14955,6 +15537,17 @@ llvm::Value *BinaryExprAST::codegen() {
               }
             }
           }
+
+          if (!rhsVal)
+            if (targetInfo) {
+              std::string targetTypeName = typeNameFromInfo(*targetInfo);
+              llvm::Type *targetType =
+                  targetTypeName.empty() ? nullptr : getTypeFromString(targetTypeName);
+              if (targetType && isDecimalLLVMType(targetType)) {
+                if (auto *num = dynamic_cast<NumberExprAST *>(getRHS()))
+                  rhsVal = num->codegen_with_target(targetType);
+              }
+            }
 
           if (!rhsVal)
             rhsVal = getRHS()->codegen();
@@ -15690,38 +16283,54 @@ llvm::Value *BinaryExprAST::codegen() {
   if (Op == "==") {
     setTypeName("bool");
     llvm::Value *Cmp;
-    if (isFloat)
+    if (isDecimal)
+      Cmp = emitDecimalComparisonI1("==", L, R);
+    else if (isFloat)
       Cmp = Builder->CreateFCmpOEQ(L, R, "eqtmp");
     else
       Cmp = Builder->CreateICmpEQ(L, R, "eqtmp");
+    if (!Cmp)
+      return nullptr;
     return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "!=") {
     setTypeName("bool");
     llvm::Value *Cmp;
-    if (isFloat)
+    if (isDecimal)
+      Cmp = emitDecimalComparisonI1("!=", L, R);
+    else if (isFloat)
       Cmp = Builder->CreateFCmpONE(L, R, "netmp");
     else
       Cmp = Builder->CreateICmpNE(L, R, "netmp");
+    if (!Cmp)
+      return nullptr;
     return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "<=") {
     setTypeName("bool");
     llvm::Value *Cmp;
-    if (isFloat)
+    if (isDecimal)
+      Cmp = emitDecimalComparisonI1("<=", L, R);
+    else if (isFloat)
       Cmp = Builder->CreateFCmpOLE(L, R, "letmp");
     else if (preferUnsigned)
       Cmp = Builder->CreateICmpULE(L, R, "letmp");
     else
       Cmp = Builder->CreateICmpSLE(L, R, "letmp");
+    if (!Cmp)
+      return nullptr;
     return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == ">=") {
     setTypeName("bool");
     llvm::Value *Cmp;
-    if (isFloat)
+    if (isDecimal)
+      Cmp = emitDecimalComparisonI1(">=", L, R);
+    else if (isFloat)
       Cmp = Builder->CreateFCmpOGE(L, R, "getmp");
     else if (preferUnsigned)
       Cmp = Builder->CreateICmpUGE(L, R, "getmp");
     else
       Cmp = Builder->CreateICmpSGE(L, R, "getmp");
+    if (!Cmp)
+      return nullptr;
     return Builder->CreateZExt(Cmp, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "+=" || Op == "-=" || Op == "*=" || Op == "/=" || Op == "%=") {
     // Compound assignment operators: a += b is equivalent to a = a + b
@@ -15815,6 +16424,13 @@ llvm::Value *BinaryExprAST::codegen() {
       // Promote types for the operation
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+      if (!PromotedCurrent || !PromotedR)
+        return nullptr;
+      if (isDecimalLLVMType(PromotedCurrent->getType())) {
+        Result = emitDecimalArithmeticBinary(baseOp, PromotedCurrent, PromotedR);
+        if (!Result)
+          return nullptr;
+      } else {
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
       auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
       auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
@@ -15860,6 +16476,7 @@ llvm::Value *BinaryExprAST::codegen() {
           break;
         default:
           return LogErrorV("Unknown compound assignment operator");
+      }
       }
       
       // Cast result back to the original storage type if needed
@@ -15922,6 +16539,13 @@ llvm::Value *BinaryExprAST::codegen() {
       // Promote types for the operation
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
+      if (!PromotedCurrent || !PromotedR)
+        return nullptr;
+      if (isDecimalLLVMType(PromotedCurrent->getType())) {
+        Result = emitDecimalArithmeticBinary(baseOp, PromotedCurrent, PromotedR);
+        if (!Result)
+          return nullptr;
+      } else {
       bool isFloat = PromotedCurrent->getType()->isFloatingPointTy();
       auto elementUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(elementTypeNameForPromotion));
       auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
@@ -15968,6 +16592,7 @@ llvm::Value *BinaryExprAST::codegen() {
         default:
           return LogErrorV("Unknown compound assignment operator");
       }
+      }
       
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
@@ -16010,27 +16635,27 @@ llvm::Value *BinaryExprAST::codegen() {
     return Builder->CreateZExt(Result, llvm::Type::getInt8Ty(*TheContext), "booltmp");
   } else if (Op == "&") {
     // Bitwise AND - only works on integers
-    if (isFloat)
+    if (isFloat || isDecimal)
       return LogErrorV("Bitwise AND requires integer operands");
     return Builder->CreateAnd(L, R, "andtmp");
   } else if (Op == "|") {
     // Bitwise OR - only works on integers
-    if (isFloat)
+    if (isFloat || isDecimal)
       return LogErrorV("Bitwise OR requires integer operands");
     return Builder->CreateOr(L, R, "ortmp");
   } else if (Op == "^") {
     // Bitwise XOR - only works on integers
-    if (isFloat)
+    if (isFloat || isDecimal)
       return LogErrorV("Bitwise XOR requires integer operands");
     return Builder->CreateXor(L, R, "xortmp");
   } else if (Op == "<<") {
     // Left shift - only works on integers
-    if (isFloat)
+    if (isFloat || isDecimal)
       return LogErrorV("Left shift requires integer operands");
     return Builder->CreateShl(L, R, "shltmp");
   } else if (Op == ">>") {
     // Right shift (arithmetic) - only works on integers
-    if (isFloat)
+    if (isFloat || isDecimal)
       return LogErrorV("Right shift requires integer operands");
     if (preferUnsigned)
       return Builder->CreateLShr(L, R, "lshrtmp");
@@ -16104,7 +16729,10 @@ llvm::Value *BinaryExprAST::codegen() {
       }
       
       // Check that operands are integers
-      if (CurrentVal->getType()->isFloatingPointTy() || R->getType()->isFloatingPointTy())
+      if (CurrentVal->getType()->isFloatingPointTy() ||
+          R->getType()->isFloatingPointTy() ||
+          isDecimalLLVMType(CurrentVal->getType()) ||
+          isDecimalLLVMType(R->getType()))
         return LogErrorV("Bitwise compound assignment requires integer operands");
       
       // Promote types for the operation
@@ -16113,6 +16741,8 @@ llvm::Value *BinaryExprAST::codegen() {
         lhsPromoteType = typeNameFromInfo(*info);
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, lhsPromoteType, rhsPromoteType);
+      if (!PromotedCurrent || !PromotedR)
+        return nullptr;
       auto lhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(lhsPromoteType));
       auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
       bool compoundUnsigned = lhsUnsigned.value_or(false) || rhsUnsigned.value_or(false);
@@ -16175,12 +16805,17 @@ llvm::Value *BinaryExprAST::codegen() {
       }
       
       // Check that operands are integers
-      if (CurrentVal->getType()->isFloatingPointTy() || R->getType()->isFloatingPointTy())
+      if (CurrentVal->getType()->isFloatingPointTy() ||
+          R->getType()->isFloatingPointTy() ||
+          isDecimalLLVMType(CurrentVal->getType()) ||
+          isDecimalLLVMType(R->getType()))
         return LogErrorV("Bitwise compound assignment requires integer operands");
       
       // Promote types for the operation
       std::string rhsPromoteType = getRHS()->getTypeName();
       auto [PromotedCurrent, PromotedR] = promoteTypes(CurrentVal, R, elementTypeNameForPromotion, rhsPromoteType);
+      if (!PromotedCurrent || !PromotedR)
+        return nullptr;
       auto elementUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(elementTypeNameForPromotion));
       auto rhsUnsigned = unsignedHintFromTypeName(sanitizeBaseTypeName(rhsPromoteType));
       bool compoundUnsigned = elementUnsigned.value_or(false) || rhsUnsigned.value_or(false);
@@ -16383,19 +17018,30 @@ llvm::Value *UnaryExprAST::codegen() {
         One = llvm::ConstantInt::get(Ty, 1);
     } else if (Ty->isFloatingPointTy()) {
         One = llvm::ConstantFP::get(Ty, 1.0);
+    } else if (isDecimalLLVMType(Ty)) {
+        One = Builder->CreateCall(
+            getDecimalFromI64Function(),
+            {llvm::ConstantInt::get(llvm::Type::getInt64Ty(*TheContext), 1)},
+            "dec.one");
     } else {
-        return LogErrorV("++/-- requires integer or floating-point type");
+        return LogErrorV("++/-- requires integer, floating-point, or decimal type");
     }
 
     llvm::Value *NextVal;
 
     if (Op == "++") {
-        if (Ty->isFloatingPointTy())
+        if (isDecimalLLVMType(Ty))
+            NextVal = Builder->CreateCall(getDecimalAddFunction(),
+                                          {CurVal, One}, "dec.inc");
+        else if (Ty->isFloatingPointTy())
             NextVal = Builder->CreateFAdd(CurVal, One, "addtmp");
         else
             NextVal = Builder->CreateAdd(CurVal, One, "addtmp");
     } else { // --
-        if (Ty->isFloatingPointTy())
+        if (isDecimalLLVMType(Ty))
+            NextVal = Builder->CreateCall(getDecimalSubFunction(),
+                                          {CurVal, One}, "dec.dec");
+        else if (Ty->isFloatingPointTy())
             NextVal = Builder->CreateFSub(CurVal, One, "subtmp");
         else
             NextVal = Builder->CreateSub(CurVal, One, "subtmp");
@@ -16413,6 +17059,11 @@ llvm::Value *UnaryExprAST::codegen() {
     return nullptr;
 
   if (Op == "-") {
+    if (isDecimalLLVMType(OperandV->getType()))
+      return Builder->CreateCall(getDecimalNegFunction(), {OperandV},
+                                 "dec.neg");
+    if (OperandV->getType()->isFloatingPointTy())
+      return Builder->CreateFNeg(OperandV, "fnegtmp");
     return Builder->CreateNeg(OperandV, "negtmp");
   } else if (Op == "!") {
     // Check that operand is boolean type
@@ -16796,6 +17447,48 @@ llvm::Value *CastExprAST::codegen() {
   // If same type, just return the value
   if (SourceType == TargetLLVMType)
     return OperandV;
+
+  const bool sourceIsDecimal = isDecimalLLVMType(SourceType);
+  const bool targetIsDecimal = isDecimalLLVMType(TargetLLVMType);
+  if (sourceIsDecimal || targetIsDecimal) {
+    if (sourceIsDecimal && targetIsDecimal)
+      return OperandV;
+
+    if (targetIsDecimal) {
+      if (SourceType->isIntegerTy() && !SourceType->isIntegerTy(1)) {
+        llvm::Value *converted =
+            emitIntegerToDecimalValue(OperandV, cleanSource);
+        if (!converted)
+          return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
+        return converted;
+      }
+      if (SourceType->isFloatingPointTy()) {
+        llvm::Value *converted = emitFloatingToDecimalValue(OperandV);
+        if (!converted)
+          return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
+        return converted;
+      }
+      return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
+    }
+
+    if (sourceIsDecimal) {
+      if (TargetLLVMType->isIntegerTy() && !TargetLLVMType->isIntegerTy(1)) {
+        llvm::Value *converted =
+            emitDecimalToIntegerValue(OperandV, TargetLLVMType, cleanTarget);
+        if (!converted)
+          return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
+        return converted;
+      }
+      if (TargetLLVMType->isFloatingPointTy()) {
+        llvm::Value *converted =
+            emitDecimalToFloatingValue(OperandV, TargetLLVMType);
+        if (!converted)
+          return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
+        return converted;
+      }
+      return LogErrorV("Cannot cast " + sourceLabel + " to " + targetLabel);
+    }
+  }
 
   if (SourceType->isIntegerTy() && TargetLLVMType->isIntegerTy() &&
       !TargetLLVMType->isIntegerTy(1)) {
@@ -17862,6 +18555,15 @@ static llvm::Value *emitResolvedCallInternal(
         return true;
       }
 
+      if (expectedType && isDecimalLLVMType(expectedType) && coreArg) {
+        if (auto *num = dynamic_cast<const NumberExprAST *>(coreArg)) {
+          if (!num->getLiteral().isDecimal()) {
+            ++conversionCount;
+            return true;
+          }
+        }
+      }
+
       if (ActualType && expectedType &&
           areTypesCompatible(ActualType, expectedType)) {
         ++conversionCount;
@@ -18136,7 +18838,15 @@ static llvm::Value *emitResolvedCallInternal(
           typeNameFromInfo(chosen->parameterTypes[idx]);
       defaultExpr->setTypeName(targetTypeName);
       defaultExpr->markTemporary();
-      llvm::Value *value = defaultExpr->codegen();
+      llvm::Type *targetType =
+          targetTypeName.empty() ? nullptr : getTypeFromString(targetTypeName);
+      llvm::Value *value = nullptr;
+      if (targetType && isDecimalLLVMType(targetType)) {
+        if (auto *num = dynamic_cast<NumberExprAST *>(defaultExpr.get()))
+          value = num->codegen_with_target(targetType);
+      }
+      if (!value)
+        value = defaultExpr->codegen();
       if (!value)
         return nullptr;
       CallArgs.push_back(value);
@@ -18152,6 +18862,20 @@ static llvm::Value *emitResolvedCallInternal(
     llvm::Value *ArgVal = CallArgs[idx];
     llvm::Type *ExpectedType =
         CalleeF->getFunctionType()->getParamType(idx);
+    const ExprAST *argExpr = nullptr;
+    if (paramsIndex >= 0 && static_cast<int>(idx) == paramsIndex &&
+        selected->paramsDirect && !selected->paramsBinding.empty()) {
+      int bindingIndex = selected->paramsBinding.front();
+      if (bindingIndex >= 0 &&
+          static_cast<size_t>(bindingIndex) < provided->size())
+        argExpr = (*provided)[static_cast<size_t>(bindingIndex)].expr;
+    } else if (idx < selected->binding.size()) {
+      int bindingIndex = selected->binding[idx];
+      if (bindingIndex >= 0 &&
+          static_cast<size_t>(bindingIndex) < provided->size())
+        argExpr = (*provided)[static_cast<size_t>(bindingIndex)].expr;
+    }
+
     if (chosen->parameterIsRef[idx]) {
       if (ExpectedType && ExpectedType->isPointerTy() &&
           !ArgVal->getType()->isPointerTy()) {
@@ -18170,6 +18894,13 @@ static llvm::Value *emitResolvedCallInternal(
     } else {
       const std::string targetTypeName =
           typeNameFromInfo(chosen->parameterTypes[idx]);
+      if (ExpectedType && argExpr && isDecimalLLVMType(ExpectedType)) {
+        ExprAST *mutableExpr = const_cast<ExprAST *>(argExpr);
+        if (auto *num = dynamic_cast<NumberExprAST *>(mutableExpr)) {
+          if (llvm::Value *targeted = num->codegen_with_target(ExpectedType))
+            ArgVal = targeted;
+        }
+      }
       ArgVal = castToType(ArgVal, ExpectedType, targetTypeName);
     }
     FinalArgs.push_back(ArgVal);
@@ -19252,7 +19983,17 @@ static llvm::Value *codegenReturnValue(ExprAST *returnValue, bool isRef) {
         return LogErrorV("return ref can only be used with lvalues (variables, array elements, or struct members)");
       }
     } else {
-      Val = returnValue->codegen();
+      llvm::Type *expectedType =
+          currentFunction ? currentFunction->getReturnType() : nullptr;
+      if (expectedType && !expectedType->isVoidTy() &&
+          isDecimalLLVMType(expectedType)) {
+        if (auto *num = dynamic_cast<NumberExprAST *>(returnValue))
+          Val = num->codegen_with_target(expectedType);
+        else
+          Val = returnValue->codegen();
+      } else {
+        Val = returnValue->codegen();
+      }
     }
 
     if (!Val)
@@ -19415,8 +20156,18 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
     }
   }
 
-  const std::vector<int64_t> explicitArrayDims =
-      parseExplicitArrayDimensions(declaredInfo);
+  const std::vector<int64_t> explicitArrayDims = [&]() {
+    std::vector<int64_t> dims = parseExplicitArrayDimensions(declaredInfo);
+    if (!dims.empty())
+      return dims;
+
+    dims = parseExplicitArrayDimensions(getTypeInfo());
+    if (!dims.empty())
+      return dims;
+
+    TypeInfo declaredSyntaxInfo = makeTypeInfo(getType());
+    return parseExplicitArrayDimensions(declaredSyntaxInfo);
+  }();
 
   auto computeLiteralDimensions = [&](const ArrayExprAST *arrayLiteral) -> std::vector<int64_t> {
     std::vector<int64_t> dims;
@@ -19492,6 +20243,12 @@ llvm::Value *VariableDeclarationStmtAST::codegen() {
   auto generateInitializerValue = [&](ExprAST *expr) -> llvm::Value * {
     if (!expr)
       return nullptr;
+
+    if (!declaredInfo.isArray && isDecimalLLVMType(VarType)) {
+      if (auto *num = dynamic_cast<NumberExprAST *>(expr))
+        return num->codegen_with_target(VarType);
+    }
+
     if (auto *paren = dynamic_cast<ParenExprAST *>(expr)) {
       if (declaredInfo.isTupleType() || declaredInfo.isSmartPointer()) {
         if (auto constructed = emitTargetTypedConstruction(declaredInfo, *paren))

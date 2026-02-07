@@ -66,7 +66,22 @@ long big = 100000
 int medium = int: big       // medium = 100000
 short small = short: medium // small = 100000 (if fits)
 byte tiny = byte: small     // Will fail if value > 255
+
+// Decimal conversion rules
+int units = 15
+decimal amount = units       // implicit int -> decimal
+decimal exact = decimal: 2.5 // explicit float/double -> decimal
+double approx = double: amount // explicit decimal -> double
+int whole = int: amount      // explicit decimal -> int
 ```
+
+`decimal` follows C#-style conversion defaults:
+- Implicit: integer-like types (`byte`..`ulong`, `char`/`schar`/`lchar`) to `decimal`
+- Explicit only: `decimal` to any integer type
+- Explicit only: `float`/`double` to `decimal` and `decimal` to `float`/`double`
+- No implicit mixed arithmetic between `decimal` and `float`/`double`
+
+Numeric literals also participate in contextual typing: when the target is `decimal`, literals are emitted as decimal.
 
 Assignments and initializers never perform narrowing or signedness changes automatically, so use an explicit cast any time
 you store a wider integer into a narrower one (e.g. `int` → `short` or `long` → `int`), or when switching between
@@ -203,8 +218,9 @@ i += int: f                         // i = 13 (10 + 3)
 2. **Automatic integer to float promotion**: Integer types promote to floating-point types in mixed arithmetic.
 3. **Automatic integer widening**: Different sized integers widen toward the larger operand (with correct sign/zero extension) inside comparisons and arithmetic. Narrowing assignments still require explicit casts.
 4. **Signed/unsigned comparisons**: Signed and unsigned integers compare like ordinary numbers; Hybrid inserts the necessary zero or sign extension before evaluating the predicate.
-5. **Bool isolation**: `bool` cannot be converted to or from any other type, even with explicit casting.
-6. **Literal constants**: Integer literals are automatically sized to fit the target type with range checking.
+5. **Decimal separation**: `decimal` mixes implicitly with integers, but never with `float`/`double`.
+6. **Bool isolation**: `bool` cannot be converted to or from any other type, even with explicit casting.
+7. **Literal constants**: Integer literals are automatically sized to fit the target type with range checking.
 
 ## Examples
 

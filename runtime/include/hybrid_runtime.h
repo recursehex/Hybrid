@@ -66,6 +66,11 @@ typedef struct hybrid_string_t {
   char *data;          // UTF-8 bytes; may alias backing->data for slices
 } hybrid_string_t;
 
+typedef struct hybrid_decimal_t {
+  uint64_t lo;
+  uint64_t hi;
+} hybrid_decimal_t;
+
 typedef struct HybridARCDebugConfig {
   int leakDetect;
   int refTrace;
@@ -257,6 +262,8 @@ int __hybrid_string_equals(const hybrid_string_t *lhs,
 hybrid_string_t *__hybrid_string_from_int64(int64_t value, int isUnsigned);
 hybrid_string_t *__hybrid_string_from_double(double value, int precision,
                                              int hasPrecision);
+hybrid_string_t *__hybrid_decimal_to_string(hybrid_decimal_t value,
+                                            int precision, int hasPrecision);
 hybrid_string_t *__hybrid_string_from_char32(int32_t codepoint);
 hybrid_string_t *__hybrid_string_slice(hybrid_string_t *source, size_t start,
                                        size_t length);
@@ -265,6 +272,27 @@ hybrid_string_t *__hybrid_string_append_mut(hybrid_string_t *base,
 size_t hybrid_string_size(const hybrid_string_t *str);
 int hybrid_strlen(const hybrid_string_t *str);
 void print_string(hybrid_string_t *str);
+
+hybrid_decimal_t __hybrid_decimal_parse(const char *text, size_t length);
+hybrid_decimal_t __hybrid_decimal_add(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs);
+hybrid_decimal_t __hybrid_decimal_sub(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs);
+hybrid_decimal_t __hybrid_decimal_mul(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs);
+hybrid_decimal_t __hybrid_decimal_div(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs);
+hybrid_decimal_t __hybrid_decimal_rem(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs);
+hybrid_decimal_t __hybrid_decimal_neg(hybrid_decimal_t value);
+int __hybrid_decimal_cmp(hybrid_decimal_t lhs, hybrid_decimal_t rhs);
+
+hybrid_decimal_t __hybrid_decimal_from_i64(int64_t value);
+hybrid_decimal_t __hybrid_decimal_from_u64(uint64_t value);
+int64_t __hybrid_decimal_to_i64(hybrid_decimal_t value);
+uint64_t __hybrid_decimal_to_u64(hybrid_decimal_t value);
+hybrid_decimal_t __hybrid_decimal_from_double(double value);
+double __hybrid_decimal_to_double(hybrid_decimal_t value);
 
 extern int hybrid_debug_leaks;
 extern int hybrid_debug_reftrace;

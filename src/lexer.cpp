@@ -414,6 +414,8 @@ int gettok() {
       return tok_float;
     if (lex.identifierStr == "double")
       return tok_double;
+    if (lex.identifierStr == "decimal")
+      return tok_decimal;
     if (lex.identifierStr == "char")
       return tok_char;
     if (lex.identifierStr == "void")

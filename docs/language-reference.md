@@ -102,7 +102,7 @@ See the [Functions guide](functions.md#delegates) for detailed rules and example
 The following keywords are reserved:
 
 - Type keywords: 
-  - Basic types: `int`, `float`, `double`, `char`, `void`, `bool`, `string`
+  - Basic types: `int`, `float`, `double`, `decimal`, `char`, `void`, `bool`, `string`
   - Sized integers: `byte`, `sbyte`, `short`, `ushort`, `uint`, `long`, `ulong`
   - Sized characters: `schar`, `lchar`
 - Control flow:
@@ -132,6 +132,7 @@ The following keywords are reserved:
 ```c
 42        // Integer literal (i32)
 3.14      // Float literal (double)
+decimal price = 12.34 // Decimal literal (base-10 decimal)
 -10       // Negative integer
 -2.5      // Negative float
 255       // Can be assigned to byte
@@ -139,6 +140,8 @@ The following keywords are reserved:
 ```
 
 Integer literals are automatically sized to fit the target type with range checking.
+Numbers with decimal points are `double` by default.
+Numeric literals are contextually typed as `decimal` when the target type is known (for example `decimal price = 12.34` or `ProcessDecimal(1.25)`).
 
 ### Boolean Literals
 
@@ -171,7 +174,7 @@ string precise = $"Pi: `pi:2`"                    // format specifier for floats
 ```
 
 - Expressions inside backticks can be any valid expression.
-- Format specifiers are optional and currently supported for floating-point values using `:digits` to control precision (e.g. `pi:3`).
+- Format specifiers are optional and currently supported for floating-point and `decimal` values using `:digits` to control precision (e.g. `pi:3`, `amount:2`).
 - To emit a literal backtick inside an interpolated string, escape it with `` \` ``.
 
 ### Character Literals

@@ -4,6 +4,7 @@
 #include "hybrid_runtime.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <string>
 
 extern "C" {
 
@@ -309,6 +311,153 @@ hybrid_string_t *__hybrid_string_from_double(double value, int precision,
     *end-- = '\0';
   if (end > buffer && *end == '.')
     *end = '\0';
+
+  size_t len = std::strlen(buffer);
+  return __hybrid_string_from_utf8_literal(buffer, len);
+}
+
+static hybrid_decimal_t decimal_from_long_double(long double value) {
+  hybrid_decimal_t out{0, 0};
+  std::memcpy(&out, &value, std::min(sizeof(value), sizeof(out)));
+  return out;
+}
+
+static long double decimal_to_long_double(hybrid_decimal_t value) {
+  long double out = 0.0L;
+  std::memcpy(&out, &value, std::min(sizeof(out), sizeof(value)));
+  return out;
+}
+
+hybrid_decimal_t __hybrid_decimal_parse(const char *text, size_t length) {
+  if (!text)
+    return decimal_from_long_double(0.0L);
+
+  std::string input(text, length);
+  char *end = nullptr;
+  errno = 0;
+  long double value = std::strtold(input.c_str(), &end);
+  if (end != input.c_str() + input.size() || errno == ERANGE ||
+      !std::isfinite(value)) {
+    return decimal_from_long_double(0.0L);
+  }
+
+  return decimal_from_long_double(value);
+}
+
+hybrid_decimal_t __hybrid_decimal_add(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  return decimal_from_long_double(decimal_to_long_double(lhs) +
+                                  decimal_to_long_double(rhs));
+}
+
+hybrid_decimal_t __hybrid_decimal_sub(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  return decimal_from_long_double(decimal_to_long_double(lhs) -
+                                  decimal_to_long_double(rhs));
+}
+
+hybrid_decimal_t __hybrid_decimal_mul(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  return decimal_from_long_double(decimal_to_long_double(lhs) *
+                                  decimal_to_long_double(rhs));
+}
+
+hybrid_decimal_t __hybrid_decimal_div(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  long double divisor = decimal_to_long_double(rhs);
+  if (divisor == 0.0L)
+    return decimal_from_long_double(0.0L);
+  return decimal_from_long_double(decimal_to_long_double(lhs) / divisor);
+}
+
+hybrid_decimal_t __hybrid_decimal_rem(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  long double divisor = decimal_to_long_double(rhs);
+  if (divisor == 0.0L)
+    return decimal_from_long_double(0.0L);
+  return decimal_from_long_double(
+      std::fmodl(decimal_to_long_double(lhs), divisor));
+}
+
+hybrid_decimal_t __hybrid_decimal_neg(hybrid_decimal_t value) {
+  return decimal_from_long_double(-decimal_to_long_double(value));
+}
+
+int __hybrid_decimal_cmp(hybrid_decimal_t lhs, hybrid_decimal_t rhs) {
+  long double left = decimal_to_long_double(lhs);
+  long double right = decimal_to_long_double(rhs);
+  if (left < right)
+    return -1;
+  if (left > right)
+    return 1;
+  return 0;
+}
+
+hybrid_decimal_t __hybrid_decimal_from_i64(int64_t value) {
+  return decimal_from_long_double(static_cast<long double>(value));
+}
+
+hybrid_decimal_t __hybrid_decimal_from_u64(uint64_t value) {
+  return decimal_from_long_double(static_cast<long double>(value));
+}
+
+int64_t __hybrid_decimal_to_i64(hybrid_decimal_t value) {
+  long double v = std::truncl(decimal_to_long_double(value));
+  if (!std::isfinite(v))
+    return 0;
+  if (v > static_cast<long double>(std::numeric_limits<int64_t>::max()))
+    return std::numeric_limits<int64_t>::max();
+  if (v < static_cast<long double>(std::numeric_limits<int64_t>::min()))
+    return std::numeric_limits<int64_t>::min();
+  return static_cast<int64_t>(v);
+}
+
+uint64_t __hybrid_decimal_to_u64(hybrid_decimal_t value) {
+  long double v = std::truncl(decimal_to_long_double(value));
+  if (!std::isfinite(v))
+    return 0;
+  if (v <= 0.0L)
+    return 0;
+  if (v > static_cast<long double>(std::numeric_limits<uint64_t>::max()))
+    return std::numeric_limits<uint64_t>::max();
+  return static_cast<uint64_t>(v);
+}
+
+hybrid_decimal_t __hybrid_decimal_from_double(double value) {
+  return decimal_from_long_double(static_cast<long double>(value));
+}
+
+double __hybrid_decimal_to_double(hybrid_decimal_t value) {
+  return static_cast<double>(decimal_to_long_double(value));
+}
+
+hybrid_string_t *__hybrid_decimal_to_string(hybrid_decimal_t value,
+                                            int precision, int hasPrecision) {
+  int actual = hasPrecision ? precision : 34;
+  if (actual < 0)
+    actual = 0;
+  else if (actual > 34)
+    actual = 34;
+
+  char fmt[16];
+  if (hasPrecision) {
+    std::snprintf(fmt, sizeof(fmt), "%%.%dLf", actual);
+  } else {
+    std::snprintf(fmt, sizeof(fmt), "%%.%dLg", actual);
+  }
+
+  char buffer[256];
+  std::snprintf(buffer, sizeof(buffer), fmt, decimal_to_long_double(value));
+
+  const bool scientific =
+      std::strchr(buffer, 'e') != nullptr || std::strchr(buffer, 'E') != nullptr;
+  if (!scientific) {
+    char *end = buffer + std::strlen(buffer) - 1;
+    while (end > buffer && *end == '0')
+      *end-- = '\0';
+    if (end > buffer && *end == '.')
+      *end = '\0';
+  }
 
   size_t len = std::strlen(buffer);
   return __hybrid_string_from_utf8_literal(buffer, len);

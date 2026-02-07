@@ -41,6 +41,7 @@ enum Token {
   tok_int = -21,            // int (32-bit signed integer)
   tok_float = -22,          // float (32-bit floating point)
   tok_double = -23,         // double (64-bit floating point)
+  tok_decimal = -115,       // decimal (128-bit decimal payload)
   tok_char = -24,           // char (16-bit Unicode character)
   tok_void = -25,           // void (no type)
   tok_bool = -26,           // bool (true/false)

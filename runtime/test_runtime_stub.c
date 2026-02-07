@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <errno.h>
 
 static HybridTypeDescriptor FallbackDescriptor = {
     "<anonymous>", NULL, NULL, 0, NULL, 0, NULL};
@@ -587,6 +589,157 @@ hybrid_string_t *__hybrid_string_from_double(double value, int precision,
     *end-- = '\0';
   if (end > buffer && *end == '.')
     *end = '\0';
+
+  size_t len = strlen(buffer);
+  return __hybrid_string_from_utf8_literal(buffer, len);
+}
+
+static hybrid_decimal_t decimal_from_long_double(long double value) {
+  hybrid_decimal_t out;
+  out.lo = 0;
+  out.hi = 0;
+  size_t copySize = sizeof(value) < sizeof(out) ? sizeof(value) : sizeof(out);
+  memcpy(&out, &value, copySize);
+  return out;
+}
+
+static long double decimal_to_long_double(hybrid_decimal_t value) {
+  long double out = 0.0L;
+  size_t copySize = sizeof(out) < sizeof(value) ? sizeof(out) : sizeof(value);
+  memcpy(&out, &value, copySize);
+  return out;
+}
+
+hybrid_decimal_t __hybrid_decimal_parse(const char *text, size_t length) {
+  if (!text)
+    return decimal_from_long_double(0.0L);
+
+  char *tmp = (char *)malloc(length + 1);
+  if (!tmp)
+    return decimal_from_long_double(0.0L);
+  memcpy(tmp, text, length);
+  tmp[length] = '\0';
+
+  errno = 0;
+  char *end = NULL;
+  long double value = strtold(tmp, &end);
+  int valid = (end == tmp + length) && (errno != ERANGE) && isfinite(value);
+  free(tmp);
+  if (!valid)
+    return decimal_from_long_double(0.0L);
+  return decimal_from_long_double(value);
+}
+
+hybrid_decimal_t __hybrid_decimal_add(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  return decimal_from_long_double(decimal_to_long_double(lhs) +
+                                  decimal_to_long_double(rhs));
+}
+
+hybrid_decimal_t __hybrid_decimal_sub(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  return decimal_from_long_double(decimal_to_long_double(lhs) -
+                                  decimal_to_long_double(rhs));
+}
+
+hybrid_decimal_t __hybrid_decimal_mul(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  return decimal_from_long_double(decimal_to_long_double(lhs) *
+                                  decimal_to_long_double(rhs));
+}
+
+hybrid_decimal_t __hybrid_decimal_div(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  long double divisor = decimal_to_long_double(rhs);
+  if (divisor == 0.0L)
+    return decimal_from_long_double(0.0L);
+  return decimal_from_long_double(decimal_to_long_double(lhs) / divisor);
+}
+
+hybrid_decimal_t __hybrid_decimal_rem(hybrid_decimal_t lhs,
+                                      hybrid_decimal_t rhs) {
+  long double divisor = decimal_to_long_double(rhs);
+  if (divisor == 0.0L)
+    return decimal_from_long_double(0.0L);
+  return decimal_from_long_double(fmodl(decimal_to_long_double(lhs), divisor));
+}
+
+hybrid_decimal_t __hybrid_decimal_neg(hybrid_decimal_t value) {
+  return decimal_from_long_double(-decimal_to_long_double(value));
+}
+
+int __hybrid_decimal_cmp(hybrid_decimal_t lhs, hybrid_decimal_t rhs) {
+  long double left = decimal_to_long_double(lhs);
+  long double right = decimal_to_long_double(rhs);
+  if (left < right)
+    return -1;
+  if (left > right)
+    return 1;
+  return 0;
+}
+
+hybrid_decimal_t __hybrid_decimal_from_i64(int64_t value) {
+  return decimal_from_long_double((long double)value);
+}
+
+hybrid_decimal_t __hybrid_decimal_from_u64(uint64_t value) {
+  return decimal_from_long_double((long double)value);
+}
+
+int64_t __hybrid_decimal_to_i64(hybrid_decimal_t value) {
+  long double v = truncl(decimal_to_long_double(value));
+  if (!isfinite(v))
+    return 0;
+  if (v > (long double)INT64_MAX)
+    return INT64_MAX;
+  if (v < (long double)INT64_MIN)
+    return INT64_MIN;
+  return (int64_t)v;
+}
+
+uint64_t __hybrid_decimal_to_u64(hybrid_decimal_t value) {
+  long double v = truncl(decimal_to_long_double(value));
+  if (!isfinite(v))
+    return 0;
+  if (v <= 0.0L)
+    return 0;
+  if (v > (long double)UINT64_MAX)
+    return UINT64_MAX;
+  return (uint64_t)v;
+}
+
+hybrid_decimal_t __hybrid_decimal_from_double(double value) {
+  return decimal_from_long_double((long double)value);
+}
+
+double __hybrid_decimal_to_double(hybrid_decimal_t value) {
+  return (double)decimal_to_long_double(value);
+}
+
+hybrid_string_t *__hybrid_decimal_to_string(hybrid_decimal_t value,
+                                            int precision, int hasPrecision) {
+  int actual = hasPrecision ? precision : 34;
+  if (actual < 0)
+    actual = 0;
+  else if (actual > 34)
+    actual = 34;
+
+  char fmt[16];
+  if (hasPrecision)
+    snprintf(fmt, sizeof(fmt), "%%.%dLf", actual);
+  else
+    snprintf(fmt, sizeof(fmt), "%%.%dLg", actual);
+
+  char buffer[256];
+  snprintf(buffer, sizeof(buffer), fmt, decimal_to_long_double(value));
+
+  if (!strchr(buffer, 'e') && !strchr(buffer, 'E')) {
+    char *end = buffer + strlen(buffer) - 1;
+    while (end > buffer && *end == '0')
+      *end-- = '\0';
+    if (end > buffer && *end == '.')
+      *end = '\0';
+  }
 
   size_t len = strlen(buffer);
   return __hybrid_string_from_utf8_literal(buffer, len);

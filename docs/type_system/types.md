@@ -9,6 +9,7 @@
 | `int` | 32-bit signed integer | `i32` | `int x = 42` |
 | `float` | 32-bit floating point | `float` | `float pi = 3.14f` |
 | `double` | 64-bit floating point | `double` | `double e = 2.71828` |
+| `decimal` | 128-bit decimal payload (runtime-backed) | `{ i64, i64 }` | `decimal price = 12.34` |
 | `char` | 16-bit Unicode character | `i16` | `char ch = 'A'` |
 | `bool` | 8-bit boolean value | `i8` | `bool flag = true` |
 | `void` | No value (functions only) | `void` | `void func() { }` |

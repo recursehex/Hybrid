@@ -242,6 +242,8 @@ std::string describeTokenForDiagnostics(int token) {
       return makeKeyword("float");
     case tok_double:
       return makeKeyword("double");
+    case tok_decimal:
+      return makeKeyword("decimal");
     case tok_char:
       return makeKeyword("char");
     case tok_void:

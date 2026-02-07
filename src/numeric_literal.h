@@ -10,7 +10,8 @@
 
 enum class NumericLiteralKind {
   Integer,
-  Floating
+  Floating,
+  Decimal
 };
 
 struct NumericLiteral {
@@ -81,8 +82,25 @@ struct NumericLiteral {
     return literal;
   }
 
+  static NumericLiteral makeDecimal(std::string literalSpelling,
+                                    bool sawDecimal,
+                                    bool sawExponent) {
+    NumericLiteral literal;
+    literal.kind = NumericLiteralKind::Decimal;
+    literal.intValue = llvm::APInt(64, 0);
+    literal.floatValue = llvm::APFloat(0.0);
+    literal.base = 10;
+    literal.hadDecimalPoint = sawDecimal;
+    literal.hadExponent = sawExponent;
+    literal.isFloat32 = false;
+    literal.spelling = std::move(literalSpelling);
+    literal.requiredBitWidth = 0;
+    return literal;
+  }
+
   bool isInteger() const { return kind == NumericLiteralKind::Integer; }
   bool isFloating() const { return kind == NumericLiteralKind::Floating; }
+  bool isDecimal() const { return kind == NumericLiteralKind::Decimal; }
 
   const llvm::APInt &getIntegerValue() const { return intValue; }
   const llvm::APFloat &getFloatValue() const { return floatValue; }
@@ -107,6 +125,14 @@ struct NumericLiteral {
   }
 
   double toDouble() const {
+    if (isDecimal()) {
+      try {
+        return std::stod(spelling);
+      } catch (...) {
+        return 0.0;
+      }
+    }
+
     if (isFloating()) {
       llvm::APFloat copy = floatValue;
       bool losesInfo = false;

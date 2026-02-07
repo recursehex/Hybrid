@@ -366,6 +366,7 @@ void MainLoop() {
     case tok_int:
     case tok_float:
     case tok_double:
+    case tok_decimal:
     case tok_char:
     case tok_void:
     case tok_bool:
