@@ -7,7 +7,7 @@ BUILD_DIR="${HYBRID_ASAN_BUILD_DIR:-build-asan}"
 if [ $# -gt 0 ]; then
     TEST_PATTERNS=("$@")
 else
-    TEST_PATTERNS=("arc/memory" "arc/arc_off" "errors/arc")
+    TEST_PATTERNS=("arc/memory" "arc/arc_off" "arc/debug" "errors/arc")
 fi
 
 LLVM_DIR=""

@@ -103,7 +103,7 @@ build\hybrid.exe < test\fail.hy 2>&1
 Use the helper script to configure an ASan build and run ARC suites against it:
 
 ```bash
-# Defaults to running: arc/memory, arc/arc_off, and errors/arc
+# Defaults to running: arc/memory, arc/arc_off, arc/debug, and errors/arc
 ./scripts/run_arc_asan.sh
 
 # Run a specific category or pattern
@@ -120,6 +120,27 @@ HYBRID_EXEC=./build/hybrid ./run_tests.sh --asan arc
 Notes:
 - The script configures `build-asan/` with `-DHYBRID_ENABLE_ASAN=ON`.
 - It runs tests with `HYBRID_EXEC=./build-asan/hybrid` and `--asan` so ARC runtime paths are exercised with sanitizer instrumentation.
+
+## ARC Valgrind lane (Linux)
+
+Run ARC suites under valgrind on Linux:
+
+```bash
+# Defaults to running: arc/memory, arc/arc_off, arc/debug, and errors/arc
+./scripts/run_arc_valgrind.sh
+
+# Run a specific category or pattern
+./scripts/run_arc_valgrind.sh arc/debug
+```
+
+Notes:
+- This path is Linux-only and requires `valgrind` in `PATH`.
+- `run_tests.sh --valgrind` wraps runtime binaries in valgrind with:
+  - `--leak-check=full`
+  - `--show-leak-kinds=all`
+  - `--errors-for-leak-kinds=none`
+  - `--error-exitcode=101`
+- Leak-only fixtures remain valid under this mode because leak kinds are reported but not counted as hard errors.
 
 ## Test Suite Features
 

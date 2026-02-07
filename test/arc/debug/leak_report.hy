@@ -16,7 +16,7 @@ class LeakTarget
 
 LeakTarget make_leak()
 {
-    LeakTarget temp = (42)
+    LeakTarget temp = new LeakTarget(42)
     unsafe
     {
         hybrid_retain(temp)

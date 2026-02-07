@@ -102,6 +102,13 @@ ARC_ENABLED_OVERRIDE=""
 SANITIZER_MODE=""
 SANITIZER_FLAGS=()
 HYBRID_EXEC_FROM_ENV="${HYBRID_EXEC_OVERRIDE:-${HYBRID_EXEC:-}}"
+VALGRIND_MODE=0
+VALGRIND_ARGS=(
+    "--leak-check=full"
+    "--show-leak-kinds=all"
+    "--errors-for-leak-kinds=none"
+    "--error-exitcode=101"
+)
 
 if [[ -n "${HYBRID_TEST_SANITIZER+x}" ]]; then
     value=$(printf "%s" "$HYBRID_TEST_SANITIZER" | tr -d '[:space:]')
@@ -122,6 +129,23 @@ fi
 
 if [ "$SANITIZER_MODE" = "address" ]; then
     SANITIZER_FLAGS=("-fsanitize=address" "-fno-omit-frame-pointer")
+fi
+
+if [[ -n "${HYBRID_TEST_VALGRIND+x}" ]]; then
+    value=$(printf "%s" "$HYBRID_TEST_VALGRIND" | tr -d '[:space:]')
+    lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        ""|1|true|on|yes)
+            VALGRIND_MODE=1
+            ;;
+        0|false|off|none|no)
+            VALGRIND_MODE=0
+            ;;
+        *)
+            echo -e "${RED}Error: unsupported HYBRID_TEST_VALGRIND value '$HYBRID_TEST_VALGRIND' (use on/off)${NC}"
+            exit 1
+            ;;
+    esac
 fi
 
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
@@ -622,8 +646,13 @@ run_test() {
 
                     if [ $clang_success -eq 1 ]; then
                         set +e
-                        runtime_output=$("$temp_bin" 2>&1)
-                        runtime_exit_code=$?
+                        if [ $VALGRIND_MODE -eq 1 ]; then
+                            runtime_output=$(valgrind "${VALGRIND_ARGS[@]}" "$temp_bin" 2>&1)
+                            runtime_exit_code=$?
+                        else
+                            runtime_output=$("$temp_bin" 2>&1)
+                            runtime_exit_code=$?
+                        fi
                         set -e
                         runtime_ran=1
 
@@ -1197,6 +1226,10 @@ while [[ $# -gt 0 ]]; do
             SANITIZER_FLAGS=("-fsanitize=address" "-fno-omit-frame-pointer")
             shift
             ;;
+        --valgrind)
+            VALGRIND_MODE=1
+            shift
+            ;;
         --failures-only)
             FAILURES_ONLY=1
             shift
@@ -1210,6 +1243,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -j, --jobs N        Run up to N single-file tests in parallel"
             echo "  -a on|off           Toggle ARC lowering (--arc-enabled) for this run"
             echo "      --asan          Link runtime test binaries with AddressSanitizer"
+            echo "      --valgrind      Run runtime tests under valgrind"
             echo "      --failures-only Show only failing tests (default)"
             echo "  -h, --help          Show this help message"
             echo
@@ -1259,6 +1293,14 @@ fi
 
 if [ "$SANITIZER_MODE" = "address" ]; then
     echo "Sanitizer mode: address"
+fi
+
+if [ $VALGRIND_MODE -eq 1 ]; then
+    if ! command -v valgrind >/dev/null 2>&1; then
+        echo -e "${RED}Error: valgrind requested but not found in PATH${NC}"
+        exit 1
+    fi
+    echo "Runtime wrapper: valgrind"
 fi
 
 if [ "$SANITIZER_MODE" = "address" ] && [ $RUNTIME_LIB_IS_TEMP -eq 1 ] && [ -n "$RUNTIME_LIB" ]; then
