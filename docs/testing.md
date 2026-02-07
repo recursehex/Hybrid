@@ -25,6 +25,10 @@ The primary way to run tests is using the platform-specific test runner:
 # Run all tests with ARC lowering disabled
 ./run_tests.sh -a off
 
+# Link runtime test binaries with AddressSanitizer
+# (use with an ASan-built compiler binary)
+./run_tests.sh --asan arc
+
 # Run specific test or pattern
 ./run_tests.sh expr             # Runs expr.hy
 ./run_tests.sh array            # Runs all tests containing "array"
@@ -91,6 +95,31 @@ build\hybrid.exe < test\fail.hy 2>&1
 - The test harness prefers those archives for runtime linking. If they are missing, it falls back to on-the-fly runtime compilation so local workflows still work.
 - For non-ARC runtime tests, the harness links the lightweight stub runtime. If generated IR references ARC/smart-pointer helpers (`hybrid_retain`, `__hybrid_shared_control`, smart pointer shims) or any of `HYBRID_ARC_DEBUG`, `HYBRID_ARC_TRACE_RUNTIME`, `HYBRID_ARC_LEAK_DETECT`, or `HYBRID_ARC_VERIFY_RUNTIME` are set, it links the full ARC runtime archive instead.
 - Toggle ARC lowering with `./run_tests.sh -a on|off` or `// RUN_OPTS: --arc-enabled=false`; with ARC disabled the compiler omits retain/release insertion and ARC-specific diagnostics so fixtures can demonstrate the difference between ARC-on and ARC-off behavior.
+- Set `HYBRID_EXEC=<path/to/hybrid>` to run tests against a non-default compiler binary (for example an ASan build under `build-asan/`).
+- Pass `--asan` (or set `HYBRID_TEST_SANITIZER=address`) to link runtime test binaries with AddressSanitizer flags.
+
+## ARC ASan lane
+
+Use the helper script to configure an ASan build and run ARC suites against it:
+
+```bash
+# Defaults to running: arc/memory, arc/arc_off, and errors/arc
+./scripts/run_arc_asan.sh
+
+# Run a specific category or pattern
+./scripts/run_arc_asan.sh arc/memory
+```
+
+Manual setup is also available:
+
+```bash
+./build.sh --asan -d
+HYBRID_EXEC=./build/hybrid ./run_tests.sh --asan arc
+```
+
+Notes:
+- The script configures `build-asan/` with `-DHYBRID_ENABLE_ASAN=ON`.
+- It runs tests with `HYBRID_EXEC=./build-asan/hybrid` and `--asan` so ARC runtime paths are exercised with sanitizer instrumentation.
 
 ## Test Suite Features
 

@@ -99,13 +99,44 @@ FORCE_VERBOSE_FROM_ENV=0
 VERBOSE_FROM_ARGS=0
 ARC_RUNTIME_REQUIRED=0
 ARC_ENABLED_OVERRIDE=""
+SANITIZER_MODE=""
+SANITIZER_FLAGS=()
+HYBRID_EXEC_FROM_ENV="${HYBRID_EXEC_OVERRIDE:-${HYBRID_EXEC:-}}"
+
+if [[ -n "${HYBRID_TEST_SANITIZER+x}" ]]; then
+    value=$(printf "%s" "$HYBRID_TEST_SANITIZER" | tr -d '[:space:]')
+    lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        ""|address|asan)
+            SANITIZER_MODE="address"
+            ;;
+        0|false|off|none)
+            SANITIZER_MODE=""
+            ;;
+        *)
+            echo -e "${RED}Error: unsupported HYBRID_TEST_SANITIZER value '$HYBRID_TEST_SANITIZER' (use 'address' or 'off')${NC}"
+            exit 1
+            ;;
+    esac
+fi
+
+if [ "$SANITIZER_MODE" = "address" ]; then
+    SANITIZER_FLAGS=("-fsanitize=address" "-fno-omit-frame-pointer")
+fi
 
 echo -e "${BLUE}Hybrid Compiler Test Suite${NC}"
 echo "==============================="
 
 # Check for hybrid executable - try multiple locations
 HYBRID_EXEC=""
-if [ -f "./build/hybrid" ]; then
+HYBRID_EXEC_OVERRIDE="$HYBRID_EXEC_FROM_ENV"
+if [ -n "$HYBRID_EXEC_OVERRIDE" ]; then
+    if [ ! -x "$HYBRID_EXEC_OVERRIDE" ]; then
+        echo -e "${RED}Error: HYBRID_EXEC override is not executable: $HYBRID_EXEC_OVERRIDE${NC}"
+        exit 1
+    fi
+    HYBRID_EXEC="$HYBRID_EXEC_OVERRIDE"
+elif [ -f "./build/hybrid" ]; then
     HYBRID_EXEC="./build/hybrid"
 elif [ -f "./hybrid" ]; then
     HYBRID_EXEC="./hybrid"
@@ -182,7 +213,7 @@ elif command -v clang &> /dev/null; then
     RUNTIME_LIB=$(mktemp /tmp/hybrid_runtime.XXXXXX)
     mv "$RUNTIME_LIB" "${RUNTIME_LIB}.o"
     RUNTIME_LIB="${RUNTIME_LIB}.o"
-    if ! clang -c runtime/test_runtime_stub.c -o "$RUNTIME_LIB" 2>/dev/null; then
+    if ! clang "${SANITIZER_FLAGS[@]}" -c runtime/test_runtime_stub.c -o "$RUNTIME_LIB" 2>/dev/null; then
         RUNTIME_LIB=""
     else
         RUNTIME_LIB_IS_TEMP=1
@@ -222,7 +253,7 @@ ensure_arc_runtime_objects() {
     )
 
     for i in "${!runtime_sources[@]}"; do
-        if ! clang++ -c "${runtime_sources[$i]}" -Isrc -Iruntime/include -std=c++17 -o "${runtime_objects[$i]}" 2>/dev/null; then
+        if ! clang++ "${SANITIZER_FLAGS[@]}" -c "${runtime_sources[$i]}" -Isrc -Iruntime/include -std=c++17 -o "${runtime_objects[$i]}" 2>/dev/null; then
             rm -rf "$ARC_RUNTIME_DIR"
             ARC_RUNTIME_DIR=""
             return
@@ -574,17 +605,17 @@ run_test() {
                     if [ $needs_smart_ptr_runtime -eq 1 ]; then
                         ensure_arc_runtime_objects
                         if [ ${#ARC_RUNTIME_OBJS[@]} -gt 0 ]; then
-                            if clang++ "$runtime_ir_file" "${ARC_RUNTIME_OBJS[@]}" -o "$temp_bin" 2>/dev/null; then
+                            if clang++ "$runtime_ir_file" "${ARC_RUNTIME_OBJS[@]}" "${SANITIZER_FLAGS[@]}" -o "$temp_bin" 2>/dev/null; then
                                 clang_success=1
                             fi
                         else
                             # Fallback when precompiled runtime objects are unavailable.
-                            if clang++ "$runtime_ir_file" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                            if clang++ "${SANITIZER_FLAGS[@]}" "$runtime_ir_file" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
                                 clang_success=1
                             fi
                         fi
                     else
-                        if clang++ "$runtime_ir_file" "$RUNTIME_LIB" -o "$temp_bin" &> /dev/null; then
+                        if clang++ "$runtime_ir_file" "$RUNTIME_LIB" "${SANITIZER_FLAGS[@]}" -o "$temp_bin" &> /dev/null; then
                             clang_success=1
                         fi
                     fi
@@ -1161,6 +1192,11 @@ while [[ $# -gt 0 ]]; do
             esac
             shift 2
             ;;
+        --asan)
+            SANITIZER_MODE="address"
+            SANITIZER_FLAGS=("-fsanitize=address" "-fno-omit-frame-pointer")
+            shift
+            ;;
         --failures-only)
             FAILURES_ONLY=1
             shift
@@ -1173,6 +1209,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -f, --full          Show full output for each test"
             echo "  -j, --jobs N        Run up to N single-file tests in parallel"
             echo "  -a on|off           Toggle ARC lowering (--arc-enabled) for this run"
+            echo "      --asan          Link runtime test binaries with AddressSanitizer"
             echo "      --failures-only Show only failing tests (default)"
             echo "  -h, --help          Show this help message"
             echo
@@ -1218,6 +1255,16 @@ fi
 
 if [ -n "$ARC_ENABLED_OVERRIDE" ]; then
     EXTRA_COMPILER_ARGS+=("--arc-enabled=$ARC_ENABLED_OVERRIDE")
+fi
+
+if [ "$SANITIZER_MODE" = "address" ]; then
+    echo "Sanitizer mode: address"
+fi
+
+if [ "$SANITIZER_MODE" = "address" ] && [ $RUNTIME_LIB_IS_TEMP -eq 1 ] && [ -n "$RUNTIME_LIB" ]; then
+    if ! clang "${SANITIZER_FLAGS[@]}" -c runtime/test_runtime_stub.c -o "$RUNTIME_LIB" 2>/dev/null; then
+        echo -e "${YELLOW}Warning: failed to rebuild temporary stub runtime with ASan instrumentation${NC}"
+    fi
 fi
 
 if [ $JOBS -gt 1 ] && { [ $VERBOSE_MODE -eq 1 ] || [ $FAILURES_ONLY -eq 0 ]; }; then

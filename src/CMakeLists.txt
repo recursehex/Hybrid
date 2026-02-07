@@ -99,6 +99,26 @@ elseif(MSVC)
     )
 endif()
 
+if(HYBRID_ENABLE_ASAN)
+    if(MSVC)
+        message(FATAL_ERROR "HYBRID_ENABLE_ASAN is not supported with MSVC in this project")
+    endif()
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        message(FATAL_ERROR "HYBRID_ENABLE_ASAN requires Clang or GCC")
+    endif()
+
+    set(HYBRID_ASAN_FLAGS -fsanitize=address -fno-omit-frame-pointer)
+
+    target_compile_options(hybrid PRIVATE ${HYBRID_ASAN_FLAGS})
+    target_link_options(hybrid PRIVATE -fsanitize=address)
+
+    target_compile_options(hybrid_runtime_test PRIVATE ${HYBRID_ASAN_FLAGS})
+    target_link_options(hybrid_runtime_test PRIVATE -fsanitize=address)
+
+    target_compile_options(hybrid_test_stub PRIVATE ${HYBRID_ASAN_FLAGS})
+    target_link_options(hybrid_test_stub PRIVATE -fsanitize=address)
+endif()
+
 # Add current directory to include path
 target_include_directories(hybrid PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

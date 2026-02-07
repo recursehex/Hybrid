@@ -35,6 +35,7 @@ enable_testing()
 
 # Option to build tests
 option(BUILD_TESTS "Build test suite" ON)
+option(HYBRID_ENABLE_ASAN "Build Hybrid with AddressSanitizer instrumentation" OFF)
 
 if(BUILD_TESTS)
     # Add test target

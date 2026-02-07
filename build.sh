@@ -18,6 +18,7 @@ BUILD_DIR="build"
 CLEAN=0
 RUN_TESTS=0
 VERBOSE=0
+ENABLE_ASAN=0
 
 # Help function
 show_help() {
@@ -29,6 +30,7 @@ show_help() {
     echo "  -c, --clean       Clean build directory before building"
     echo "  -t, --test        Run tests after building"
     echo "  -v, --verbose     Enable verbose build output"
+    echo "      --asan        Enable AddressSanitizer instrumentation"
     echo "  -h, --help        Show this help message"
     echo ""
     echo "Examples:"
@@ -57,6 +59,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=1
             shift
             ;;
+        --asan)
+            ENABLE_ASAN=1
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -73,6 +79,9 @@ echo -e "${BLUE}Hybrid Compiler Build System${NC}"
 echo "=============================="
 echo "Build Type: $BUILD_TYPE"
 echo "Build Directory: $BUILD_DIR"
+if [ $ENABLE_ASAN -eq 1 ]; then
+    echo "AddressSanitizer: enabled"
+fi
 echo ""
 
 # Find LLVM toolchain roots
@@ -127,6 +136,10 @@ CMAKE_ARGS=(
     -DLLVM_DIR="$LLVM_DIR"
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 )
+
+if [ $ENABLE_ASAN -eq 1 ]; then
+    CMAKE_ARGS+=(-DHYBRID_ENABLE_ASAN=ON)
+fi
 
 if [ -n "$CLANG_BIN" ]; then
     CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$CLANG_BIN")
