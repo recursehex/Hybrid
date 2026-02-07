@@ -1,3 +1,15 @@
+// EXPECT_DIAGNOSTIC: Cannot implicitly convert 'byte' to 'int' in initializer for 'boolSum'; explicit cast required
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
+// EXPECT_DIAGNOSTIC: Unknown function referenced: takes_int
+// EXPECT_DIAGNOSTIC: Cannot implicitly convert 'long' to 'int' in initializer for 'narrowed'; explicit cast required
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
+// EXPECT_DIAGNOSTIC: Unknown variable name: implicitSource
+// EXPECT_DIAGNOSTIC: Unknown variable name: implicitSource
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
+// EXPECT_DIAGNOSTIC: Unknown variable name: unsignedAssign
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
+// EXPECT_DIAGNOSTIC: Cannot implicitly convert 'lchar' to 'char' in initializer for 'narrowChar'; explicit cast required
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
 // Type error regression tests: every declaration or expression in this file
 // must produce a compilation failure.
 

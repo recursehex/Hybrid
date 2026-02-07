@@ -1,3 +1,6 @@
+// EXPECT_DIAGNOSTIC: Class methods should use PascalCase names
+// EXPECT_DIAGNOSTIC: Instance method 'Counter.add' requires an instance receiver
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // EXPECT_OUTPUT: Instance method 'Counter.add' requires an instance receiver
 class Counter
 {

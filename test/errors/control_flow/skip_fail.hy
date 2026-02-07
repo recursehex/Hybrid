@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: 'skip' statement can only be used inside a loop
 // Test that should fail - skip statement outside of a loop
 int test_skip_fail()
 {

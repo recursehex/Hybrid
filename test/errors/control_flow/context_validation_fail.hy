@@ -1,3 +1,7 @@
+// EXPECT_DIAGNOSTIC: 'break' statement can only be used inside a loop
+// EXPECT_DIAGNOSTIC: Unexpected token while parsing an expression
+// EXPECT_DIAGNOSTIC: Unexpected token while parsing an expression
+// EXPECT_DIAGNOSTIC: Unexpected token while parsing an expression
 // Test loop context validation for break and skip statements
 // This file demonstrates that break/skip statements are validated at parse time
 

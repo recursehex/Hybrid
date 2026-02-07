@@ -1,3 +1,6 @@
+// EXPECT_DIAGNOSTIC: Cannot write to private member 'value' of class 'Counter'
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
+// EXPECT_DIAGNOSTIC: Constructor for class 'Fixed' must initialize member 'seed'
 class Counter
 {
     int value

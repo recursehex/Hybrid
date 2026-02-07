@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: The 'free' keyword requires a reference value
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 class Box
 {
     int value

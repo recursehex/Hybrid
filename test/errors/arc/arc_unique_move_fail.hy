@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Struct 'Gadget' must declare at least one constructor
 // unique<T> values should not be reused after a move assignment.
 
 struct Gadget

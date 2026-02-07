@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Method 'Holder.Fill' requires explicit type arguments
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // Expect error when invoking generic method without explicit type arguments
 
 class Holder<T>

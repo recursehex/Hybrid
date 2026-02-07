@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Class 'Invisible' does not implement interface member 'Drawable.Draw'
 interface Drawable
 {
     void Draw()

@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Pointer arithmetic requires an integer offset
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // Invalid pointer arithmetic scenarios
 
 unsafe void pointer_offset_float_fail()

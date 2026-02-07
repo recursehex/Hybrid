@@ -1,3 +1,13 @@
+// EXPECT_DIAGNOSTIC: Incompatible types in array literal: cannot mix int and bool
+// EXPECT_DIAGNOSTIC: Expected expression after '='
+// EXPECT_DIAGNOSTIC: Incompatible types in array literal: cannot mix string and char
+// EXPECT_DIAGNOSTIC: Expected expression after '='
+// EXPECT_DIAGNOSTIC: Incompatible types in array literal: cannot mix bool and string
+// EXPECT_DIAGNOSTIC: Expected expression after '='
+// EXPECT_DIAGNOSTIC: Incompatible types in array literal: cannot mix int and string
+// EXPECT_DIAGNOSTIC: Expected expression after '='
+// EXPECT_DIAGNOSTIC: Incompatible types in array literal: cannot mix char and int
+// EXPECT_DIAGNOSTIC: Expected expression after '='
 // Test array type compatibility errors - these should fail compilation
 
 // Test 1: Mixing incompatible types (bool and int)

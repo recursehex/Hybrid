@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Generic instantiation budget exceeded (limit 1)
+// EXPECT_DIAGNOSTIC: Unknown field type 'Box<string>' in struct 'NeedsString'
 // RUN_OPTS: --max-generic-instantiations 1
 
 class Box<T>

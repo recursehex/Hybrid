@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Cannot assign nullable value to non-nullable indexer on type 'NumberList'
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // EXPECT_OUTPUT: Cannot assign nullable value to non-nullable indexer on type 'NumberList'
 class NumberList
 {

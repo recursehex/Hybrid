@@ -368,6 +368,23 @@ run_test() {
         fi
     done < <(grep -E "^// EXPECT_OUTPUT:" "$test_file" || true)
 
+    local expected_compile_diagnostics=()
+    while IFS= read -r line; do
+        line=${line#"// EXPECT_DIAGNOSTIC:"}
+        line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        if [ -n "$line" ]; then
+            expected_compile_diagnostics+=("$line")
+        fi
+    done < <(grep -E "^// EXPECT_DIAGNOSTIC:" "$test_file" || true)
+
+    while IFS= read -r line; do
+        line=${line#"// EXPECT_ERROR:"}
+        line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        if [ -n "$line" ]; then
+            expected_compile_diagnostics+=("$line")
+        fi
+    done < <(grep -E "^// EXPECT_ERROR:" "$test_file" || true)
+
     local expected_runtime=()
     while IFS= read -r line; do
         line=${line#"// EXPECT_RUNTIME:"}
@@ -427,6 +444,13 @@ run_test() {
         compile_failed=1
     fi
 
+    local compile_diagnostics=()
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^Error\ at\ line ]] || [[ "$line" =~ ^Error: ]] || [[ "$line" =~ ^Warning\ at\ line ]]; then
+            compile_diagnostics+=("$line")
+        fi
+    done < <(printf "%s\n" "$output" | sed -e 's/Error at line /\nError at line /g' -e 's/Warning at line /\nWarning at line /g' -e 's/Error: /\nError: /g')
+
     local compiler_expectation_failed=0
     for expected in "${expected_output[@]}"; do
         if ! grep -F -q "$expected" <<< "$output"; then
@@ -434,6 +458,58 @@ run_test() {
             output="${output}"$'\n'"[test-expectation] missing: ${expected}"
         fi
     done
+
+    if [ "$expected_mode" = "fail" ] && [ "$expected_fail_kind" != "runtime" ]; then
+        local strict_diagnostics=("${expected_compile_diagnostics[@]}")
+        if [ ${#strict_diagnostics[@]} -eq 0 ]; then
+            compiler_expectation_failed=1
+            output="${output}"$'\n'"[test-expectation] missing compile diagnostic expectations for ${test_file}"
+        else
+            local strict_diag_mismatch=0
+            local -a strict_diag_matched=()
+            local -a unexpected_diagnostics=()
+            local -a missing_diagnostics=()
+
+            for _ in "${strict_diagnostics[@]}"; do
+                strict_diag_matched+=(0)
+            done
+
+            for actual_diag in "${compile_diagnostics[@]}"; do
+                local matched_current=0
+                for i in "${!strict_diagnostics[@]}"; do
+                    if [ "${strict_diag_matched[$i]}" -eq 1 ]; then
+                        continue
+                    fi
+                    if [[ "$actual_diag" == *"${strict_diagnostics[$i]}"* ]]; then
+                        strict_diag_matched[$i]=1
+                        matched_current=1
+                        break
+                    fi
+                done
+                if [ $matched_current -eq 0 ]; then
+                    strict_diag_mismatch=1
+                    unexpected_diagnostics+=("$actual_diag")
+                fi
+            done
+
+            for i in "${!strict_diagnostics[@]}"; do
+                if [ "${strict_diag_matched[$i]}" -eq 0 ]; then
+                    strict_diag_mismatch=1
+                    missing_diagnostics+=("${strict_diagnostics[$i]}")
+                fi
+            done
+
+            if [ $strict_diag_mismatch -eq 1 ]; then
+                compiler_expectation_failed=1
+                for missing_diag in "${missing_diagnostics[@]}"; do
+                    output="${output}"$'\n'"[diagnostic-expectation] missing: ${missing_diag}"
+                done
+                for unexpected_diag in "${unexpected_diagnostics[@]}"; do
+                    output="${output}"$'\n'"[diagnostic-expectation] unexpected: ${unexpected_diag}"
+                done
+            fi
+        fi
+    fi
 
     local runtime_exit_code=0
     local runtime_output=""

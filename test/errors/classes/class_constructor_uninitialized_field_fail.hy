@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Constructor for class 'Incomplete' must initialize member 'b'
 class Incomplete
 {
     int a

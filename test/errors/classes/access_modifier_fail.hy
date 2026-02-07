@@ -1,3 +1,7 @@
+// EXPECT_DIAGNOSTIC: Cannot increment or otherwise modify uninitialized member 'visitors' of class 'Widget'
+// EXPECT_DIAGNOSTIC: Constructor for class 'Widget' must initialize members 'exposure', 'privateData'
+// EXPECT_DIAGNOSTIC: Constructor for class 'Machine' must initialize member 'calls'
+// EXPECT_DIAGNOSTIC: Constructor for class 'ProtectedExample' must initialize member 'counter'
 class Widget
 {
     int privateData

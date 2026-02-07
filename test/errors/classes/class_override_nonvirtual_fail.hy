@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Method 'Value' of class 'Derived' cannot override non-virtual member 'Value' of class 'Base'
 class Base
 {
     Base() {}

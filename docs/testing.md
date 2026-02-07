@@ -46,6 +46,9 @@ run_tests.bat
 # Run tests with verbose output
 run_tests.bat -v
 
+# Run single-file tests in parallel (compact failures-only mode)
+run_tests.bat -j 4
+
 # Run specific test or pattern
 run_tests.bat expr          # Runs expr.hy
 run_tests.bat array         # Runs all tests containing "array"
@@ -170,6 +173,13 @@ You can override the default classification with inline annotations:
 - `// EXPECT_FAIL: compile|runtime|any` to require a specific failure kind (defaults to `compile` when omitted)
 - `// EXPECT_PASS` to force a test to be treated as passing even if the filename contains `fail`/`error`
 - `// EXPECT_EXIT: <code|nonzero|zero|abort>` to assert the runtime exit status when a program is executed
+- `// EXPECT_DIAGNOSTIC: <text>` (or `// EXPECT_ERROR: <text>`) to declare an expected compile diagnostic
+
+For compile-failure tests, diagnostic matching is strict:
+- Every expected diagnostic must appear.
+- Any additional compile diagnostic marks the test as failed.
+- There is no fallback source; compile-failure tests must declare diagnostics inline.
+- Prefer stable message fragments (for example, `Unknown variable name: x`) and avoid location suffixes like `(near ...)`.
 
 ### Output Format
 
@@ -309,6 +319,12 @@ int useUndefined()
 }
 ```
 
+For precise failure assertions, prefer explicit diagnostic expectations:
+
+```c
+// EXPECT_DIAGNOSTIC: Unknown variable name: x
+```
+
 If the failure should occur at runtime (for example, a non-zero `main` return),
 add an explicit expectation:
 
@@ -319,6 +335,9 @@ add an explicit expectation:
 
 If a file name contains `fail`/`error` for non-failure reasons (for example, ARC
 escape analysis fixtures), add `// EXPECT_PASS` to force a passing expectation.
+
+Compile-failure fixtures should always include explicit `EXPECT_DIAGNOSTIC` lines
+in the file itself so expectation updates travel with the test.
 
 ## Test Coverage
 

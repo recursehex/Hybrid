@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: 'base' may only be used inside instance methods
 class Root
 {
     Root() {}

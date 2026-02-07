@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: 'break' statement can only be used inside a loop
 // Test that should fail - break outside of loop
 
 int test_break_outside_loop()

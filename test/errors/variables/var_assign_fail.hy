@@ -1,3 +1,7 @@
+// EXPECT_DIAGNOSTIC: Variable 'ready' is already declared in this scope
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
+// EXPECT_DIAGNOSTIC: Variable 'seed' is already declared
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
 int seed = 10
 
 void varAssign()

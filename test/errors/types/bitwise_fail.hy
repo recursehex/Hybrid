@@ -1,3 +1,7 @@
+// EXPECT_DIAGNOSTIC: Bitwise AND requires integer operands
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
+// EXPECT_DIAGNOSTIC: No matching overload found for call to 'testFloatAnd'
+// EXPECT_DIAGNOSTIC: Unknown function referenced: testFloatShift
 // Test that bitwise operators fail with float operands
 
 // Test bitwise AND with floats

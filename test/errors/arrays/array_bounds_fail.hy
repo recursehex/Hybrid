@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Array index out of bounds
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // Test that array bounds checking works - this should abort
 extern void print(int x)
 

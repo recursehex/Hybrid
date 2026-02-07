@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Array index cannot be negative
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // Test that array bounds checking catches negative indices - this should abort
 extern void print(int x)
 

@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Value 'p' was manually released after free and cannot be used afterwards
 // use-after-free should be diagnosed at compile time
 
 class Payload

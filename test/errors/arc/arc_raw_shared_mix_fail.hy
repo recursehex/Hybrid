@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Struct 'Node' must declare at least one constructor
 // Mixing smart pointers and raw ARC-managed references should trigger diagnostics.
 
 struct Node

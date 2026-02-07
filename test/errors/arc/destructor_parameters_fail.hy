@@ -1,3 +1,9 @@
+// EXPECT_DIAGNOSTIC: Destructors cannot declare parameters
+// EXPECT_DIAGNOSTIC: Unknown variable name: code
+// EXPECT_DIAGNOSTIC: Unexpected token while parsing an expression
+// EXPECT_DIAGNOSTIC: Unexpected token while parsing an expression
+// EXPECT_DIAGNOSTIC: Unexpected token while parsing an expression
+// EXPECT_DIAGNOSTIC: Unexpected token while parsing an expression
 // destructors must not declare parameters
 
 class DestructorWithParams

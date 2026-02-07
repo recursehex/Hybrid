@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Unexpected type name in expression
 int main()
 {
     string base = "x"

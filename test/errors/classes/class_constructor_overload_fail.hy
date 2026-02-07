@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Too many arguments provided to call 'Box'
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
 class Box
 {
     int width

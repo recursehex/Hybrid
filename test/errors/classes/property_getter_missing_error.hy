@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Property 'value' does not define a getter
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // EXPECT_OUTPUT: Property 'value' does not define a getter
 class OnlySet
 {

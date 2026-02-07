@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Expected type after 'ref'
 // manual destructor on weak smart pointer should be rejected
 
 class Manual

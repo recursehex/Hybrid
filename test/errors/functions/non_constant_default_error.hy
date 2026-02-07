@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Default value for parameter 'value' must be a compile-time constant expression
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 // EXPECT_OUTPUT: Default value for parameter 'value' must be a compile-time constant expression
 int source()
 {

@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Expected integer format specifier in interpolated string expression
 // Error: format specifier must be an integer
 
 string badFormat()

@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Type 'NumberBox' cannot be converted to string without a this() formatter
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 class NumberBox
 {
     int value

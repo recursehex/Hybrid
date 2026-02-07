@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Override of 'BaseCounter.Describe' in 'DerivedCounter' must use the same default for parameter 'delta'
 // EXPECT_OUTPUT: Override of 'BaseCounter.Describe' in 'DerivedCounter' must use the same default for parameter 'delta'
 class BaseCounter
 {

@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Chained assignment is not allowed - variables must be assigned one at a time
 // Test that chained assignment is not allowed
 
 int main()

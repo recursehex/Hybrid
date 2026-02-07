@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: unique pointer 'donor' was moved and cannot be used until reassigned
 // Using a moved unique<T> before it is reassigned should still fail.
 
 struct Widget

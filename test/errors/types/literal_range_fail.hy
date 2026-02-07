@@ -1,3 +1,8 @@
+// EXPECT_DIAGNOSTIC: 256 exceeds byte range [0-255]
+// EXPECT_DIAGNOSTIC: 128 exceeds sbyte range [-128-127]
+// EXPECT_DIAGNOSTIC: 100000 exceeds short range [-32768-32767]
+// EXPECT_DIAGNOSTIC: 256 exceeds byte range [0-255]
+// EXPECT_DIAGNOSTIC: Failed to generate IR for variable declaration
 // Range checking for literal narrowing (assignments and casts).
 
 byte badByte = 256            // Error: 256 exceeds byte range [0-255]

@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Cannot implicitly convert 'long' to 'int' in assignment to field 'value'; explicit cast required
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 struct Holder
 {
     int value

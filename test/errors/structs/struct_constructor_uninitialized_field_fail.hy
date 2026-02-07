@@ -1,3 +1,4 @@
+// EXPECT_DIAGNOSTIC: Constructor for struct 'Incomplete' must initialize member 'height'
 struct Incomplete
 {
     int width

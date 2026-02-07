@@ -1,3 +1,5 @@
+// EXPECT_DIAGNOSTIC: Cannot access nullable type 'Person?' without null-safe operator
+// EXPECT_DIAGNOSTIC: Failed to generate IR for function
 struct Person
 {
     string? nickname
