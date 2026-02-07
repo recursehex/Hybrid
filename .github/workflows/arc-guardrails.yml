@@ -35,3 +35,24 @@ jobs:
 
       - name: Run ARC Valgrind Suites
         run: ./scripts/run_arc_valgrind.sh
+
+  arc-perf-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
+
+      - name: Run ARC benchmark smoke
+        run: ./scripts/arc_bench.sh --runs 3 --warn-threshold 8 --fail-threshold off
+
+      - name: Upload ARC benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc-bench-smoke
+          path: build/arc-bench/
+          if-no-files-found: error

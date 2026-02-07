@@ -142,6 +142,34 @@ Notes:
   - `--error-exitcode=101`
 - Leak-only fixtures remain valid under this mode because leak kinds are reported but not counted as hard errors.
 
+## ARC performance benchmark lane
+
+Use the benchmark driver to compare ARC-on vs ARC-off runtime test timing on dedicated ARC workloads:
+
+```bash
+# Build, run all ARC benchmarks 5x per mode, and write artifacts
+./scripts/arc_bench.sh
+
+# Run a subset with custom thresholds
+./scripts/arc_bench.sh --runs 7 --warn-threshold 6 --fail-threshold 12 object_churn
+```
+
+What it does:
+- Runs each benchmark in `test/bench/arc/*.hy` under both `-a on` and `-a off`.
+- Repeats each mode N times and records median elapsed time.
+- Writes machine-readable artifacts to `build/arc-bench/`:
+  - `arc_bench_raw_<timestamp>.csv`
+  - `arc_bench_summary_<timestamp>.csv`
+  - `arc_bench_<timestamp>.json`
+- Applies threshold policy:
+  - warn if ARC-on delta > `--warn-threshold` (default `8%`)
+  - fail if ARC-on delta > `--fail-threshold` (default `15%`, or `off` to disable)
+
+Notes:
+- Keep baselines architecture-specific (for example, Apple Silicon vs Linux x86_64).
+- Prefer running benchmarks on an idle machine and compare medians, not single runs.
+- CI runs a lightweight Linux smoke lane (`arc-perf-smoke`) and uploads `build/arc-bench/` artifacts for trend review.
+
 ## Test Suite Features
 
 ### Automatic Test Discovery
