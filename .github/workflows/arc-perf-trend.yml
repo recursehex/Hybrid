@@ -1,0 +1,65 @@
+name: ARC Perf Trend
+
+on:
+  schedule:
+    # Weekly run (Monday, 09:00 UTC) on the default branch.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: arc-perf-trend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  arc-perf-trend:
+    runs-on: ubuntu-latest
+    env:
+      ARC_BENCH_RUNS: "7"
+      ARC_BENCH_WARN_THRESHOLD: "8"
+      ARC_BENCH_FAIL_THRESHOLD: "off"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
+
+      - name: Run ARC benchmark trend lane
+        run: |
+          ./scripts/arc_bench.sh \
+            --runs "${ARC_BENCH_RUNS}" \
+            --warn-threshold "${ARC_BENCH_WARN_THRESHOLD}" \
+            --fail-threshold "${ARC_BENCH_FAIL_THRESHOLD}" \
+            --pass-timing
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          summary_file="$(ls -1t build/arc-bench/arc_bench_summary_*.csv 2>/dev/null | head -n1)"
+          if [ -z "${summary_file}" ]; then
+            echo "No summary CSV found in build/arc-bench" >&2
+            exit 1
+          fi
+
+          {
+            echo "## ARC Perf Trend"
+            echo
+            echo "Summary file: \`${summary_file}\`"
+            echo
+            echo "| Benchmark | ARC-on(s) | ARC-off(s) | Delta(%) | Status |"
+            echo "|---|---:|---:|---:|---|"
+            tail -n +2 "${summary_file}" | awk -F',' '{printf("| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5)}'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload ARC perf trend artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc-bench-trend-${{ github.run_id }}
+          path: |
+            build/arc-bench/arc_bench_summary_*.csv
+            build/arc-bench/arc_bench_pass_timing_*.csv
+          if-no-files-found: error
+          retention-days: 90
