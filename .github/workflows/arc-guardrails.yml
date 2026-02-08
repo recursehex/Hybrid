@@ -38,6 +38,10 @@ jobs:
 
   arc-perf-smoke:
     runs-on: ubuntu-latest
+    env:
+      ARC_BENCH_RUNS: "3"
+      ARC_BENCH_WARN_THRESHOLD: "8"
+      ARC_BENCH_FAIL_THRESHOLD: "12"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,11 +52,19 @@ jobs:
           sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
 
       - name: Run ARC benchmark smoke
-        run: ./scripts/arc_bench.sh --runs 3 --warn-threshold 8 --fail-threshold off --pass-timing
+        run: |
+          ./scripts/arc_bench.sh \
+            --runs "${ARC_BENCH_RUNS}" \
+            --warn-threshold "${ARC_BENCH_WARN_THRESHOLD}" \
+            --fail-threshold "${ARC_BENCH_FAIL_THRESHOLD}" \
+            --pass-timing
 
-      - name: Upload ARC benchmark artifacts
+      - name: Upload ARC benchmark trend artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: arc-bench-smoke
-          path: build/arc-bench/
+          name: arc-bench-trend
+          path: |
+            build/arc-bench/arc_bench_summary_*.csv
+            build/arc-bench/arc_bench_pass_timing_*.csv
           if-no-files-found: error
