@@ -142,9 +142,9 @@ Notes:
   - `--error-exitcode=101`
 - Leak-only fixtures remain valid under this mode because leak kinds are reported but not counted as hard errors.
 
-## ARC performance benchmark lane
+## Running ARC Benchmarks
 
-Use the benchmark driver to compare ARC-on vs ARC-off runtime test timing on dedicated ARC workloads:
+Use the benchmark driver to compare ARC-on vs ARC-off runtime timing on dedicated ARC workloads.
 
 ```bash
 # Build, run all ARC benchmarks 5x per mode, and write artifacts
@@ -173,7 +173,9 @@ What it does:
 Notes:
 - Keep baselines architecture-specific (for example, Apple Silicon vs Linux x86_64).
 - Prefer running benchmarks on an idle machine and compare medians, not single runs.
-- CI runs a lightweight Linux smoke lane (`arc-perf-smoke`) and uploads `build/arc-bench/` artifacts for trend review.
+- CI runs a lightweight Linux smoke lane (`arc-perf-smoke`) with `--warn-threshold 8 --fail-threshold 12` and uploads trend artifacts:
+  - `arc_bench_summary_<timestamp>.csv`
+  - `arc_bench_pass_timing_<timestamp>.csv`
 
 ## Test Suite Features
 
