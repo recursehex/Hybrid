@@ -176,6 +176,7 @@ Notes:
 - CI runs a lightweight Linux smoke lane (`arc-perf-smoke`) with `--warn-threshold 8 --fail-threshold 12` and uploads trend artifacts:
   - `arc_bench_summary_<timestamp>.csv`
   - `arc_bench_pass_timing_<timestamp>.csv`
+- CI also includes a scheduled trend lane (`ARC Perf Trend`, weekly + manual dispatch) that runs with `--runs 7 --fail-threshold off`, publishes a step summary table, and retains trend artifacts for 90 days.
 
 ## Test Suite Features
 
