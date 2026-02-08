@@ -11,6 +11,7 @@ FAIL_THRESHOLD=15
 DO_BUILD=1
 OUT_DIR="${ARC_BENCH_OUT_DIR:-build/arc-bench}"
 BENCH_FILTERS=()
+COLLECT_PASS_TIMING=0
 
 usage() {
     cat <<'EOF'
@@ -24,11 +25,13 @@ Options:
   --warn-threshold PCT     Warn when ARC-on delta exceeds this percent (default: 8)
   --fail-threshold PCT     Fail when ARC-on delta exceeds this percent (default: 15)
   --fail-threshold off     Disable fail threshold
+  --pass-timing            Capture compiler [pass-timing] stages into artifacts
   --no-build               Skip ./build.sh before benchmark runs
   -h, --help               Show this help text
 
 Examples:
   ./scripts/arc_bench.sh
+  ./scripts/arc_bench.sh --pass-timing
   ./scripts/arc_bench.sh --runs 7 --warn-threshold 6
   ./scripts/arc_bench.sh object_churn
 EOF
@@ -43,7 +46,12 @@ is_number() {
 }
 
 compare_gt() {
-    awk -v lhs="$1" -v rhs="$2" 'BEGIN { exit !(lhs > rhs) }'
+  awk -v lhs="$1" -v rhs="$2" 'BEGIN { exit !(lhs > rhs) }'
+}
+
+extract_stage_seconds() {
+    local stage="$1"
+    sed -n "s/.*\\[pass-timing\\] stage=${stage} seconds=\\([0-9.][0-9.]*\\).*/\\1/p" | tail -1
 }
 
 median_values() {
@@ -140,6 +148,10 @@ while [ $# -gt 0 ]; do
             DO_BUILD=0
             shift
             ;;
+        --pass-timing)
+            COLLECT_PASS_TIMING=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -154,6 +166,13 @@ done
 if [ $DO_BUILD -eq 1 ]; then
     echo "Building compiler for benchmarks..."
     ./build.sh
+fi
+
+HYBRID_EXEC_PATH="${HYBRID_EXEC:-./build/hybrid}"
+if [ ! -x "$HYBRID_EXEC_PATH" ]; then
+    echo "Error: compiler executable not found or not executable: $HYBRID_EXEC_PATH" >&2
+    echo "Hint: run ./build.sh or set HYBRID_EXEC to a built compiler path." >&2
+    exit 1
 fi
 
 BENCH_ROOT="test/bench/arc"
@@ -200,9 +219,13 @@ timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
 raw_csv="${OUT_DIR}/arc_bench_raw_${timestamp}.csv"
 summary_csv="${OUT_DIR}/arc_bench_summary_${timestamp}.csv"
 json_file="${OUT_DIR}/arc_bench_${timestamp}.json"
+pass_csv="${OUT_DIR}/arc_bench_pass_timing_${timestamp}.csv"
 
 echo "benchmark,mode,run,elapsed_seconds" > "$raw_csv"
-echo "benchmark,median_arc_on_seconds,median_arc_off_seconds,delta_percent,status" > "$summary_csv"
+echo "benchmark,median_arc_on_seconds,median_arc_off_seconds,delta_percent,status,compile_arc_on_total_seconds,compile_arc_off_total_seconds,compile_delta_percent" > "$summary_csv"
+if [ $COLLECT_PASS_TIMING -eq 1 ]; then
+    echo "benchmark,mode,stage,seconds" > "$pass_csv"
+fi
 
 BENCH_NAME_LIST=()
 BENCH_PATH_LIST=()
@@ -210,6 +233,9 @@ MEDIAN_ON_LIST=()
 MEDIAN_OFF_LIST=()
 DELTA_LIST=()
 STATUS_LIST=()
+COMPILE_ON_TOTAL_LIST=()
+COMPILE_OFF_TOTAL_LIST=()
+COMPILE_DELTA_LIST=()
 
 any_fail=0
 warnings=()
@@ -243,6 +269,52 @@ run_and_measure() {
     printf "%s" "$elapsed"
 }
 
+collect_pass_timing() {
+    local mode="$1"
+    local bench_path="$2"
+    local bench_name="$3"
+    local arc_enabled_value="true"
+    if [ "$mode" = "off" ]; then
+        arc_enabled_value="false"
+    fi
+
+    local temp_ir
+    temp_ir=$(mktemp /tmp/hybrid_arc_bench_pass.XXXXXX)
+    mv "$temp_ir" "${temp_ir}.ll"
+    temp_ir="${temp_ir}.ll"
+
+    local output=""
+    local status=0
+    set +e
+    output=$(HYBRID_PASS_TIMING=1 "$HYBRID_EXEC_PATH" --arc-enabled="$arc_enabled_value" --emit-llvm -o "$temp_ir" "$bench_path" 2>&1)
+    status=$?
+    set -e
+    rm -f "$temp_ir"
+
+    if [ $status -ne 0 ]; then
+        echo "$output"
+        echo "Error: pass-timing compile failed (mode=$mode, benchmark=$bench_path)" >&2
+        exit $status
+    fi
+
+    while IFS= read -r stage_line; do
+        [ -z "$stage_line" ] && continue
+        stage_name=${stage_line%%,*}
+        stage_seconds=${stage_line#*,}
+        echo "${bench_name},${mode},${stage_name},${stage_seconds}" >> "$pass_csv"
+    done < <(
+        printf "%s\n" "$output" \
+            | sed -n 's/.*\[pass-timing\] stage=\([^ ]*\) seconds=\([0-9.][0-9.]*\).*/\1,\2/p'
+    )
+
+    local total_seconds=""
+    total_seconds=$(printf "%s\n" "$output" | extract_stage_seconds "total")
+    if [ -z "$total_seconds" ]; then
+        total_seconds="0.000000"
+    fi
+    printf "%s" "$total_seconds"
+}
+
 echo "Running ARC benchmarks (${#BENCHES[@]} workloads, ${RUNS} runs/mode)..."
 
 for bench in "${BENCHES[@]}"; do
@@ -252,6 +324,13 @@ for bench in "${BENCHES[@]}"; do
 
     on_times=()
     off_times=()
+    compile_on_total=""
+    compile_off_total=""
+
+    if [ $COLLECT_PASS_TIMING -eq 1 ]; then
+        compile_on_total=$(collect_pass_timing "on" "$bench" "$bench_name")
+        compile_off_total=$(collect_pass_timing "off" "$bench" "$bench_name")
+    fi
 
     for run_index in $(seq 1 "$RUNS"); do
         on_elapsed=$(run_and_measure "on" "$bench" "$run_index")
@@ -285,14 +364,23 @@ for bench in "${BENCHES[@]}"; do
         warnings+=("${bench_name}: ARC-on delta ${delta_pct}%")
     fi
 
+    compile_delta=""
+    if [ $COLLECT_PASS_TIMING -eq 1 ]; then
+        compile_delta=$(awk -v on="$compile_on_total" -v off="$compile_off_total" \
+            'BEGIN { if (off == 0) { printf "0.00" } else { printf "%.2f", ((on - off) / off) * 100.0 } }')
+    fi
+
     BENCH_NAME_LIST+=("$bench_name")
     BENCH_PATH_LIST+=("$bench")
     MEDIAN_ON_LIST+=("$on_median")
     MEDIAN_OFF_LIST+=("$off_median")
     DELTA_LIST+=("$delta_pct")
     STATUS_LIST+=("$status")
+    COMPILE_ON_TOTAL_LIST+=("$compile_on_total")
+    COMPILE_OFF_TOTAL_LIST+=("$compile_off_total")
+    COMPILE_DELTA_LIST+=("$compile_delta")
 
-    echo "${bench_name},${on_median},${off_median},${delta_pct},${status}" >> "$summary_csv"
+    echo "${bench_name},${on_median},${off_median},${delta_pct},${status},${compile_on_total},${compile_off_total},${compile_delta}" >> "$summary_csv"
 done
 
 host_os=$(uname -s)
@@ -337,6 +425,15 @@ git_rev=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
         echo "      \"median_arc_on_seconds\": ${MEDIAN_ON_LIST[$i]},"
         echo "      \"median_arc_off_seconds\": ${MEDIAN_OFF_LIST[$i]},"
         echo "      \"delta_percent\": ${DELTA_LIST[$i]},"
+        if [ -n "${COMPILE_ON_TOTAL_LIST[$i]}" ]; then
+            echo "      \"compile_arc_on_total_seconds\": ${COMPILE_ON_TOTAL_LIST[$i]},"
+            echo "      \"compile_arc_off_total_seconds\": ${COMPILE_OFF_TOTAL_LIST[$i]},"
+            echo "      \"compile_delta_percent\": ${COMPILE_DELTA_LIST[$i]},"
+        else
+            echo "      \"compile_arc_on_total_seconds\": null,"
+            echo "      \"compile_arc_off_total_seconds\": null,"
+            echo "      \"compile_delta_percent\": null,"
+        fi
         echo "      \"status\": \"$(json_escape "${STATUS_LIST[$i]}")\""
         echo -n "    }"
     done
@@ -344,7 +441,12 @@ git_rev=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     echo "  ],"
     echo "  \"artifacts\": {"
     echo "    \"raw_csv\": \"$(json_escape "$raw_csv")\","
-    echo "    \"summary_csv\": \"$(json_escape "$summary_csv")\""
+    echo "    \"summary_csv\": \"$(json_escape "$summary_csv")\","
+    if [ $COLLECT_PASS_TIMING -eq 1 ]; then
+        echo "    \"pass_timing_csv\": \"$(json_escape "$pass_csv")\""
+    else
+        echo "    \"pass_timing_csv\": null"
+    fi
     echo "  }"
     echo "}"
 } > "$json_file"
@@ -366,6 +468,9 @@ echo "Artifacts:"
 echo "  Raw runs:    $raw_csv"
 echo "  Summary CSV: $summary_csv"
 echo "  Summary JSON:$json_file"
+if [ $COLLECT_PASS_TIMING -eq 1 ]; then
+    echo "  Pass timing: $pass_csv"
+fi
 
 if [ ${#warnings[@]} -gt 0 ]; then
     echo

@@ -48,7 +48,7 @@ jobs:
           sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
 
       - name: Run ARC benchmark smoke
-        run: ./scripts/arc_bench.sh --runs 3 --warn-threshold 8 --fail-threshold off
+        run: ./scripts/arc_bench.sh --runs 3 --warn-threshold 8 --fail-threshold off --pass-timing
 
       - name: Upload ARC benchmark artifacts
         uses: actions/upload-artifact@v4

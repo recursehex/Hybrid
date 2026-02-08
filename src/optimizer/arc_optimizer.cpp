@@ -49,6 +49,11 @@ bool isHybridAutorelease(const llvm::CallBase &call) {
   return false;
 }
 
+bool isHybridArcRuntimeName(llvm::StringRef name) {
+  return name == "hybrid_retain" || name == "hybrid_release" ||
+         name == "hybrid_autorelease";
+}
+
 bool usedOnlyByReleaseChain(llvm::Value *value, llvm::CallBase *release) {
   llvm::SmallPtrSet<llvm::Value *, 8> visited;
   llvm::SmallVector<llvm::Value *, 8> worklist;
@@ -216,6 +221,23 @@ void collectArcRetainReleaseCounts(
       }
     }
   }
+}
+
+bool moduleHasARCRuntimeCalls(const llvm::Module &module) {
+  for (const llvm::Function &func : module) {
+    if (func.isDeclaration())
+      continue;
+    for (const llvm::Instruction &inst : llvm::instructions(func)) {
+      const auto *call = dyn_cast<llvm::CallBase>(&inst);
+      if (!call)
+        continue;
+      if (const llvm::Function *called = resolveCalledFunction(*call)) {
+        if (isHybridArcRuntimeName(called->getName()))
+          return true;
+      }
+    }
+  }
+  return false;
 }
 
 bool runARCOptimizationPass(llvm::Module &module) {

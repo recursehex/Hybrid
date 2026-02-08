@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -124,6 +125,7 @@ void printUsage() {
   fprintf(stderr, "  --arc-leak-detect  Track live ARC objects and dump leaks on exit\n");
   fprintf(stderr, "  --arc-verify-runtime\n");
   fprintf(stderr, "                     Enable runtime ARC header/descriptor verification\n");
+  fprintf(stderr, "  --pass-timing      Emit compiler stage timing summary to stderr\n");
 }
 
 bool shouldEnableGenericsMetrics() {
@@ -200,6 +202,53 @@ bool parseBoolOption(const std::string &text, bool &out) {
     return true;
   }
   return false;
+}
+
+bool envBoolOptionEnabled(const char *name) {
+  const char *env = std::getenv(name);
+  if (!env)
+    return false;
+  while (std::isspace(static_cast<unsigned char>(*env)))
+    ++env;
+  if (*env == '\0')
+    return true;
+
+  bool value = false;
+  if (parseBoolOption(env, value))
+    return value;
+  return true;
+}
+
+struct DriverPassTiming {
+  double sourceLoadSeconds = 0.0;
+  double frontendSeconds = 0.0;
+  double finalizeSeconds = 0.0;
+  double arcPrescanSeconds = 0.0;
+  double arcTracePreSeconds = 0.0;
+  double arcEscapeSeconds = 0.0;
+  double arcOptimizerSeconds = 0.0;
+  double arcTracePostSeconds = 0.0;
+  double emitSeconds = 0.0;
+  double totalSeconds = 0.0;
+  std::size_t filesCompiled = 0;
+};
+
+void emitPassTimingSummary(const DriverPassTiming &timing) {
+  auto emitStage = [](const char *stage, double seconds) {
+    fprintf(stderr, "[pass-timing] stage=%s seconds=%.6f\n", stage, seconds);
+  };
+
+  fprintf(stderr, "[pass-timing] files=%zu\n", timing.filesCompiled);
+  emitStage("source_load", timing.sourceLoadSeconds);
+  emitStage("frontend_parse", timing.frontendSeconds);
+  emitStage("finalize", timing.finalizeSeconds);
+  emitStage("arc_prescan", timing.arcPrescanSeconds);
+  emitStage("arc_trace_pre", timing.arcTracePreSeconds);
+  emitStage("arc_escape", timing.arcEscapeSeconds);
+  emitStage("arc_optimizer", timing.arcOptimizerSeconds);
+  emitStage("arc_trace_post", timing.arcTracePostSeconds);
+  emitStage("emit", timing.emitSeconds);
+  emitStage("total", timing.totalSeconds);
 }
 
 void emitGenericsMetricsSummary(const CodegenContext &context) {
@@ -291,6 +340,14 @@ int main(int argc, char **argv) {
   bool enableArcDebugUmbrella = false;
   bool enableArcPoolDebug = false;
   bool arcEnabledFlag = true;
+  bool enablePassTiming = envBoolOptionEnabled("HYBRID_PASS_TIMING");
+
+  using DriverClock = std::chrono::steady_clock;
+  auto driverStartedAt = DriverClock::now();
+  auto elapsedSince = [](DriverClock::time_point start) {
+    return std::chrono::duration<double>(DriverClock::now() - start).count();
+  };
+  DriverPassTiming passTiming;
 
   session.codegen().genericsMetrics.enabled = shouldEnableGenericsMetrics();
 
@@ -425,6 +482,8 @@ int main(int argc, char **argv) {
       enableArcLeakDetect = true;
     } else if (arg == "--arc-verify-runtime") {
       enableArcVerifyRuntime = true;
+    } else if (arg == "--pass-timing") {
+      enablePassTiming = true;
     } else if (arg == "-o") {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: -o requires an output path\n");
@@ -478,26 +537,61 @@ int main(int argc, char **argv) {
       return;
     const bool arcDebug = std::getenv("HYBRID_ARC_OPT_DEBUG") != nullptr;
     const bool escapeDebug = enableArcEscapeDebug || arcDebug;
-    if (codegenCtx.arcTrace.traceEnabled)
+    const bool shouldRunArcPasses =
+        codegenCtx.arcTrace.optimizerEnabled || escapeDebug;
+
+    if (codegenCtx.arcTrace.traceEnabled) {
+      DriverClock::time_point stageStart{};
+      if (enablePassTiming)
+        stageStart = DriverClock::now();
       collectArcRetainReleaseCounts(
           *module, codegenCtx.arcTrace.preOptimizationCounts);
+      if (enablePassTiming)
+        passTiming.arcTracePreSeconds += elapsedSince(stageStart);
+    }
+
+    if (shouldRunArcPasses) {
+      DriverClock::time_point stageStart{};
+      if (enablePassTiming)
+        stageStart = DriverClock::now();
+      const bool hasArcCalls = moduleHasARCRuntimeCalls(*module);
+      if (enablePassTiming)
+        passTiming.arcPrescanSeconds += elapsedSince(stageStart);
+      if (!hasArcCalls) {
+        if (arcDebug) {
+          fprintf(stderr,
+                  "[arc-opt] pre-scan: no ARC runtime calls found; skipping escape/optimizer passes\n");
+        }
+        return;
+      }
+    }
 
     bool arcPassesRan = false;
-    if (codegenCtx.arcTrace.optimizerEnabled || escapeDebug) {
+    if (shouldRunArcPasses) {
+      DriverClock::time_point stageStart{};
+      if (enablePassTiming)
+        stageStart = DriverClock::now();
       if (arcDebug)
         fprintf(stderr, "[arc-opt] begin escape analysis\n");
       ArcEscapeSummary escapeSummary{};
       bool escapeChanged =
           runARCEscapeAnalysis(*module, escapeDebug, &escapeSummary);
+      if (enablePassTiming)
+        passTiming.arcEscapeSeconds += elapsedSince(stageStart);
       arcPassesRan = arcPassesRan || escapeChanged || escapeDebug;
       if (arcDebug && escapeSummary.removedCalls == 0 && !escapeChanged)
         fprintf(stderr, "[arc-opt] escape analysis made no changes\n");
     }
 
     if (codegenCtx.arcTrace.optimizerEnabled) {
+      DriverClock::time_point stageStart{};
+      if (enablePassTiming)
+        stageStart = DriverClock::now();
       if (arcDebug)
         fprintf(stderr, "[arc-opt] begin optimization pass\n");
       runARCOptimizationPass(*module);
+      if (enablePassTiming)
+        passTiming.arcOptimizerSeconds += elapsedSince(stageStart);
       arcPassesRan = true;
       if (arcDebug) {
         if (llvm::verifyModule(*module, &llvm::errs()))
@@ -509,10 +603,15 @@ int main(int argc, char **argv) {
     }
 
     if (arcPassesRan && codegenCtx.arcTrace.traceEnabled) {
+      DriverClock::time_point stageStart{};
+      if (enablePassTiming)
+        stageStart = DriverClock::now();
       if (arcDebug)
         fprintf(stderr, "[arc-opt] collecting post-optimization counts\n");
       collectArcRetainReleaseCounts(
           *module, codegenCtx.arcTrace.postOptimizationCounts);
+      if (enablePassTiming)
+        passTiming.arcTracePostSeconds += elapsedSince(stageStart);
     }
     codegenCtx.arcTrace.optimizerRan =
         codegenCtx.arcTrace.optimizerRan || arcPassesRan;
@@ -537,17 +636,29 @@ int main(int argc, char **argv) {
       std::string source;
       if (std::getenv("HYBRID_ARC_OPT_DEBUG"))
         fprintf(stderr, "[arc-opt] compiling %s\n", sourceFiles[idx].c_str());
+      DriverClock::time_point loadStart{};
+      if (enablePassTiming)
+        loadStart = DriverClock::now();
       if (!loadSourceFile(sourceFiles[idx].c_str(), source)) {
         fprintf(stderr, "Error: Failed to open source file '%s'\n", sourceFiles[idx].c_str());
         hadFailure = true;
         break;
       }
+      if (enablePassTiming)
+        passTiming.sourceLoadSeconds += elapsedSince(loadStart);
 
+      DriverClock::time_point frontendStart{};
+      if (enablePassTiming)
+        frontendStart = DriverClock::now();
       session.beginUnit(idx > 0);
       currentLexer().setInputBuffer(source);
 
       getNextToken();
       MainLoop();
+      if (enablePassTiming) {
+        passTiming.frontendSeconds += elapsedSince(frontendStart);
+        ++passTiming.filesCompiled;
+      }
 
       if (currentParser().hadError) {
         hadFailure = true;
@@ -556,7 +667,12 @@ int main(int argc, char **argv) {
     }
 
     if (!hadFailure) {
+      DriverClock::time_point finalizeStart{};
+      if (enablePassTiming)
+        finalizeStart = DriverClock::now();
       FinalizeTopLevelExecution();
+      if (enablePassTiming)
+        passTiming.finalizeSeconds += elapsedSince(finalizeStart);
       if (currentParser().hadError) {
         hadFailure = true;
       } else {
@@ -662,6 +778,9 @@ int main(int argc, char **argv) {
           return emitLLVM || path == "-" || endsWith(path, ".ll") || endsWith(path, ".bc");
         };
 
+        DriverClock::time_point emitStart{};
+        if (enablePassTiming)
+          emitStart = DriverClock::now();
         if (shouldEmitIR(targetOutput)) {
           if (targetOutput == "-") {
             writeModuleIR(llvm::outs());
@@ -760,6 +879,8 @@ int main(int argc, char **argv) {
             llvm::sys::fs::remove(tempPath);
           }
         }
+        if (enablePassTiming)
+          passTiming.emitSeconds += elapsedSince(emitStart);
       }
 
       if (hadFailure)
@@ -775,16 +896,37 @@ int main(int argc, char **argv) {
     if (interactiveInput)
       fprintf(stderr, "ready> ");
     getNextToken();
+    DriverClock::time_point frontendStart{};
+    if (enablePassTiming)
+      frontendStart = DriverClock::now();
     MainLoop();
+    if (enablePassTiming) {
+      passTiming.frontendSeconds += elapsedSince(frontendStart);
+      passTiming.filesCompiled = std::max<std::size_t>(passTiming.filesCompiled, 1);
+    }
 
     if (!currentParser().hadError) {
+      DriverClock::time_point finalizeStart{};
+      if (enablePassTiming)
+        finalizeStart = DriverClock::now();
       FinalizeTopLevelExecution();
+      if (enablePassTiming)
+        passTiming.finalizeSeconds += elapsedSince(finalizeStart);
       runArcPasses(getModule());
+      DriverClock::time_point emitStart{};
+      if (enablePassTiming)
+        emitStart = DriverClock::now();
       fprintf(stderr, "\n=== Final Generated LLVM IR ===\n");
       getModule()->print(llvm::errs(), nullptr);
+      if (enablePassTiming)
+        passTiming.emitSeconds += elapsedSince(emitStart);
     }
   }
 
+  if (enablePassTiming) {
+    passTiming.totalSeconds = elapsedSince(driverStartedAt);
+    emitPassTimingSummary(passTiming);
+  }
   emitGenericsMetricsSummary(session.codegen());
   emitArcTraceSummary(session.codegen());
   popCompilerSession();

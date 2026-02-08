@@ -150,6 +150,9 @@ Use the benchmark driver to compare ARC-on vs ARC-off runtime test timing on ded
 # Build, run all ARC benchmarks 5x per mode, and write artifacts
 ./scripts/arc_bench.sh
 
+# Include compiler stage pass timing capture
+./scripts/arc_bench.sh --pass-timing
+
 # Run a subset with custom thresholds
 ./scripts/arc_bench.sh --runs 7 --warn-threshold 6 --fail-threshold 12 object_churn
 ```
@@ -161,6 +164,8 @@ What it does:
   - `arc_bench_raw_<timestamp>.csv`
   - `arc_bench_summary_<timestamp>.csv`
   - `arc_bench_<timestamp>.json`
+- Optional (`--pass-timing`): captures compiler stage timings from `--pass-timing` / `HYBRID_PASS_TIMING=1` into:
+  - `arc_bench_pass_timing_<timestamp>.csv`
 - Applies threshold policy:
   - warn if ARC-on delta > `--warn-threshold` (default `8%`)
   - fail if ARC-on delta > `--fail-threshold` (default `15%`, or `off` to disable)
