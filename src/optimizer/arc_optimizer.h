@@ -19,6 +19,11 @@ void collectArcRetainReleaseCounts(
     const llvm::Module &module,
     std::map<std::string, ArcRetainCounts> &out);
 
+/// Return true when the module contains at least one ARC runtime call
+/// (`hybrid_retain`, `hybrid_release`, or `hybrid_autorelease`) in a defined
+/// function body.
+bool moduleHasARCRuntimeCalls(const llvm::Module &module);
+
 /// Run ARC-specific peephole optimizations over the module. Returns true when
 /// any function changed.
 bool runARCOptimizationPass(llvm::Module &module);

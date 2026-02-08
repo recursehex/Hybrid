@@ -7,6 +7,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -66,6 +67,39 @@ bool isHybridAutorelease(const llvm::CallBase &call) {
 bool isArcRuntimeCall(const llvm::CallBase &call) {
   return isHybridRetain(call) || isHybridRelease(call) ||
          isHybridAutorelease(call);
+}
+
+bool functionHasArcRuntimeCalls(const llvm::Function &fn) {
+  for (const llvm::Instruction &inst : llvm::instructions(fn)) {
+    const auto *call = dyn_cast<llvm::CallBase>(&inst);
+    if (call && isArcRuntimeCall(*call))
+      return true;
+  }
+  return false;
+}
+
+struct ArcFunctionFacts {
+  llvm::DenseMap<const llvm::BasicBlock *,
+                 llvm::SmallVector<llvm::CallBase *, 4>>
+      arcCallsByBlock;
+  unsigned arcCallCount = 0;
+};
+
+ArcFunctionFacts collectArcFunctionFacts(llvm::Function &fn) {
+  ArcFunctionFacts facts;
+  for (llvm::BasicBlock &bb : fn) {
+    llvm::SmallVector<llvm::CallBase *, 4> blockCalls;
+    for (llvm::Instruction &inst : bb) {
+      auto *call = dyn_cast<llvm::CallBase>(&inst);
+      if (!call || !isArcRuntimeCall(*call))
+        continue;
+      blockCalls.push_back(call);
+      ++facts.arcCallCount;
+    }
+    if (!blockCalls.empty())
+      facts.arcCallsByBlock[&bb] = std::move(blockCalls);
+  }
+  return facts;
 }
 
 bool isLifetimeIntrinsic(const llvm::Function *fn) {
@@ -273,14 +307,41 @@ bool valueEscapesStack(const llvm::Value *root) {
   return false;
 }
 
-bool derivesFromAnyRoot(const llvm::Value *value,
-                        const llvm::SmallPtrSetImpl<const llvm::Value *>
-                            &stackRoots) {
+struct RootDeriveCache {
+  const llvm::Value *root = nullptr;
   llvm::DenseMap<const llvm::Value *, DeriveState> cache;
-  for (const llvm::Value *root : stackRoots) {
-    if (isDerivedFromRoot(value, root, cache))
-      return true;
+};
+
+llvm::DenseMap<const llvm::Value *, DeriveState> &
+deriveCacheForRoot(const llvm::Value *root,
+                   llvm::SmallVectorImpl<RootDeriveCache> &rootCaches) {
+  for (RootDeriveCache &entry : rootCaches) {
+    if (entry.root == root)
+      return entry.cache;
   }
+  RootDeriveCache newEntry;
+  newEntry.root = root;
+  rootCaches.push_back(std::move(newEntry));
+  return rootCaches.back().cache;
+}
+
+bool derivesFromAnyRoot(
+    const llvm::Value *value,
+    const llvm::SmallPtrSetImpl<const llvm::Value *> &stackRoots,
+    llvm::DenseMap<const llvm::Value *, bool> &anyRootCache,
+    llvm::SmallVectorImpl<RootDeriveCache> &rootCaches) {
+  auto it = anyRootCache.find(value);
+  if (it != anyRootCache.end())
+    return it->second;
+
+  for (const llvm::Value *root : stackRoots) {
+    auto &cache = deriveCacheForRoot(root, rootCaches);
+    if (isDerivedFromRoot(value, root, cache)) {
+      anyRootCache[value] = true;
+      return true;
+    }
+  }
+  anyRootCache[value] = false;
   return false;
 }
 
@@ -305,7 +366,19 @@ bool runARCEscapeAnalysis(llvm::Module &module, bool debugLogging,
     if (fn.isDeclaration())
       continue;
 
+    if (!functionHasArcRuntimeCalls(fn)) {
+      if (debugLogging)
+        logSummary(fn, 0, 0, false);
+      continue;
+    }
+
     promoteAllocas(fn);
+    ArcFunctionFacts arcFacts = collectArcFunctionFacts(fn);
+    if (arcFacts.arcCallCount == 0) {
+      if (debugLogging)
+        logSummary(fn, 0, 0, false);
+      continue;
+    }
 
     llvm::SmallPtrSet<const llvm::Value *, 8> stackRoots;
     for (llvm::Instruction &inst : llvm::instructions(fn)) {
@@ -328,17 +401,18 @@ bool runARCEscapeAnalysis(llvm::Module &module, bool debugLogging,
     }
 
     unsigned removedCalls = 0;
-    for (auto it = fn.begin(), end = fn.end(); it != end; ++it) {
-      for (auto instIt = it->begin(); instIt != it->end();) {
-        llvm::Instruction *inst = &*instIt++;
-        auto *call = dyn_cast<llvm::CallBase>(inst);
-        if (!call)
+    llvm::DenseMap<const llvm::Value *, bool> anyRootCache;
+    llvm::SmallVector<RootDeriveCache, 8> rootCaches;
+    rootCaches.reserve(stackRoots.size());
+    for (llvm::BasicBlock &bb : fn) {
+      auto blockIt = arcFacts.arcCallsByBlock.find(&bb);
+      if (blockIt == arcFacts.arcCallsByBlock.end())
+        continue;
+      for (llvm::CallBase *call : blockIt->second) {
+        if (!call || !call->getParent())
           continue;
-        if (!isArcRuntimeCall(*call))
-          continue;
-
         const llvm::Value *arg = call->getArgOperand(0)->stripPointerCasts();
-        if (!derivesFromAnyRoot(arg, stackRoots))
+        if (!derivesFromAnyRoot(arg, stackRoots, anyRootCache, rootCaches))
           continue;
 
         call->eraseFromParent();

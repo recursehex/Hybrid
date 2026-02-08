@@ -41,6 +41,11 @@ free box
 - When ARC is disabled the compiler still accepts ARC-capable types, but retain/release/autorelease insertion and ARC diagnostics are skipped. Smart pointer helpers stay available and compile to type-correct stubs (`arcUseCount()` returns `0`, `weak.lock()` yields an empty handle).
 - The test runner forwards the flag via `./run_tests.sh -a on|off`, or individual tests can add `// RUN_OPTS: --arc-enabled=false` to opt out of ARC for a single fixture.
 
+### ARC-on/off performance comparisons
+- Use `./scripts/arc_bench.sh` to benchmark ARC workloads under both `--arc-enabled=true` and `--arc-enabled=false`.
+- The script writes CSV/JSON artifacts under `build/arc-bench/` and reports median timing deltas with configurable warn/fail thresholds.
+- ARC-off runs are for comparative profiling only; ARC-off can intentionally skip ownership enforcement and may leak by design in stress fixtures.
+
 ## Valid targets
 - Classes and structs (ARC-managed reference types).
 - Smart pointer wrappers when the target type is `unique<T>`, `shared<T>`, or `weak<T>`; arguments are forwarded to the payload constructor and then wrapped.

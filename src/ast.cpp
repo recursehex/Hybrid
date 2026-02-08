@@ -15588,6 +15588,9 @@ llvm::Value *BinaryExprAST::codegen() {
                                                  member.getMemberName(),
                                                  nullptr))
                     return nullptr;
+                  noteMemberAssignment(fieldInfo.structName,
+                                       member.getMemberName(),
+                                       fieldInfo.isStatic);
                   setTypeName("void");
                   return llvm::UndefValue::get(
                       llvm::Type::getVoidTy(*TheContext));
