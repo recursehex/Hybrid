@@ -4,6 +4,9 @@
 #include "compiler_session.h"
 #include "lexer.h"
 #include "parser.h"
+#include <string>
+#include <string_view>
+#include <vector>
 
 #define CurTok (currentParser().curTok)
 #define BinopPrecedence (currentParser().binopPrecedence)
@@ -62,5 +65,46 @@ std::unique_ptr<T> withLocation(std::unique_ptr<T> expr, SourceLocation loc) {
     expr->setSourceLocation(loc);
   return expr;
 }
+
+class TokenReplayScope {
+public:
+  explicit TokenReplayScope(bool enabled);
+
+  TokenReplayScope(const TokenReplayScope &) = delete;
+  TokenReplayScope &operator=(const TokenReplayScope &) = delete;
+
+  ~TokenReplayScope();
+
+  void rollback();
+  void commit();
+
+private:
+  bool active = false;
+  int originalToken = tok_eof;
+  SourceLocation originalLocation{};
+  int originalPreviousToken = 0;
+  SourceLocation originalPreviousLocation{};
+  std::string originalIdentifier;
+  std::string originalStringLiteral;
+  NumericLiteral originalNumericLiteral;
+  char originalCharLiteral = 0;
+  std::vector<ParserContext::PendingToken> capturedTokens;
+};
+
+void SkipNewlines();
+bool IsBuiltInType();
+bool IsValidType();
+bool IsActiveStructName(const std::string &name);
+bool IsActiveClassName(const std::string &name);
+bool AppendTypeSuffix(std::string &typeName, bool &pointerSeen);
+bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
+                                      bool allowDisambiguation = false);
+bool ParseGenericParameterList(std::vector<std::string> &parameters);
+bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef = false);
+std::string ParseCompleteType();
+TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
+void maybeWarnGenericArity(const std::vector<std::string> &params,
+                           const std::string &ownerName,
+                           std::string_view context);
 
 #endif // HYBRID_PARSER_INTERNAL_H

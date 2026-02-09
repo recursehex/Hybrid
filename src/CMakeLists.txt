@@ -4,6 +4,7 @@ set(HYBRID_SOURCES
     lexer.cpp
     parser.cpp
     parser/parser_core.cpp
+    parser/parser_types.cpp
     ast/ast_context.cpp
     ast/ast_types.cpp
     ast/ast_arc.cpp
