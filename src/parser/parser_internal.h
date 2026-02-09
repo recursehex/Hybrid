@@ -119,6 +119,9 @@ TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
 void maybeWarnGenericArity(const std::vector<std::string> &params,
                            const std::string &ownerName,
                            std::string_view context);
+bool ValidateParameterDefaults(const std::vector<Parameter> &args);
+bool ConvertParenInitializerToConstructor(std::unique_ptr<ExprAST> &initializer,
+                                          const TypeInfo &declInfo);
 bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &args,
                        std::vector<std::string> &argNames,
                        std::vector<SourceLocation> &argNameLocations,

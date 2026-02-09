@@ -8,6 +8,8 @@ set(HYBRID_SOURCES
     parser/parser_expr_primary.cpp
     parser/parser_expr_postfix.cpp
     parser/parser_expr_binop.cpp
+    parser/parser_decls.cpp
+    parser/parser_statements.cpp
     ast/ast_context.cpp
     ast/ast_types.cpp
     ast/ast_arc.cpp
