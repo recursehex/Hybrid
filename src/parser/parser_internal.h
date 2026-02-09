@@ -59,6 +59,19 @@ private:
   bool active = true;
 };
 
+class ScopedTypeCheckContext {
+  ParserContext &parser;
+  bool previous = false;
+
+public:
+  explicit ScopedTypeCheckContext(bool enable)
+      : parser(currentParser()), previous(parser.allowTypeCheck) {
+    parser.allowTypeCheck = enable;
+  }
+
+  ~ScopedTypeCheckContext() { parser.allowTypeCheck = previous; }
+};
+
 template <typename T>
 std::unique_ptr<T> withLocation(std::unique_ptr<T> expr, SourceLocation loc) {
   if (expr)
@@ -106,5 +119,12 @@ TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
 void maybeWarnGenericArity(const std::vector<std::string> &params,
                            const std::string &ownerName,
                            std::string_view context);
+bool ParseArgumentList(std::vector<std::unique_ptr<ExprAST>> &args,
+                       std::vector<std::string> &argNames,
+                       std::vector<SourceLocation> &argNameLocations,
+                       std::vector<SourceLocation> &argEqualsLocations);
+std::unique_ptr<ExprAST> ParsePrimaryWithPostfix();
+std::unique_ptr<ExprAST> ParseConditionExpression();
+void RecoverAfterExpressionError();
 
 #endif // HYBRID_PARSER_INTERNAL_H

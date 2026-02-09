@@ -5,6 +5,9 @@ set(HYBRID_SOURCES
     parser.cpp
     parser/parser_core.cpp
     parser/parser_types.cpp
+    parser/parser_expr_primary.cpp
+    parser/parser_expr_postfix.cpp
+    parser/parser_expr_binop.cpp
     ast/ast_context.cpp
     ast/ast_types.cpp
     ast/ast_arc.cpp
