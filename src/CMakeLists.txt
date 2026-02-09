@@ -3,7 +3,19 @@ set(HYBRID_SOURCES
     driver.cpp
     lexer.cpp
     parser.cpp
-    ast.cpp
+    ast/ast_context.cpp
+    ast/ast_types.cpp
+    ast/ast_arc.cpp
+    ast/ast_overloads.cpp
+    ast/functions.cpp
+    ast/expr_ternary_switch.cpp
+    ast/expr_access.cpp
+    ast/expr_calls.cpp
+    ast/expr_literals.cpp
+    ast/expr_ops.cpp
+    ast/ast_runtime.cpp
+    ast/stmts.cpp
+    ast/aggregates.cpp
     toplevel.cpp
     compiler_session.cpp
     runtime_support.cpp

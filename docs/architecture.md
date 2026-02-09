@@ -94,7 +94,7 @@ std::map<char, int> BinopPrecedence = {
 };
 ```
 
-### 3. AST (`src/ast.cpp/h`)
+### 3. AST (`src/ast.h`, `src/ast/*.cpp`)
 
 The Abstract Syntax Tree represents the program structure.
 
@@ -127,6 +127,23 @@ AST Node
 ├── PrototypeAST (Function Signatures)
 └── FunctionAST (Function Definitions)
 ```
+
+#### Implementation Layout
+AST implementation is split into focused modules under `src/ast/`:
+
+- `src/ast/ast_context.cpp`: core shared context, common utilities, top-level setup
+- `src/ast/ast_runtime.cpp`: runtime type descriptors and runtime call plumbing
+- `src/ast/ast_arc.cpp`: ARC/lifetime helpers and ARC scope management
+- `src/ast/ast_overloads.cpp`: overload/default-argument/generic instantiation helpers
+- `src/ast/ast_types.cpp`: type parsing/resolution and shared type helpers
+- `src/ast/expr_literals.cpp`: literal/tuple/array literal expression codegen
+- `src/ast/expr_access.cpp`: access/path expressions (`[]`, variable/member lvalues)
+- `src/ast/expr_ops.cpp`: cast/unary/binary/ref/operator expression codegen
+- `src/ast/expr_calls.cpp`: function/method/delegate call codegen
+- `src/ast/stmts.cpp`: statement codegen
+- `src/ast/functions.cpp`: prototype/function/delegate declarations/definitions
+- `src/ast/aggregates.cpp`: struct/class codegen and related aggregate emission
+- `src/ast/expr_ternary_switch.cpp`: switch-expression and ternary expression codegen
 
 #### Key Methods
 Each AST node implements:
@@ -287,7 +304,21 @@ CMakePresets.json provides pre-configured builds:
 ```
 Hybrid/
 ├── src/                # Source files
-│   ├── ast.cpp/h
+│   ├── ast.h
+│   ├── ast/            # Split AST implementation units
+│   │   ├── ast_context.cpp
+│   │   ├── ast_runtime.cpp
+│   │   ├── ast_arc.cpp
+│   │   ├── ast_overloads.cpp
+│   │   ├── ast_types.cpp
+│   │   ├── expr_literals.cpp
+│   │   ├── expr_access.cpp
+│   │   ├── expr_ops.cpp
+│   │   ├── expr_calls.cpp
+│   │   ├── stmts.cpp
+│   │   ├── functions.cpp
+│   │   ├── aggregates.cpp
+│   │   └── expr_ternary_switch.cpp
 │   ├── lexer.cpp/h
 │   ├── parser.cpp/h
 │   ├── toplevel.cpp/h
