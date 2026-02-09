@@ -2,7 +2,6 @@
 set(HYBRID_SOURCES
     driver.cpp
     lexer.cpp
-    parser.cpp
     parser/parser_core.cpp
     parser/parser_types.cpp
     parser/parser_expr_primary.cpp
