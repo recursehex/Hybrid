@@ -114,7 +114,6 @@ bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
                                       bool allowDisambiguation = false);
 bool ParseGenericParameterList(std::vector<std::string> &parameters);
 bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef = false);
-std::string ParseCompleteType();
 TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
 void maybeWarnGenericArity(const std::vector<std::string> &params,
                            const std::string &ownerName,

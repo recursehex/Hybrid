@@ -462,11 +462,11 @@ bool ParseOptionalGenericArgumentList(std::string &Type,
     if (!IsValidType() && CurTok != '(')
       return fail("Expected type argument in generic list");
 
-    std::string argument = ParseCompleteType();
-    if (argument.empty())
+    TypeInfo argumentInfo;
+    if (!ParseCompleteTypeInfo(argumentInfo, false))
       return fail("Failed to parse type argument");
 
-    buffer.append(argument);
+    buffer.append(typeNameFromInfo(argumentInfo));
     SkipNewlines();
     expectArgument = false;
   }
@@ -670,11 +670,4 @@ bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef) {
   if (!tupleElementNames.empty())
     outInfo.tupleElementNames = std::move(tupleElementNames);
   return true;
-}
-
-std::string ParseCompleteType() {
-  TypeInfo info;
-  if (!ParseCompleteTypeInfo(info, false))
-    return "";
-  return typeNameFromInfo(info);
 }
