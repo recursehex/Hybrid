@@ -59,15 +59,27 @@ enum Token {
 };
 ```
 
-### 2. Parser (`src/parser.cpp/h`)
+### 2. Parser (`src/parser.h`, `src/parser/*.cpp`)
 
-The parser implements a recursive descent parser with operator precedence handling.
+The parser is a recursive descent implementation split by grammar domain.
 
 #### Responsibilities
 - Syntax analysis
 - Precedence-based expression parsing
 - Error reporting and recovery
 - AST node construction
+
+#### Implementation Layout
+- `src/parser/parser_core.cpp`: token replay, precedence lookup, newline skipping, parser error helpers
+- `src/parser/parser_types.cpp`: type parsing, generic parameter/argument parsing, type metadata construction
+- `src/parser/parser_expr_primary.cpp`: literals and primary expressions
+- `src/parser/parser_expr_postfix.cpp`: calls, indexing, member/null-safe postfix parsing
+- `src/parser/parser_expr_binop.cpp`: unary/binary expression flow, condition expressions, recovery helpers
+- `src/parser/parser_decls.cpp`: prototypes, function/delegate declarations and definitions
+- `src/parser/parser_statements.cpp`: statements and block/control-flow parsing
+- `src/parser/parser_aggregates.cpp`: struct/class/interface parsing and member modifier/access rules
+- `src/parser/parser_consteval.cpp`: compile-time constant-expression evaluation
+- `src/parser/parser_internal.h`: shared parser-internal helpers, scopes, and context aliases
 
 #### Key Functions
 ```cpp
@@ -320,7 +332,18 @@ Hybrid/
 │   │   ├── aggregates.cpp
 │   │   └── expr_ternary_switch.cpp
 │   ├── lexer.cpp/h
-│   ├── parser.cpp/h
+│   ├── parser.h
+│   ├── parser/
+│   │   ├── parser_internal.h
+│   │   ├── parser_core.cpp
+│   │   ├── parser_types.cpp
+│   │   ├── parser_expr_primary.cpp
+│   │   ├── parser_expr_postfix.cpp
+│   │   ├── parser_expr_binop.cpp
+│   │   ├── parser_decls.cpp
+│   │   ├── parser_statements.cpp
+│   │   ├── parser_aggregates.cpp
+│   │   └── parser_consteval.cpp
 │   ├── toplevel.cpp/h
 │   ├── driver.cpp
 │   └── CMakeLists.txt
