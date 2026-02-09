@@ -1,5 +1,6 @@
 // This file implements the Hybrid language parser that builds AST nodes and manages parsing state.
 
+#include "parser/parser_internal.h"
 #include "parser.h"
 #include "lexer.h"
 #include "compiler_session.h"
@@ -15,21 +16,6 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Function.h"
 
-#define CurTok (currentParser().curTok)
-#define BinopPrecedence (currentParser().binopPrecedence)
-#define StructNames (currentParser().structNames)
-#define ClassNames (currentParser().classNames)
-#define DelegateNames (currentParser().delegateNames)
-#define StructDefinitionStack (currentParser().structDefinitionStack)
-#define ClassDefinitionStack (currentParser().classDefinitionStack)
-#define LoopNestingDepth (currentParser().loopNestingDepth)
-#define UnsafeContextLevel (currentParser().unsafeContextLevel)
-
-#define IdentifierStr (currentLexer().identifierStr)
-#define LexedNumericLiteral (currentLexer().numericLiteral)
-#define StringVal (currentLexer().stringLiteral)
-#define CharVal (currentLexer().charLiteral)
-
 static std::unique_ptr<ExprAST> ParseInterpolatedStringExpr();
 static void RecoverAfterExpressionError();
 static void SkipNewlines();
@@ -44,51 +30,6 @@ static bool ParseGenericParameterList(std::vector<std::string> &parameters);
 static bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
                                              bool allowDisambiguation = false);
 static TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
-class GenericParameterScope {
-public:
-  explicit GenericParameterScope(const std::vector<std::string> &params)
-      : active(!params.empty()) {
-    if (active)
-      currentParser().pushGenericParameters(params);
-  }
-
-  GenericParameterScope(const GenericParameterScope &) = delete;
-  GenericParameterScope &operator=(const GenericParameterScope &) = delete;
-
-  ~GenericParameterScope() {
-    if (active)
-      currentParser().popGenericParameters();
-  }
-
-private:
-  bool active = false;
-};
-
-class TemplateAngleScope {
-public:
-  TemplateAngleScope() : active(true) {
-    currentParser().templateAngleDepth++;
-  }
-
-  TemplateAngleScope(const TemplateAngleScope &) = delete;
-  TemplateAngleScope &operator=(const TemplateAngleScope &) = delete;
-
-  ~TemplateAngleScope() {
-    if (active)
-      currentParser().templateAngleDepth--;
-  }
-
-private:
-  bool active = true;
-};
-
-template <typename T>
-static std::unique_ptr<T> withLocation(std::unique_ptr<T> expr,
-                                       SourceLocation loc) {
-  if (expr)
-    expr->setSourceLocation(loc);
-  return expr;
-}
 
 static std::vector<std::vector<ParserContext::PendingToken> *> &
 tokenCaptureStack() {
