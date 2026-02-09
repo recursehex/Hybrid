@@ -2,7 +2,15 @@
 set(HYBRID_SOURCES
     driver.cpp
     lexer.cpp
-    parser.cpp
+    parser/parser_core.cpp
+    parser/parser_types.cpp
+    parser/parser_expr_primary.cpp
+    parser/parser_expr_postfix.cpp
+    parser/parser_expr_binop.cpp
+    parser/parser_decls.cpp
+    parser/parser_statements.cpp
+    parser/parser_aggregates.cpp
+    parser/parser_consteval.cpp
     ast/ast_context.cpp
     ast/ast_types.cpp
     ast/ast_arc.cpp
@@ -34,6 +42,7 @@ set(HYBRID_SOURCES
 set(HYBRID_HEADERS
     lexer.h
     parser.h
+    parser/parser_internal.h
     ast.h
     toplevel.h
     compiler_session.h
