@@ -14,8 +14,6 @@ concurrency:
 jobs:
   linux-werror:
     runs-on: ubuntu-24.04
-    env:
-      LLVM_VERSION: "20"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,12 +21,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build python3 libc++-dev libc++abi-dev
-
-      - name: Install LLVM/Clang
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: ${{ env.LLVM_VERSION }}
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
 
       - name: Configure with -Werror
         run: |

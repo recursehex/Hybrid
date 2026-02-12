@@ -18,50 +18,44 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            label: macos
           - os: windows-latest
-            label: windows
     runs-on: ${{ matrix.os }}
-    env:
-      LLVM_VERSION: "20"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install LLVM/Clang
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: ${{ env.LLVM_VERSION }}
-
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install cmake ninja
+        run: brew install llvm cmake ninja
 
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install ninja -y
+        run: choco install llvm ninja -y
 
       - name: Build (macOS)
         if: runner.os == 'macOS'
-        run: ./build.sh -c
+        run: PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./build.sh -c
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: cmd
-        run: build.bat -c
+        run: |
+          set "PATH=C:\Program Files\LLVM\bin;%PATH%"
+          build.bat -c
 
       - name: Test smoke set (macOS)
         if: runner.os == 'macOS'
         run: |
-          ./run_tests.sh basic
-          ./run_tests.sh functions
-          ./run_tests.sh multi_unit
+          PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./run_tests.sh basic
+          PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./run_tests.sh functions
+          PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./run_tests.sh multi_unit
 
       - name: Test smoke set (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         run: |
+          set "PATH=C:\Program Files\LLVM\bin;%PATH%"
           run_tests.bat basic
           run_tests.bat functions
           run_tests.bat multi_unit
