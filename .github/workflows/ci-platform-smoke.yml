@@ -52,6 +52,7 @@ jobs:
           if exist "build\Release\hybrid.exe" exit /b 0
           if exist "build\Debug\hybrid.exe" exit /b 0
           echo Missing hybrid.exe after build
+          dir /s /b build\*.exe
           exit /b 1
 
       - name: Test smoke set (macOS)

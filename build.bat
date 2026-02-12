@@ -200,10 +200,20 @@ if errorlevel 1 (
 
 echo.
 echo %GREEN%Build completed successfully!%NC%
-if exist "%BUILD_DIR%\hybrid.exe" (
-    echo Executable: %BUILD_DIR%\hybrid.exe
+if defined GENERATOR_ARG (
+    if exist "%BUILD_DIR%\hybrid.exe" (
+        echo Executable: %BUILD_DIR%\hybrid.exe
+    ) else (
+        echo Executable: %BUILD_DIR%\hybrid
+    )
 ) else (
-    echo Executable: %BUILD_DIR%\hybrid
+    if exist "%BUILD_DIR%\%BUILD_TYPE%\hybrid.exe" (
+        echo Executable: %BUILD_DIR%\%BUILD_TYPE%\hybrid.exe
+    ) else if exist "%BUILD_DIR%\hybrid.exe" (
+        echo Executable: %BUILD_DIR%\hybrid.exe
+    ) else (
+        echo Executable: %BUILD_DIR%\hybrid
+    )
 )
 
 :: ---------------------------------------------------------------------------
