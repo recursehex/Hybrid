@@ -482,12 +482,16 @@ run_test() {
         emitted_ir_file=$(mktemp /tmp/hybrid_test.XXXXXX)
         mv "$emitted_ir_file" "${emitted_ir_file}.ll"
         emitted_ir_file="${emitted_ir_file}.ll"
+        set +e
         output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" "$test_file" -o "$emitted_ir_file" 2>&1)
         exit_code=$?
+        set -e
         used_direct_ir_file=1
     else
+        set +e
         output=$("$HYBRID_EXEC" "${EXTRA_COMPILER_ARGS[@]}" "${run_opts[@]}" < "$test_file" 2>&1)
         exit_code=$?
+        set -e
     fi
     
     # Check for error patterns in output

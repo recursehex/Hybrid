@@ -539,11 +539,14 @@ bool ParseTypeIdentifier(bool isRef) {
 
     auto Fn = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
     if (Fn->getProto()->getGenericParameters().empty()) {
-      fprintf(stderr, "Parsed function successfully, generating code...\n");
+      if (IsInteractiveMode())
+        fprintf(stderr, "Parsed function successfully, generating code...\n");
       if (auto FnIR = Fn->codegen()) {
-        fprintf(stderr, "Generated function IR:\n");
-        FnIR->print(llvm::errs());
-        fprintf(stderr, "\n");
+        if (IsInteractiveMode()) {
+          fprintf(stderr, "Generated function IR:\n");
+          FnIR->print(llvm::errs());
+          fprintf(stderr, "\n");
+        }
       } else {
         reportCompilerError("Failed to generate IR for function");
       }
