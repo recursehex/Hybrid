@@ -455,11 +455,20 @@ rem Helper: resolve temp directory
 rem ==========================================================
 :resolve_temp_dir
 set "HYBRID_TEST_TMP_DIR="
-if defined RUNNER_TEMP if exist "%RUNNER_TEMP%\." set "HYBRID_TEST_TMP_DIR=%RUNNER_TEMP%"
-if not defined HYBRID_TEST_TMP_DIR if defined TEMP if exist "%TEMP%\." set "HYBRID_TEST_TMP_DIR=%TEMP%"
-if not defined HYBRID_TEST_TMP_DIR if defined TMP if exist "%TMP%\." set "HYBRID_TEST_TMP_DIR=%TMP%"
-if not defined HYBRID_TEST_TMP_DIR set "HYBRID_TEST_TMP_DIR=%CD%\build\tmp"
+set "HYBRID_TEST_TMP_DIR=%CD%\build\tmp"
 if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+if not exist "%HYBRID_TEST_TMP_DIR%\." if defined RUNNER_TEMP (
+    set "HYBRID_TEST_TMP_DIR=%RUNNER_TEMP%\hybrid_tmp"
+    if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+)
+if not exist "%HYBRID_TEST_TMP_DIR%\." if defined TEMP (
+    set "HYBRID_TEST_TMP_DIR=%TEMP%\hybrid_tmp"
+    if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+)
+if not exist "%HYBRID_TEST_TMP_DIR%\." if defined TMP (
+    set "HYBRID_TEST_TMP_DIR=%TMP%\hybrid_tmp"
+    if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+)
 if not exist "%HYBRID_TEST_TMP_DIR%\." (
     echo %RED%Error: unable to access temp directory: %HYBRID_TEST_TMP_DIR%%NC%
     exit /b 1
@@ -767,6 +776,8 @@ set "actual_diag_file=%HYBRID_TEST_TMP_DIR%\hybrid_actual_diag_%RANDOM%.txt"
 set "missing_diag_file=%HYBRID_TEST_TMP_DIR%\hybrid_missing_diag_%RANDOM%.txt"
 set "unexpected_diag_file=%HYBRID_TEST_TMP_DIR%\hybrid_unexpected_diag_%RANDOM%.txt"
 set "emitted_ir_file="
+set "compile_test_input="
+set "compile_emit_output="
 set run_opts_override_output=0
 set may_need_runtime=0
 set expected_diag_count=0
@@ -872,10 +883,18 @@ for /f %%v in ('powershell -NoProfile -Command "$s=$env:RUN_OPTS; if ($s -match 
 
 if !may_need_runtime! equ 1 if !run_opts_override_output! equ 0 (
     set "emitted_ir_file=%HYBRID_TEST_TMP_DIR%\hybrid_test_%RANDOM%.ll"
-    set "compile_display=""!HYBRID_EXEC!"" !EXTRA_COMPILER_ARGS! !run_opts! ""!test_file!"" -o ""!emitted_ir_file!"""
-    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !run_opts! "!test_file!" -o "!emitted_ir_file!" > "!output_file!" 2>&1
+    set "compile_test_input=!test_file!"
+    if defined test_file_rel (
+        set "compile_test_input=!test_file_rel:/=\!"
+    )
+    set "compile_emit_output=!emitted_ir_file!"
+    if /i not "!compile_emit_output:%CD%\=!"=="!compile_emit_output!" (
+        set "compile_emit_output=!compile_emit_output:%CD%\=!"
+    )
+    set "compile_display=!HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! !compile_test_input! -o !compile_emit_output!"
+    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !run_opts! "!compile_test_input!" -o "!compile_emit_output!" > "!output_file!" 2>&1
 ) else (
-    set "compile_display=""!HYBRID_EXEC!"" !EXTRA_COMPILER_ARGS! !run_opts! ^< ""!test_file!"""
+    set "compile_display=!HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! < !test_file!"
     "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !run_opts! < "!test_file!" > "!output_file!" 2>&1
 )
 set exit_code=%errorlevel%
