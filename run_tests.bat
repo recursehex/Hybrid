@@ -744,6 +744,7 @@ set "emitted_ir_file="
 set run_opts_override_output=0
 set may_need_runtime=0
 set expected_diag_count=0
+set "compile_cmd_file="
 if exist "!output_file!" del "!output_file!" >nul 2>&1
 if exist "!runtime_log!" del "!runtime_log!" >nul 2>&1
 if exist "!expected_diag_file!" del "!expected_diag_file!" >nul 2>&1
@@ -845,11 +846,31 @@ for /f %%v in ('powershell -NoProfile -Command "$s=$env:RUN_OPTS; if ($s -match 
 
 if !may_need_runtime! equ 1 if !run_opts_override_output! equ 0 (
     set "emitted_ir_file=%TEMP%\hybrid_test_%RANDOM%.ll"
-    "%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! "!test_file!" -o "!emitted_ir_file!" > "!output_file!" 2>&1
+    set "compile_cmd_file=%TEMP%\hybrid_compile_%RANDOM%.cmd"
+    > "!compile_cmd_file!" (
+        echo @echo off
+        echo "%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! "!test_file!" -o "!emitted_ir_file!" ^> "!output_file!" 2^>^&1
+    )
+    call "!compile_cmd_file!"
 ) else (
-    "%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! < "!test_file!" > "!output_file!" 2>&1
+    set "compile_cmd_file=%TEMP%\hybrid_compile_%RANDOM%.cmd"
+    > "!compile_cmd_file!" (
+        echo @echo off
+        echo "%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! ^< "!test_file!" ^> "!output_file!" 2^>^&1
+    )
+    call "!compile_cmd_file!"
 )
 set exit_code=%errorlevel%
+if defined compile_cmd_file if exist "!compile_cmd_file!" del "!compile_cmd_file!" >nul 2>&1
+if not "%exit_code%"=="0" (
+    if not exist "!output_file!" (
+        > "!output_file!" echo [harness] compiler command failed before output capture
+    )
+    echo [harness] compile-exit: %exit_code%>>"!output_file!"
+    echo [harness] hybrid-exec: %HYBRID_EXEC%>>"!output_file!"
+    echo [harness] test-file: !test_file!>>"!output_file!"
+    if defined emitted_ir_file echo [harness] emitted-ir: !emitted_ir_file!>>"!output_file!"
+)
 
 rem Track known diagnostic patterns
 if not "%exit_code%"=="0" set compile_failed=1
@@ -1221,6 +1242,7 @@ if !machine_mode! equ 1 if defined RESULT_FILE (
 
 if exist "!output_file!" del "!output_file!" >nul 2>&1
 if exist "!runtime_log!" del "!runtime_log!" >nul 2>&1
+if defined compile_cmd_file if exist "!compile_cmd_file!" del "!compile_cmd_file!" >nul 2>&1
 if defined emitted_ir_file if exist "!emitted_ir_file!" del "!emitted_ir_file!" >nul 2>&1
 if exist "!expected_diag_file!" del "!expected_diag_file!" >nul 2>&1
 if exist "!actual_diag_file!" del "!actual_diag_file!" >nul 2>&1
