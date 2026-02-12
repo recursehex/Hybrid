@@ -853,10 +853,7 @@ public:
         savedArraySizes(ctx.arraySizes),
         savedNonNullFacts(ctx.nonNullFactsStack),
         savedLoopExitBlocks(ctx.loopExitBlocks),
-        savedLoopContinueBlocks(ctx.loopContinueBlocks) {
-    if (hasInsertPoint)
-      savedInsertPoint = Builder->GetInsertPoint();
-  }
+        savedLoopContinueBlocks(ctx.loopContinueBlocks) {}
 
   FunctionInstantiationScope(const FunctionInstantiationScope &) = delete;
   FunctionInstantiationScope &
@@ -869,16 +866,37 @@ public:
     ctx.nonNullFactsStack = std::move(savedNonNullFacts);
     ctx.loopExitBlocks = std::move(savedLoopExitBlocks);
     ctx.loopContinueBlocks = std::move(savedLoopContinueBlocks);
-    if (hasInsertPoint)
-      Builder->SetInsertPoint(savedInsertBlock, savedInsertPoint);
-    else
+    if (!hasInsertPoint) {
       Builder->ClearInsertionPoint();
+      return;
+    }
+
+    if (!savedInsertBlock || !blockStillExists(savedInsertBlock)) {
+      Builder->ClearInsertionPoint();
+      return;
+    }
+
+    if (llvm::Instruction *terminator = savedInsertBlock->getTerminator())
+      Builder->SetInsertPoint(terminator);
+    else
+      Builder->SetInsertPoint(savedInsertBlock);
   }
 
 private:
+  static bool blockStillExists(llvm::BasicBlock *candidate) {
+    if (!candidate || !TheModule)
+      return false;
+    for (llvm::Function &fn : *TheModule) {
+      for (llvm::BasicBlock &bb : fn) {
+        if (&bb == candidate)
+          return true;
+      }
+    }
+    return false;
+  }
+
   CodegenContext &ctx;
   llvm::BasicBlock *savedInsertBlock = nullptr;
-  llvm::BasicBlock::iterator savedInsertPoint;
   bool hasInsertPoint = false;
   std::map<std::string, llvm::Value *> savedNamedValues;
   std::map<std::string, TypeInfo> savedLocalTypes;
@@ -898,8 +916,17 @@ llvm::Function *InstantiateGenericFunction(
 
   llvm::Function *primaryResult = nullptr;
 
+  // Snapshot template pointers before iterating. Codegen can register
+  // additional templates under the same name, which may reallocate the
+  // registry vector and invalidate iterators/references.
+  std::vector<FunctionAST *> templateSnapshot;
+  templateSnapshot.reserve(templates->size());
   for (const auto &entry : *templates) {
-    FunctionAST *fn = entry.function.get();
+    if (entry.function)
+      templateSnapshot.push_back(entry.function.get());
+  }
+
+  for (FunctionAST *fn : templateSnapshot) {
     if (!fn)
       continue;
 

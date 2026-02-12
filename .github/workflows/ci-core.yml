@@ -1,0 +1,79 @@
+name: Core CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - std-arc
+
+concurrency:
+  group: core-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
+
+      - name: Build compiler
+        run: ./build.sh -c
+
+      - name: Run full test suite
+        id: full_tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./run_tests.sh 2>&1 | tee core-tests.log
+
+      - name: Collect crash forensics
+        if: steps.full_tests.outcome == 'failure'
+        run: |
+          set +e
+          {
+            echo "=== System ==="
+            uname -a
+            echo
+            echo "=== Toolchain ==="
+            clang --version
+            llvm-config --version
+            echo
+            echo "=== Limits ==="
+            ulimit -a
+          } | tee forensic-env.log
+
+          ulimit -c unlimited || true
+
+          ./run_tests.sh -v 2>&1 | tee verbose-rerun.log || true
+          ./run_tests.sh -v multi_unit/generics_registry_reset 2>&1 | tee generics-registry-rerun.log || true
+
+      - name: Upload crash forensics
+        if: steps.full_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-ci-forensics-${{ github.run_id }}
+          path: |
+            core-tests.log
+            forensic-env.log
+            verbose-rerun.log
+            generics-registry-rerun.log
+            /tmp/hybrid_fail.ll
+            /tmp/hybrid_fail.bin
+            /tmp/core*
+          if-no-files-found: warn
+
+      - name: Fail when full suite fails
+        if: steps.full_tests.outcome == 'failure'
+        run: |
+          echo "Full test suite failed. See uploaded forensics artifacts."
+          exit 1
+
+      - name: ARC-off regression smoke
+        run: ./run_tests.sh -a off arc/arc_off

@@ -59,6 +59,10 @@ call :locate_hybrid_executable
 if errorlevel 1 (
     endlocal & exit /b 1
 )
+call :resolve_temp_dir
+if errorlevel 1 (
+    endlocal & exit /b 1
+)
 
 for %%i in ("%HYBRID_EXEC%") do set "HYBRID_BIN_DIR=%%~dpi"
 if exist "%HYBRID_BIN_DIR%libhybrid_test_stub.a" set "PREBUILT_RUNTIME_STUB_LIB=%HYBRID_BIN_DIR%libhybrid_test_stub.a"
@@ -221,7 +225,7 @@ call :recount_multi_unit "%MULTI_UNIT_FILTER%"
 rem -----------------------------
 rem Collect test list
 rem -----------------------------
-set "TEST_LIST_FILE=%TEMP%\hybrid_tests_%RANDOM%.lst"
+set "TEST_LIST_FILE=%HYBRID_TEST_TMP_DIR%\hybrid_tests_%RANDOM%.lst"
 if exist "%TEST_LIST_FILE%" del "%TEST_LIST_FILE%" >nul 2>&1
 set /a SINGLE_TEST_COUNT=0
 
@@ -391,6 +395,11 @@ if errorlevel 1 (
     set EXIT_CODE=1
     goto finish
 )
+call :resolve_temp_dir
+if errorlevel 1 (
+    set EXIT_CODE=1
+    goto finish
+)
 for %%i in ("%HYBRID_EXEC%") do set "HYBRID_BIN_DIR=%%~dpi"
 if exist "%HYBRID_BIN_DIR%libhybrid_test_stub.a" set "PREBUILT_RUNTIME_STUB_LIB=%HYBRID_BIN_DIR%libhybrid_test_stub.a"
 if exist "%HYBRID_BIN_DIR%libhybrid_runtime_test.a" set "PREBUILT_ARC_RUNTIME_LIB=%HYBRID_BIN_DIR%libhybrid_runtime_test.a"
@@ -424,6 +433,12 @@ if exist "build\hybrid.exe" (
 )
 
 if not defined HYBRID_EXEC (
+    for /r "build" %%f in (hybrid.exe) do (
+        if not defined HYBRID_EXEC set "HYBRID_EXEC=%%f"
+    )
+)
+
+if not defined HYBRID_EXEC (
     echo %RED%Error: hybrid executable not found.%NC%
     echo %RED%Build the project first using:%NC%
     echo %RED%  cmake -B build ^&^& cmake --build build%NC%
@@ -432,7 +447,46 @@ if not defined HYBRID_EXEC (
     exit /b 1
 )
 
+set "HYBRID_EXEC=%HYBRID_EXEC:"=%"
+for %%i in ("%HYBRID_EXEC%") do set "HYBRID_EXEC=%%~fi"
+if not exist "%HYBRID_EXEC%" (
+    set "HYBRID_EXEC="
+    for /r "build" %%f in (hybrid.exe) do (
+        if not defined HYBRID_EXEC if exist "%%f" set "HYBRID_EXEC=%%~ff"
+    )
+    if not defined HYBRID_EXEC (
+        echo %RED%Error: hybrid executable path is invalid and no fallback was found.%NC%
+        exit /b 1
+    )
+)
+
 if not "%WORKER_MODE%"=="1" echo Using executable: %HYBRID_EXEC%
+exit /b 0
+
+rem ==========================================================
+rem Helper: resolve temp directory
+rem ==========================================================
+:resolve_temp_dir
+set "HYBRID_TEST_TMP_DIR="
+set "HYBRID_TEST_TMP_DIR=%CD%\build\tmp"
+if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+if not exist "%HYBRID_TEST_TMP_DIR%\." if defined RUNNER_TEMP (
+    set "HYBRID_TEST_TMP_DIR=%RUNNER_TEMP%\hybrid_tmp"
+    if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+)
+if not exist "%HYBRID_TEST_TMP_DIR%\." if defined TEMP (
+    set "HYBRID_TEST_TMP_DIR=%TEMP%\hybrid_tmp"
+    if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+)
+if not exist "%HYBRID_TEST_TMP_DIR%\." if defined TMP (
+    set "HYBRID_TEST_TMP_DIR=%TMP%\hybrid_tmp"
+    if not exist "%HYBRID_TEST_TMP_DIR%\." md "%HYBRID_TEST_TMP_DIR%" >nul 2>&1
+)
+if not exist "%HYBRID_TEST_TMP_DIR%\." (
+    echo %RED%Error: unable to access temp directory: %HYBRID_TEST_TMP_DIR%%NC%
+    exit /b 1
+)
+for %%i in ("%HYBRID_TEST_TMP_DIR%") do set "HYBRID_TEST_TMP_DIR=%%~fi"
 exit /b 0
 
 rem ==========================================================
@@ -513,7 +567,7 @@ if defined PREBUILT_RUNTIME_STUB_LIB if exist "%PREBUILT_RUNTIME_STUB_LIB%" (
 where clang >nul 2>&1
 if %errorlevel% neq 0 exit /b 0
 
-set "RUNTIME_BASE=%TEMP%\hybrid_runtime_%RANDOM%"
+set "RUNTIME_BASE=%HYBRID_TEST_TMP_DIR%\hybrid_runtime_%RANDOM%"
 set "RUNTIME_LIB=%RUNTIME_BASE%.obj"
 clang -c "runtime\test_runtime_stub.c" -o "%RUNTIME_LIB%" 2>nul
 if errorlevel 1 (
@@ -586,7 +640,7 @@ rem ==========================================================
 rem Parallel single-file helpers
 rem ==========================================================
 :run_single_tests_parallel
-set "parallel_dir=%TEMP%\hybrid_parallel_%RANDOM%"
+set "parallel_dir=%HYBRID_TEST_TMP_DIR%\hybrid_parallel_%RANDOM%"
 if exist "!parallel_dir!" rd /s /q "!parallel_dir!" >nul 2>&1
 md "!parallel_dir!" >nul 2>&1
 
@@ -728,16 +782,21 @@ set "expected_fail_kind="
 set "expected_exit="
 set "expect_pass=0"
 set machine_mode=0
-set "output_file=%TEMP%\hybrid_test_output_%RANDOM%.txt"
-set "runtime_log=%TEMP%\hybrid_runtime_%RANDOM%.txt"
-set "expected_diag_file=%TEMP%\hybrid_expected_diag_%RANDOM%.txt"
-set "actual_diag_file=%TEMP%\hybrid_actual_diag_%RANDOM%.txt"
-set "missing_diag_file=%TEMP%\hybrid_missing_diag_%RANDOM%.txt"
-set "unexpected_diag_file=%TEMP%\hybrid_unexpected_diag_%RANDOM%.txt"
+set "output_file=%HYBRID_TEST_TMP_DIR%\hybrid_test_output_%RANDOM%.txt"
+set "runtime_log=%HYBRID_TEST_TMP_DIR%\hybrid_runtime_%RANDOM%.txt"
+set "expected_diag_file=%HYBRID_TEST_TMP_DIR%\hybrid_expected_diag_%RANDOM%.txt"
+set "actual_diag_file=%HYBRID_TEST_TMP_DIR%\hybrid_actual_diag_%RANDOM%.txt"
+set "missing_diag_file=%HYBRID_TEST_TMP_DIR%\hybrid_missing_diag_%RANDOM%.txt"
+set "unexpected_diag_file=%HYBRID_TEST_TMP_DIR%\hybrid_unexpected_diag_%RANDOM%.txt"
 set "emitted_ir_file="
+set "compile_test_input="
+set "compile_emit_output="
 set run_opts_override_output=0
 set may_need_runtime=0
 set expected_diag_count=0
+set "compile_display="
+if exist "!output_file!" del "!output_file!" >nul 2>&1
+if exist "!runtime_log!" del "!runtime_log!" >nul 2>&1
 if exist "!expected_diag_file!" del "!expected_diag_file!" >nul 2>&1
 if exist "!actual_diag_file!" del "!actual_diag_file!" >nul 2>&1
 if exist "!missing_diag_file!" del "!missing_diag_file!" >nul 2>&1
@@ -836,12 +895,32 @@ set "RUN_OPTS=!run_opts!"
 for /f %%v in ('powershell -NoProfile -Command "$s=$env:RUN_OPTS; if ($s -match '(^|\\s)-o(\\s|$)' -or $s -match '(^|\\s)--emit-llvm(\\s|$)' -or $s -match '(^|\\s)-o=') { 1 } else { 0 }"') do set run_opts_override_output=%%v
 
 if !may_need_runtime! equ 1 if !run_opts_override_output! equ 0 (
-    set "emitted_ir_file=%TEMP%\hybrid_test_%RANDOM%.ll"
-    cmd /c ""%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! "!test_file!" -o "!emitted_ir_file!" > "!output_file!" 2>&1"
+    set "emitted_ir_file=%HYBRID_TEST_TMP_DIR%\hybrid_test_%RANDOM%.ll"
+    set "compile_test_input=!test_file!"
+    if defined test_file_rel (
+        set "compile_test_input=!test_file_rel:/=\!"
+    )
+    set "compile_emit_output=!emitted_ir_file!"
+    if /i not "!compile_emit_output:%CD%\=!"=="!compile_emit_output!" (
+        set "compile_emit_output=!compile_emit_output:%CD%\=!"
+    )
+    set "compile_display=!HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! !compile_test_input! -o !compile_emit_output!"
+    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !run_opts! "!compile_test_input!" -o "!compile_emit_output!" > "!output_file!" 2>&1
 ) else (
-    cmd /c ""%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! < "%test_file%" > "!output_file!" 2>&1"
+    set "compile_display=!HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! < !test_file!"
+    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !run_opts! < "!test_file!" > "!output_file!" 2>&1
 )
 set exit_code=%errorlevel%
+if not "%exit_code%"=="0" (
+    if not exist "!output_file!" (
+        > "!output_file!" echo [harness] compiler command failed before output capture
+    )
+    echo [harness] compile-exit: !exit_code!>>"!output_file!"
+    echo [harness] hybrid-exec: !HYBRID_EXEC!>>"!output_file!"
+    if defined compile_display echo [harness] compile-cmd: !compile_display!>>"!output_file!"
+    echo [harness] test-file: !test_file!>>"!output_file!"
+    if defined emitted_ir_file echo [harness] emitted-ir: !emitted_ir_file!>>"!output_file!"
+)
 
 rem Track known diagnostic patterns
 if not "%exit_code%"=="0" set compile_failed=1
@@ -876,7 +955,7 @@ if /i "!expected_mode!"=="fail" if /i not "!expected_fail_kind!"=="runtime" (
         set compiler_expectation_failed=1
         echo [test-expectation] missing compile diagnostic expectations for !test_file_rel!>>"!output_file!"
     ) else (
-        set "diag_compare_file=%TEMP%\hybrid_diag_compare_%RANDOM%.txt"
+        set "diag_compare_file=%HYBRID_TEST_TMP_DIR%\hybrid_diag_compare_%RANDOM%.txt"
         powershell -NoProfile -Command "$expected = if (Test-Path -LiteralPath '!expected_diag_file!') { Get-Content -LiteralPath '!expected_diag_file!' | Where-Object { $_.Trim() -ne '' } } else { @() }; $actual = if (Test-Path -LiteralPath '!actual_diag_file!') { Get-Content -LiteralPath '!actual_diag_file!' | Where-Object { $_.Trim() -ne '' } } else { @() }; $matched = New-Object bool[] $expected.Count; $missing = New-Object System.Collections.Generic.List[string]; $unexpected = New-Object System.Collections.Generic.List[string]; foreach ($a in $actual) { $ok = $false; for ($i = 0; $i -lt $expected.Count; $i++) { if (-not $matched[$i] -and $a.Contains($expected[$i])) { $matched[$i] = $true; $ok = $true; break } } if (-not $ok) { $unexpected.Add($a) } }; for ($i = 0; $i -lt $expected.Count; $i++) { if (-not $matched[$i]) { $missing.Add($expected[$i]) } }; $missing | Set-Content -LiteralPath '!missing_diag_file!'; $unexpected | Set-Content -LiteralPath '!unexpected_diag_file!'; if ($missing.Count -gt 0 -or $unexpected.Count -gt 0) { '1' } else { '0' }" > "!diag_compare_file!"
         set strict_diag_mismatch=0
         for /f "usebackq delims=" %%m in ("!diag_compare_file!") do set strict_diag_mismatch=%%m
@@ -921,14 +1000,14 @@ if !should_check_runtime! equ 1 if defined RUNTIME_LIB (
             for /f "tokens=1 delims=:" %%n in ('findstr /n "=== Final Generated" "!output_file!"') do set module_start=%%n
             if defined module_start (
                 set /a module_start+=1
-                set "runtime_ir_file=%TEMP%\hybrid_ir_%RANDOM%.ll"
+                set "runtime_ir_file=%HYBRID_TEST_TMP_DIR%\hybrid_ir_%RANDOM%.ll"
                 set runtime_ir_temp=1
                 powershell -NoProfile -Command "(Get-Content -Path '!output_file!'^| Select-Object -Skip !module_start! ^| Where-Object {$_ -notmatch '^(ready^>|Parsed|Generated|\\[generics|\\[arc-trace\\]|\\[arc-escape\\])'}) ^| Set-Content -Path '!runtime_ir_file!'" >nul 2>&1
             )
         )
 
         if defined runtime_ir_file if exist "!runtime_ir_file!" (
-            set "temp_bin=%TEMP%\hybrid_bin_%RANDOM%.exe"
+            set "temp_bin=%HYBRID_TEST_TMP_DIR%\hybrid_bin_%RANDOM%.exe"
             findstr /C:"define i32 @main" "!runtime_ir_file!" >nul 2>&1
             if !errorlevel! equ 0 (
                 set needs_runtime=%ARC_RUNTIME_REQUIRED%
@@ -940,15 +1019,28 @@ if !should_check_runtime! equ 1 if defined RUNTIME_LIB (
                 if !needs_runtime! equ 1 (
                     if defined PREBUILT_ARC_RUNTIME_LIB if exist "!PREBUILT_ARC_RUNTIME_LIB!" (
                         clang++ "!runtime_ir_file!" "!PREBUILT_ARC_RUNTIME_LIB!" -o "!temp_bin!" >nul 2>&1
+                        if !errorlevel! neq 0 (
+                            rem Retry with source files when prebuilt runtime archive is incompatible.
+                            clang++ "!runtime_ir_file!" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "!temp_bin!" >nul 2>&1
+                        )
                     ) else (
                         clang++ "!runtime_ir_file!" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "!temp_bin!" >nul 2>&1
                     )
                 ) else (
                     clang++ "!runtime_ir_file!" "%RUNTIME_LIB%" -o "!temp_bin!" >nul 2>&1
+                    if !errorlevel! neq 0 if defined PREBUILT_RUNTIME_STUB_LIB if /i "%RUNTIME_LIB%"=="%PREBUILT_RUNTIME_STUB_LIB%" (
+                        rem Retry with a freshly built stub when prebuilt runtime archive is incompatible.
+                        set "fallback_stub_obj=%HYBRID_TEST_TMP_DIR%\hybrid_runtime_stub_%RANDOM%.obj"
+                        clang -c "runtime\test_runtime_stub.c" -o "!fallback_stub_obj!" >nul 2>&1
+                        if !errorlevel! equ 0 (
+                            clang++ "!runtime_ir_file!" "!fallback_stub_obj!" -o "!temp_bin!" >nul 2>&1
+                        )
+                        if exist "!fallback_stub_obj!" del "!fallback_stub_obj!" >nul 2>&1
+                    )
                 )
 
                 if !errorlevel! equ 0 (
-                    cmd /c ""!temp_bin!"" > "!runtime_log!" 2>&1
+                    "!temp_bin!" > "!runtime_log!" 2>&1
                     set runtime_exit_code=!errorlevel!
                     set runtime_ran=1
                     if not "!runtime_exit_code!"=="0" set runtime_failed=1
@@ -1050,12 +1142,12 @@ if %VERBOSE_MODE% equ 1 if !show_output! equ 1 (
     echo %BLUE%=== Test: !test_name! ===%NC%
     echo File: !test_file!
     echo Content:
-    findstr /n "^" "!test_file!"
+    findstr /n /r /c:".*" "!test_file!"
     echo.
     echo Output:
     type "!output_file!"
     echo.
-    if defined runtime_log (
+    if exist "!runtime_log!" (
         echo Runtime output:
         type "!runtime_log!"
         echo.
@@ -1250,19 +1342,19 @@ for /d %%d in ("test\multi_unit\*") do (
         goto skip_suite
     )
 
-    set "multi_temp=%TEMP%\hybrid_multi_%RANDOM%"
+    set "multi_temp=%HYBRID_TEST_TMP_DIR%\hybrid_multi_%RANDOM%"
     set "multi_output=!multi_temp!.out"
     set "multi_stdout=!multi_temp!.log"
     set "multi_runtime=!multi_temp!.run"
 
-    cmd /c ""%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS%!cmd_files! -o "!multi_output!"" > "!multi_stdout!" 2>&1
+    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !cmd_files! -o "!multi_output!" > "!multi_stdout!" 2>&1
     set multi_status=!errorlevel!
 
     set runtime_status=0
     if /i "!multi_expect!"=="pass" (
         if !multi_status! equ 0 (
             if exist "!multi_output!" (
-                cmd /c ""!multi_output!"" > "!multi_runtime!" 2>&1
+                "!multi_output!" > "!multi_runtime!" 2>&1
                 set runtime_status=!errorlevel!
             ) else (
                 set runtime_status=1

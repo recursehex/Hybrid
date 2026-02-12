@@ -95,10 +95,7 @@ public:
         savedNamedValues(ctx.namedValues), savedLocalTypes(ctx.localTypes),
         savedArraySizes(ctx.arraySizes), savedNonNullFacts(ctx.nonNullFactsStack),
         savedLoopExitBlocks(ctx.loopExitBlocks),
-        savedLoopContinueBlocks(ctx.loopContinueBlocks) {
-    if (hasInsertPoint)
-      savedInsertPoint = Builder->GetInsertPoint();
-  }
+        savedLoopContinueBlocks(ctx.loopContinueBlocks) {}
 
   FunctionInstantiationScope(const FunctionInstantiationScope &) = delete;
   FunctionInstantiationScope &
@@ -111,16 +108,37 @@ public:
     ctx.nonNullFactsStack = std::move(savedNonNullFacts);
     ctx.loopExitBlocks = std::move(savedLoopExitBlocks);
     ctx.loopContinueBlocks = std::move(savedLoopContinueBlocks);
-    if (hasInsertPoint)
-      Builder->SetInsertPoint(savedInsertBlock, savedInsertPoint);
-    else
+    if (!hasInsertPoint) {
       Builder->ClearInsertionPoint();
+      return;
+    }
+
+    if (!savedInsertBlock || !blockStillExists(savedInsertBlock)) {
+      Builder->ClearInsertionPoint();
+      return;
+    }
+
+    if (llvm::Instruction *terminator = savedInsertBlock->getTerminator())
+      Builder->SetInsertPoint(terminator);
+    else
+      Builder->SetInsertPoint(savedInsertBlock);
   }
 
 private:
+  static bool blockStillExists(llvm::BasicBlock *candidate) {
+    if (!candidate || !TheModule)
+      return false;
+    for (llvm::Function &fn : *TheModule) {
+      for (llvm::BasicBlock &bb : fn) {
+        if (&bb == candidate)
+          return true;
+      }
+    }
+    return false;
+  }
+
   CodegenContext &ctx;
   llvm::BasicBlock *savedInsertBlock = nullptr;
-  llvm::BasicBlock::iterator savedInsertPoint;
   bool hasInsertPoint = false;
   std::map<std::string, llvm::Value *> savedNamedValues;
   std::map<std::string, TypeInfo> savedLocalTypes;

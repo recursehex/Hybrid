@@ -1,0 +1,78 @@
+name: Platform Smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - std-arc
+
+concurrency:
+  group: platform-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install llvm cmake ninja
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install llvm ninja -y
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./build.sh -c
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          set "PATH=C:\Program Files\LLVM\bin;%PATH%"
+          call build.bat -c
+
+      - name: Verify build artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          if exist "build\hybrid.exe" exit /b 0
+          if exist "build\Release\hybrid.exe" exit /b 0
+          if exist "build\Debug\hybrid.exe" exit /b 0
+          set "FOUND="
+          for /r build %%f in (hybrid.exe) do (
+            echo Found: %%f
+            set "FOUND=1"
+          )
+          if defined FOUND exit /b 0
+          echo Missing hybrid.exe after build
+          dir /s /b build\*.exe 2>nul
+          exit /b 1
+
+      - name: Test smoke set (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./run_tests.sh basic
+          PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./run_tests.sh functions
+          PATH="/opt/homebrew/opt/llvm/bin:$PATH" ./run_tests.sh multi_unit
+
+      - name: Test smoke set (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          set "PATH=C:\Program Files\LLVM\bin;%PATH%"
+          run_tests.bat basic || (echo basic smoke failed, rerunning verbose... & run_tests.bat -v basic & exit /b 1)
+          run_tests.bat functions || (echo functions smoke failed, rerunning verbose... & run_tests.bat -v functions & exit /b 1)
+          run_tests.bat multi_unit || (echo multi_unit smoke failed, rerunning verbose... & run_tests.bat -v multi_unit & exit /b 1)

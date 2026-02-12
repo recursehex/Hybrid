@@ -180,10 +180,18 @@ set "JOBS=%NUMBER_OF_PROCESSORS%"
 if not defined JOBS set JOBS=1
 
 echo %YELLOW%Building...%NC%
-if %VERBOSE_BUILD%==1 (
-    cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS% --verbose
+if defined GENERATOR_ARG (
+    if %VERBOSE_BUILD%==1 (
+        cmake --build "%BUILD_DIR%" --parallel %JOBS% --verbose
+    ) else (
+        cmake --build "%BUILD_DIR%" --parallel %JOBS%
+    )
 ) else (
-    cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS%
+    if %VERBOSE_BUILD%==1 (
+        cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS% --verbose
+    ) else (
+        cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS%
+    )
 )
 if errorlevel 1 (
     echo %RED%Build failed!%NC%
@@ -192,8 +200,27 @@ if errorlevel 1 (
 
 echo.
 echo %GREEN%Build completed successfully!%NC%
-if exist "%BUILD_DIR%\hybrid.exe" (
-    echo Executable: %BUILD_DIR%\hybrid.exe
+set "FOUND_EXE="
+if defined GENERATOR_ARG (
+    if exist "%BUILD_DIR%\hybrid.exe" (
+        set "FOUND_EXE=%BUILD_DIR%\hybrid.exe"
+    )
+) else (
+    if exist "%BUILD_DIR%\%BUILD_TYPE%\hybrid.exe" (
+        set "FOUND_EXE=%BUILD_DIR%\%BUILD_TYPE%\hybrid.exe"
+    ) else if exist "%BUILD_DIR%\hybrid.exe" (
+        set "FOUND_EXE=%BUILD_DIR%\hybrid.exe"
+    )
+)
+
+if not defined FOUND_EXE (
+    for /r "%BUILD_DIR%" %%f in (hybrid.exe) do (
+        if not defined FOUND_EXE set "FOUND_EXE=%%f"
+    )
+)
+
+if defined FOUND_EXE (
+    echo Executable: !FOUND_EXE!
 ) else (
     echo Executable: %BUILD_DIR%\hybrid
 )

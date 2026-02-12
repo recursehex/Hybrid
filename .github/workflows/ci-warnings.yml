@@ -1,0 +1,36 @@
+name: Warnings Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - std-arc
+
+concurrency:
+  group: warnings-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-werror:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm llvm-dev cmake ninja-build python3 libc++-dev libc++abi-dev
+
+      - name: Configure with -Werror
+        run: |
+          cmake -B build-werror \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLLVM_DIR="$(llvm-config --prefix)/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$(command -v clang)" \
+            -DCMAKE_CXX_COMPILER="$(command -v clang++)" \
+            -DCMAKE_CXX_FLAGS="-Werror"
+
+      - name: Build with warnings as errors
+        run: cmake --build build-werror -j"$(nproc)"
