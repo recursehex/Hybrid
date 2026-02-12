@@ -853,13 +853,7 @@ public:
         savedArraySizes(ctx.arraySizes),
         savedNonNullFacts(ctx.nonNullFactsStack),
         savedLoopExitBlocks(ctx.loopExitBlocks),
-        savedLoopContinueBlocks(ctx.loopContinueBlocks) {
-    if (hasInsertPoint) {
-      llvm::BasicBlock::iterator currentInsertPoint = Builder->GetInsertPoint();
-      if (currentInsertPoint != savedInsertBlock->end())
-        savedInsertBefore = &*currentInsertPoint;
-    }
-  }
+        savedLoopContinueBlocks(ctx.loopContinueBlocks) {}
 
   FunctionInstantiationScope(const FunctionInstantiationScope &) = delete;
   FunctionInstantiationScope &
@@ -882,13 +876,10 @@ public:
       return;
     }
 
-    if (savedInsertBefore &&
-        savedInsertBefore->getParent() == savedInsertBlock) {
-      Builder->SetInsertPoint(savedInsertBefore);
-      return;
-    }
-
-    Builder->SetInsertPoint(savedInsertBlock);
+    if (llvm::Instruction *terminator = savedInsertBlock->getTerminator())
+      Builder->SetInsertPoint(terminator);
+    else
+      Builder->SetInsertPoint(savedInsertBlock);
   }
 
 private:
@@ -906,7 +897,6 @@ private:
 
   CodegenContext &ctx;
   llvm::BasicBlock *savedInsertBlock = nullptr;
-  llvm::Instruction *savedInsertBefore = nullptr;
   bool hasInsertPoint = false;
   std::map<std::string, llvm::Value *> savedNamedValues;
   std::map<std::string, TypeInfo> savedLocalTypes;

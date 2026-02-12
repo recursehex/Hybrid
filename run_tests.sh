@@ -635,6 +635,12 @@ run_test() {
                         if [ ${#ARC_RUNTIME_OBJS[@]} -gt 0 ]; then
                             if clang++ "$runtime_ir_file" "${ARC_RUNTIME_OBJS[@]}" "${SANITIZER_FLAGS[@]}" -o "$temp_bin" 2>/dev/null; then
                                 clang_success=1
+                            else
+                                # Prebuilt runtime objects can become incompatible with the
+                                # current toolchain; retry by compiling sources directly.
+                                if clang++ "${SANITIZER_FLAGS[@]}" "$runtime_ir_file" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "$temp_bin" 2>/dev/null; then
+                                    clang_success=1
+                                fi
                             fi
                         else
                             # Fallback when precompiled runtime objects are unavailable.
@@ -645,6 +651,18 @@ run_test() {
                     else
                         if clang++ "$runtime_ir_file" "$RUNTIME_LIB" "${SANITIZER_FLAGS[@]}" -o "$temp_bin" &> /dev/null; then
                             clang_success=1
+                        elif [ -n "$PREBUILT_RUNTIME_STUB_LIB" ] && [ "$RUNTIME_LIB" = "$PREBUILT_RUNTIME_STUB_LIB" ]; then
+                            # Retry with a freshly compiled stub when the prebuilt archive
+                            # is incompatible with the current linker/runtime.
+                            local fallbackStubObj
+                            fallbackStubObj=$(mktemp /tmp/hybrid_runtime_stub.XXXXXX)
+                            mv "$fallbackStubObj" "${fallbackStubObj}.o"
+                            fallbackStubObj="${fallbackStubObj}.o"
+                            if clang "${SANITIZER_FLAGS[@]}" -c runtime/test_runtime_stub.c -o "$fallbackStubObj" 2>/dev/null &&
+                               clang++ "$runtime_ir_file" "$fallbackStubObj" "${SANITIZER_FLAGS[@]}" -o "$temp_bin" &> /dev/null; then
+                                clang_success=1
+                            fi
+                            rm -f "$fallbackStubObj"
                         fi
                     fi
 

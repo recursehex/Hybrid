@@ -946,11 +946,24 @@ if !should_check_runtime! equ 1 if defined RUNTIME_LIB (
                 if !needs_runtime! equ 1 (
                     if defined PREBUILT_ARC_RUNTIME_LIB if exist "!PREBUILT_ARC_RUNTIME_LIB!" (
                         clang++ "!runtime_ir_file!" "!PREBUILT_ARC_RUNTIME_LIB!" -o "!temp_bin!" >nul 2>&1
+                        if !errorlevel! neq 0 (
+                            rem Retry with source files when prebuilt runtime archive is incompatible.
+                            clang++ "!runtime_ir_file!" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "!temp_bin!" >nul 2>&1
+                        )
                     ) else (
                         clang++ "!runtime_ir_file!" src/runtime_support.cpp src/runtime/arc.cpp src/runtime/weak_table.cpp src/memory/ref_count.cpp -Isrc -Iruntime/include -std=c++17 -o "!temp_bin!" >nul 2>&1
                     )
                 ) else (
                     clang++ "!runtime_ir_file!" "%RUNTIME_LIB%" -o "!temp_bin!" >nul 2>&1
+                    if !errorlevel! neq 0 if defined PREBUILT_RUNTIME_STUB_LIB if /i "%RUNTIME_LIB%"=="%PREBUILT_RUNTIME_STUB_LIB%" (
+                        rem Retry with a freshly built stub when prebuilt runtime archive is incompatible.
+                        set "fallback_stub_obj=%TEMP%\hybrid_runtime_stub_%RANDOM%.obj"
+                        clang -c "runtime\test_runtime_stub.c" -o "!fallback_stub_obj!" >nul 2>&1
+                        if !errorlevel! equ 0 (
+                            clang++ "!runtime_ir_file!" "!fallback_stub_obj!" -o "!temp_bin!" >nul 2>&1
+                        )
+                        if exist "!fallback_stub_obj!" del "!fallback_stub_obj!" >nul 2>&1
+                    )
                 )
 
                 if !errorlevel! equ 0 (
