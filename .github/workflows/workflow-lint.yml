@@ -22,10 +22,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install actionlint
-        run: |
-          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) \
-            -b /usr/local/bin
-
       - name: Lint GitHub workflows
-        run: actionlint
+        uses: reviewdog/action-actionlint@v1

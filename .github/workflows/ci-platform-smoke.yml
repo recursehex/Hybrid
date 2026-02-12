@@ -42,7 +42,17 @@ jobs:
         shell: cmd
         run: |
           set "PATH=C:\Program Files\LLVM\bin;%PATH%"
-          build.bat -c
+          call build.bat -c
+
+      - name: Verify build artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          if exist "build\hybrid.exe" exit /b 0
+          if exist "build\Release\hybrid.exe" exit /b 0
+          if exist "build\Debug\hybrid.exe" exit /b 0
+          echo Missing hybrid.exe after build
+          exit /b 1
 
       - name: Test smoke set (macOS)
         if: runner.os == 'macOS'

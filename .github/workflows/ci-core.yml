@@ -27,7 +27,7 @@ jobs:
         run: ./build.sh -c
 
       - name: Run full test suite
-        run: ./run_tests.sh -j 4
+        run: ./run_tests.sh
 
       - name: ARC-off regression smoke
         run: ./run_tests.sh -a off arc/arc_off
