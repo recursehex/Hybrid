@@ -73,6 +73,6 @@ jobs:
         shell: cmd
         run: |
           set "PATH=C:\Program Files\LLVM\bin;%PATH%"
-          run_tests.bat basic
-          run_tests.bat functions
-          run_tests.bat multi_unit
+          run_tests.bat basic || (echo basic smoke failed, rerunning verbose... & run_tests.bat -v basic & exit /b 1)
+          run_tests.bat functions || (echo functions smoke failed, rerunning verbose... & run_tests.bat -v functions & exit /b 1)
+          run_tests.bat multi_unit || (echo multi_unit smoke failed, rerunning verbose... & run_tests.bat -v multi_unit & exit /b 1)
