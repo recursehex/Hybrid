@@ -898,8 +898,17 @@ llvm::Function *InstantiateGenericFunction(
 
   llvm::Function *primaryResult = nullptr;
 
+  // Snapshot template pointers before iterating. Codegen can register
+  // additional templates under the same name, which may reallocate the
+  // registry vector and invalidate iterators/references.
+  std::vector<FunctionAST *> templateSnapshot;
+  templateSnapshot.reserve(templates->size());
   for (const auto &entry : *templates) {
-    FunctionAST *fn = entry.function.get();
+    if (entry.function)
+      templateSnapshot.push_back(entry.function.get());
+  }
+
+  for (FunctionAST *fn : templateSnapshot) {
     if (!fn)
       continue;
 

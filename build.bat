@@ -180,10 +180,18 @@ set "JOBS=%NUMBER_OF_PROCESSORS%"
 if not defined JOBS set JOBS=1
 
 echo %YELLOW%Building...%NC%
-if %VERBOSE_BUILD%==1 (
-    cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS% --verbose
+if defined GENERATOR_ARG (
+    if %VERBOSE_BUILD%==1 (
+        cmake --build "%BUILD_DIR%" --parallel %JOBS% --verbose
+    ) else (
+        cmake --build "%BUILD_DIR%" --parallel %JOBS%
+    )
 ) else (
-    cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS%
+    if %VERBOSE_BUILD%==1 (
+        cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS% --verbose
+    ) else (
+        cmake --build "%BUILD_DIR%" --config %BUILD_TYPE% --parallel %JOBS%
+    )
 )
 if errorlevel 1 (
     echo %RED%Build failed!%NC%
