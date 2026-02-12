@@ -450,8 +450,14 @@ if not defined HYBRID_EXEC (
 set "HYBRID_EXEC=%HYBRID_EXEC:"=%"
 for %%i in ("%HYBRID_EXEC%") do set "HYBRID_EXEC=%%~fi"
 if not exist "%HYBRID_EXEC%" (
-    echo %RED%Error: hybrid executable path is invalid: %HYBRID_EXEC%%NC%
-    exit /b 1
+    set "HYBRID_EXEC="
+    for /r "build" %%f in (hybrid.exe) do (
+        if not defined HYBRID_EXEC if exist "%%f" set "HYBRID_EXEC=%%~ff"
+    )
+    if not defined HYBRID_EXEC (
+        echo %RED%Error: hybrid executable path is invalid and no fallback was found.%NC%
+        exit /b 1
+    )
 )
 
 if not "%WORKER_MODE%"=="1" echo Using executable: %HYBRID_EXEC%
@@ -899,10 +905,10 @@ if !may_need_runtime! equ 1 if !run_opts_override_output! equ 0 (
         set "compile_emit_output=!compile_emit_output:%CD%\=!"
     )
     set "compile_display=!HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! !compile_test_input! -o !compile_emit_output!"
-    !HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! "!compile_test_input!" -o "!compile_emit_output!" > "!output_file!" 2>&1
+    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !run_opts! "!compile_test_input!" -o "!compile_emit_output!" > "!output_file!" 2>&1
 ) else (
     set "compile_display=!HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! < !test_file!"
-    !HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !run_opts! < "!test_file!" > "!output_file!" 2>&1
+    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !run_opts! < "!test_file!" > "!output_file!" 2>&1
 )
 set exit_code=%errorlevel%
 if not "%exit_code%"=="0" (
@@ -1341,7 +1347,7 @@ for /d %%d in ("test\multi_unit\*") do (
     set "multi_stdout=!multi_temp!.log"
     set "multi_runtime=!multi_temp!.run"
 
-    !HYBRID_EXEC! !EXTRA_COMPILER_ARGS! !cmd_files! -o "!multi_output!" > "!multi_stdout!" 2>&1
+    "!HYBRID_EXEC!" !EXTRA_COMPILER_ARGS! !cmd_files! -o "!multi_output!" > "!multi_stdout!" 2>&1
     set multi_status=!errorlevel!
 
     set runtime_status=0
