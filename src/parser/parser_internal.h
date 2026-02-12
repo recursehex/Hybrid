@@ -109,11 +109,13 @@ bool IsBuiltInType();
 bool IsValidType();
 bool IsActiveStructName(const std::string &name);
 bool IsActiveClassName(const std::string &name);
-bool AppendTypeSuffix(std::string &typeName, bool &pointerSeen);
+bool AppendTypeSuffix(std::string &typeName, bool &pointerSeen,
+                      bool allowOperatorDisambiguation = false);
 bool ParseOptionalGenericArgumentList(std::string &typeSpelling,
                                       bool allowDisambiguation = false);
 bool ParseGenericParameterList(std::vector<std::string> &parameters);
-bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef = false);
+bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef = false,
+                           bool allowTypeArgDisambiguation = false);
 TypeInfo buildDeclaredTypeInfo(const std::string &typeName, bool declaredRef);
 void maybeWarnGenericArity(const std::vector<std::string> &params,
                            const std::string &ownerName,

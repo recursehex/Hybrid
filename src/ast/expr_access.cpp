@@ -52,8 +52,54 @@ llvm::Value *ArrayIndexExprAST::codegen() {
   }
 
   std::string ownerName = arrayDesc.sanitized;
+  if (ownerName.empty()) {
+    if (auto arrayInfoOpt = resolveExprTypeInfo(getArray()))
+      ownerName = sanitizeCompositeLookupName(typeNameFromInfo(*arrayInfoOpt));
+  }
   if (!ownerName.empty()) {
     if (const CompositeTypeInfo *info = lookupCompositeInfo(ownerName)) {
+      if (const CompositeMemberInfo *indexOp =
+              lookupOperatorMember(*info, OverloadableOperator::Index)) {
+        if (!ensureMemberAccessAllowed(indexOp->modifiers, AccessIntent::Call,
+                                       ownerName, "[]"))
+          return nullptr;
+
+        std::vector<llvm::Value *> argValues;
+        std::vector<bool> argIsRef;
+        argValues.reserve(getIndices().size());
+        argIsRef.reserve(getIndices().size());
+        for (size_t idx = 0; idx < getIndices().size(); ++idx) {
+          const auto &idxExpr = getIndices()[idx];
+          bool isRef = dynamic_cast<RefExprAST *>(idxExpr.get()) != nullptr;
+          size_t paramIndex = idx + 1; // skip implicit receiver
+          if (paramIndex < indexOp->parameterIsRef.size())
+            isRef = indexOp->parameterIsRef[paramIndex];
+          argIsRef.push_back(isRef);
+          llvm::Value *val = nullptr;
+          if (isRef) {
+            val = idxExpr->codegen_ptr();
+            if (!val) {
+              llvm::Value *materialized = idxExpr->codegen();
+              if (!materialized)
+                return nullptr;
+              llvm::AllocaInst *tmp = Builder->CreateAlloca(
+                  materialized->getType(), nullptr, "index.ref.arg");
+              Builder->CreateStore(materialized, tmp);
+              val = tmp;
+            }
+          } else {
+            val = idxExpr->codegen();
+          }
+          if (!val)
+            return nullptr;
+          argValues.push_back(val);
+        }
+
+        return emitMemberCallByInfo(*info, *indexOp, ownerName, getArray(),
+                                    arrayValue, std::move(argValues),
+                                    std::move(argIsRef), this);
+      }
+
       if (info->indexer) {
         const PropertyInfo &indexer = *info->indexer;
         if (!indexer.hasGetter) {
@@ -72,10 +118,28 @@ llvm::Value *ArrayIndexExprAST::codegen() {
         std::vector<bool> argIsRef;
         argValues.reserve(getIndices().size());
         argIsRef.reserve(getIndices().size());
-        for (const auto &idxExpr : getIndices()) {
+        for (size_t idx = 0; idx < getIndices().size(); ++idx) {
+          const auto &idxExpr = getIndices()[idx];
           bool isRef = dynamic_cast<RefExprAST *>(idxExpr.get()) != nullptr;
+          size_t paramIndex = idx + 1; // skip implicit receiver
+          if (paramIndex < indexer.parameterIsRef.size())
+            isRef = indexer.parameterIsRef[paramIndex];
           argIsRef.push_back(isRef);
-          llvm::Value *val = idxExpr->codegen();
+          llvm::Value *val = nullptr;
+          if (isRef) {
+            val = idxExpr->codegen_ptr();
+            if (!val) {
+              llvm::Value *materialized = idxExpr->codegen();
+              if (!materialized)
+                return nullptr;
+              llvm::AllocaInst *tmp = Builder->CreateAlloca(
+                  materialized->getType(), nullptr, "index.ref.arg");
+              Builder->CreateStore(materialized, tmp);
+              val = tmp;
+            }
+          } else {
+            val = idxExpr->codegen();
+          }
           if (!val)
             return nullptr;
           argValues.push_back(val);
@@ -393,8 +457,59 @@ llvm::Value *ArrayIndexExprAST::codegen_ptr() {
   }
 
   std::string ownerName = arrayDesc.sanitized;
+  if (ownerName.empty()) {
+    if (auto arrayInfoOpt = resolveExprTypeInfo(getArray()))
+      ownerName = sanitizeCompositeLookupName(typeNameFromInfo(*arrayInfoOpt));
+  }
   if (!ownerName.empty()) {
     if (const CompositeTypeInfo *info = lookupCompositeInfo(ownerName)) {
+      if (const CompositeMemberInfo *indexOp =
+              lookupOperatorMember(*info, OverloadableOperator::Index)) {
+        if (!indexOp->returnsByRef) {
+          reportCompilerError("Operator '[]' on type '" + ownerName +
+                              "' must return ref for indexed assignment");
+          return nullptr;
+        }
+        if (!ensureMemberAccessAllowed(indexOp->modifiers, AccessIntent::Call,
+                                       ownerName, "[]"))
+          return nullptr;
+
+        std::vector<llvm::Value *> argValues;
+        std::vector<bool> argIsRef;
+        argValues.reserve(getIndices().size());
+        argIsRef.reserve(getIndices().size());
+        for (size_t idx = 0; idx < getIndices().size(); ++idx) {
+          const auto &idxExpr = getIndices()[idx];
+          bool isRef = dynamic_cast<RefExprAST *>(idxExpr.get()) != nullptr;
+          size_t paramIndex = idx + 1; // skip implicit receiver
+          if (paramIndex < indexOp->parameterIsRef.size())
+            isRef = indexOp->parameterIsRef[paramIndex];
+          argIsRef.push_back(isRef);
+          llvm::Value *val = nullptr;
+          if (isRef) {
+            val = idxExpr->codegen_ptr();
+            if (!val) {
+              llvm::Value *materialized = idxExpr->codegen();
+              if (!materialized)
+                return nullptr;
+              llvm::AllocaInst *tmp = Builder->CreateAlloca(
+                  materialized->getType(), nullptr, "index.ref.arg");
+              Builder->CreateStore(materialized, tmp);
+              val = tmp;
+            }
+          } else {
+            val = idxExpr->codegen();
+          }
+          if (!val)
+            return nullptr;
+          argValues.push_back(val);
+        }
+
+        return emitMemberCallByInfo(*info, *indexOp, ownerName, getArray(),
+                                    arrayValue, std::move(argValues),
+                                    std::move(argIsRef), this, true);
+      }
+
       if (info->indexer) {
         reportCompilerError("Cannot take address of indexer result");
         return nullptr;

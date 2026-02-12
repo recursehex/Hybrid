@@ -1,6 +1,7 @@
 #include "parser/parser_internal.h"
 #include <cctype>
 #include <optional>
+#include <set>
 
 enum class AccessSpecifier {
   Default,
@@ -175,6 +176,162 @@ static bool isPascalCase(const std::string &name) {
   return true;
 }
 
+static bool ParseOperatorMemberName(std::string &memberName,
+                                    std::string &canonicalName,
+                                    OverloadableOperator &opKind) {
+  opKind = OverloadableOperator::None;
+
+  switch (CurTok) {
+  case '=':
+    opKind = OverloadableOperator::Assign;
+    getNextToken();
+    break;
+  case tok_plus_eq:
+    opKind = OverloadableOperator::AddAssign;
+    getNextToken();
+    break;
+  case tok_minus_eq:
+    opKind = OverloadableOperator::SubAssign;
+    getNextToken();
+    break;
+  case tok_mult_eq:
+    opKind = OverloadableOperator::MulAssign;
+    getNextToken();
+    break;
+  case tok_div_eq:
+    opKind = OverloadableOperator::DivAssign;
+    getNextToken();
+    break;
+  case tok_mod_eq:
+    opKind = OverloadableOperator::ModAssign;
+    getNextToken();
+    break;
+  case '+':
+    opKind = OverloadableOperator::Add;
+    getNextToken();
+    break;
+  case '-':
+    opKind = OverloadableOperator::Sub;
+    getNextToken();
+    break;
+  case '*':
+    opKind = OverloadableOperator::Mul;
+    getNextToken();
+    break;
+  case '/':
+    opKind = OverloadableOperator::Div;
+    getNextToken();
+    break;
+  case '%':
+    opKind = OverloadableOperator::Mod;
+    getNextToken();
+    break;
+  case tok_eq:
+    opKind = OverloadableOperator::Equal;
+    getNextToken();
+    break;
+  case tok_ne:
+    opKind = OverloadableOperator::NotEqual;
+    getNextToken();
+    break;
+  case tok_lt:
+    opKind = OverloadableOperator::Less;
+    getNextToken();
+    break;
+  case tok_gt:
+    opKind = OverloadableOperator::Greater;
+    getNextToken();
+    break;
+  case tok_le:
+    opKind = OverloadableOperator::LessEqual;
+    getNextToken();
+    break;
+  case tok_ge:
+    opKind = OverloadableOperator::GreaterEqual;
+    getNextToken();
+    break;
+  case tok_at:
+    opKind = OverloadableOperator::Dereference;
+    getNextToken();
+    break;
+  case tok_hash:
+    opKind = OverloadableOperator::AddressOf;
+    getNextToken();
+    break;
+  case '[':
+    getNextToken(); // eat '['
+    SkipNewlines();
+    if (CurTok != ']') {
+      reportCompilerError("Expected ']' after '[' in operator overload name");
+      return false;
+    }
+    opKind = OverloadableOperator::Index;
+    getNextToken(); // eat ']'
+    break;
+  default:
+    return false;
+  }
+
+  memberName = std::string(overloadableOperatorSymbol(opKind));
+  canonicalName = std::string(overloadableOperatorCanonicalName(opKind));
+  return true;
+}
+
+static bool IsPotentialOperatorToken(int token) {
+  switch (token) {
+  case tok_eq:
+  case tok_ne:
+  case tok_le:
+  case tok_ge:
+  case tok_lt:
+  case tok_gt:
+  case tok_and:
+  case tok_or:
+  case tok_not:
+  case tok_plus_eq:
+  case tok_minus_eq:
+  case tok_mult_eq:
+  case tok_div_eq:
+  case tok_mod_eq:
+  case tok_bitwise_and:
+  case tok_bitwise_or:
+  case tok_bitwise_xor:
+  case tok_left_shift:
+  case tok_right_shift:
+  case tok_and_eq:
+  case tok_or_eq:
+  case tok_xor_eq:
+  case tok_left_shift_eq:
+  case tok_right_shift_eq:
+  case tok_inc:
+  case tok_dec:
+  case tok_hash:
+  case tok_at:
+    return true;
+  default:
+    break;
+  }
+
+  switch (token) {
+  case '=':
+  case '+':
+  case '-':
+  case '*':
+  case '/':
+  case '%':
+  case '&':
+  case '|':
+  case '^':
+  case '[':
+  case ']':
+  case '<':
+  case '>':
+    return true;
+  default:
+    return false;
+  }
+}
+
 /// structdef ::= ('struct' | 'class' | 'interface') identifier ('inherits' type (',' type)*)? '{' (member)* '}'
 std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbstract) {
   getNextToken(); // eat 'struct', 'class', or 'interface'
@@ -320,6 +477,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
   bool hasDestructor = false;
   int destructorIndex = -1;
   bool hasIndexer = false;
+  std::set<OverloadableOperator> seenOperatorOverloads;
 
   auto parseConstructor = [&](MemberModifiers modifiers,
                               std::vector<std::string> ctorGenericParams) -> bool {
@@ -444,8 +602,11 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
   auto parseCompositeMethod = [&](TypeInfo ReturnTypeInfo,
                                   const std::string &MethodName,
+                                  const std::string &CanonicalMethodName,
                                   MemberModifiers modifiers,
                                   MethodKind methodKind,
+                                  OverloadableOperator operatorKind,
+                                  bool returnsByRef,
                                   std::vector<std::string> methodGenericParams) -> bool {
     GenericParameterScope methodScope(methodGenericParams);
     getNextToken(); // eat '('
@@ -461,9 +622,22 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
         SkipNewlines();
       }
 
+      bool paramIsConst = false;
+      if (CurTok == tok_const) {
+        paramIsConst = true;
+        getNextToken();
+        SkipNewlines();
+      }
+
       bool paramIsRef = false;
       if (CurTok == tok_ref) {
         paramIsRef = true;
+        getNextToken();
+        SkipNewlines();
+      }
+
+      if (!paramIsConst && CurTok == tok_const) {
+        paramIsConst = true;
         getNextToken();
         SkipNewlines();
       }
@@ -493,6 +667,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       param.Name = ParamName;
       param.IsRef = paramIsRef;
       param.IsParams = paramIsParams;
+      if (paramIsConst)
+        ParamTypeInfo.isMutable = false;
       param.DeclaredType = std::move(ParamTypeInfo);
       param.NameLocation = nameLoc;
       param.ParamsLocation = paramsLoc;
@@ -534,9 +710,9 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       modifiers.isAbstract = true;
 
     const bool requiresBody = !modifiers.isAbstract && kind != AggregateKind::Interface;
-    std::string QualifiedName = compositeName + "." + MethodName;
+    std::string QualifiedName = compositeName + "." + CanonicalMethodName;
     auto Proto = std::make_unique<PrototypeAST>(std::move(ReturnTypeInfo), QualifiedName,
-                                                std::move(Args), false, false,
+                                                std::move(Args), false, returnsByRef,
                                                 std::move(methodGenericParams));
 
     if (requiresBody) {
@@ -551,12 +727,16 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
 
       auto Method = std::make_unique<FunctionAST>(std::move(Proto), std::move(Body));
       Methods.emplace_back(std::move(Method), modifiers, methodKind, MethodName);
+      if (operatorKind != OverloadableOperator::None)
+        Methods.back().setOperatorKind(operatorKind);
     } else {
       if (CurTok == '{') {
         reportCompilerError("Abstract methods cannot declare a body");
         return false;
       }
       Methods.emplace_back(std::move(Proto), modifiers, methodKind, MethodName);
+      if (operatorKind != OverloadableOperator::None)
+        Methods.back().setOperatorKind(operatorKind);
     }
 
     return true;
@@ -596,6 +776,13 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       }
 
       bool paramIsRef = false;
+      bool paramIsConst = false;
+      if (CurTok == tok_const) {
+        paramIsConst = true;
+        getNextToken(); // eat 'const'
+        SkipNewlines();
+      }
+
       if (CurTok == tok_ref) {
         paramIsRef = true;
         getNextToken(); // eat 'ref'
@@ -637,6 +824,8 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       param.Name = ParamName;
       param.IsRef = paramIsRef;
       param.IsParams = paramIsParams;
+      if (paramIsConst)
+        ParamTypeInfo.isMutable = false;
       param.DeclaredType = std::move(ParamTypeInfo);
       param.NameLocation = nameLoc;
       param.ParamsLocation = paramsLoc;
@@ -909,7 +1098,15 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     std::string Type;
     bool hasMemberTypeInfo = false;
 
-    if (CurTok == tok_identifier && IdentifierStr == compositeName) {
+    bool memberReturnsByRef = false;
+    if (CurTok == tok_ref) {
+      memberReturnsByRef = true;
+      getNextToken(); // eat 'ref'
+      SkipNewlines();
+    }
+
+    if (!memberReturnsByRef && CurTok == tok_identifier &&
+        IdentifierStr == compositeName) {
       getNextToken();
       SkipNewlines();
 
@@ -949,7 +1146,7 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       memberTypeInfo = buildDeclaredTypeInfo(Type, false);
       hasMemberTypeInfo = true;
     } else if (IsValidType() || CurTok == '(') {
-      if (!ParseCompleteTypeInfo(memberTypeInfo, false)) {
+      if (!ParseCompleteTypeInfo(memberTypeInfo, memberReturnsByRef, true)) {
         LogError("Failed to parse member type");
         return nullptr;
       }
@@ -961,20 +1158,45 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     }
 
     std::string MemberName;
+    std::string CanonicalMemberName;
+    OverloadableOperator memberOperator = OverloadableOperator::None;
     SourceLocation memberNameLoc = currentParser().currentTokenLocation;
     if (CurTok == tok_identifier) {
       MemberName = IdentifierStr;
+      CanonicalMemberName = MemberName;
       getNextToken();
     } else if (CurTok == tok_this) {
       MemberName = "this";
+      CanonicalMemberName = MemberName;
       getNextToken();
-    } else {
-      LogError("Expected identifier after type");
+    } else if (!ParseOperatorMemberName(MemberName, CanonicalMemberName,
+                                        memberOperator)) {
+      if (IsPotentialOperatorToken(CurTok)) {
+        reportCompilerError("Unsupported operator overload declaration",
+                            "Only the language's explicit operator overload allowlist is supported.");
+      } else {
+        LogError("Expected member name after type");
+      }
       return nullptr;
     }
 
     while (CurTok == tok_newline)
       getNextToken();
+
+    if (memberOperator != OverloadableOperator::None && CurTok != '(') {
+      // Recover better when malformed generic types leave trailing '<'/'>' tokens
+      // where a member identifier was expected.
+      if (memberOperator == OverloadableOperator::Less ||
+          memberOperator == OverloadableOperator::Greater ||
+          memberOperator == OverloadableOperator::LessEqual ||
+          memberOperator == OverloadableOperator::GreaterEqual) {
+        LogError("Expected identifier after type");
+      } else {
+        reportCompilerError(
+            "Operator overload declarations must define a parameter list");
+      }
+      return nullptr;
+    }
 
     std::vector<std::string> methodGenericParams;
     if (ParseGenericParameterList(methodGenericParams))
@@ -982,7 +1204,17 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
     if (!methodGenericParams.empty())
       maybeWarnGenericArity(methodGenericParams, MemberName, "Method");
 
+    if (memberOperator != OverloadableOperator::None &&
+        !methodGenericParams.empty()) {
+      reportCompilerError("Operator overloads cannot declare generic parameter lists");
+      return nullptr;
+    }
+
     if (MemberName == "this" && CurTok == '[') {
+      if (memberReturnsByRef) {
+        reportCompilerError("Indexer declarations cannot use a leading 'ref' return modifier");
+        return nullptr;
+      }
       if (!methodGenericParams.empty()) {
         reportCompilerError("Indexers cannot declare generic parameter lists");
         return nullptr;
@@ -1105,15 +1337,39 @@ std::unique_ptr<StructAST> ParseStructDefinition(AggregateKind kind, bool isAbst
       }
 
       if (kind == AggregateKind::Class && methodKind == MethodKind::Regular &&
+          memberOperator == OverloadableOperator::None &&
           !isPascalCase(MemberName)) {
         reportCompilerWarning("Class methods should use PascalCase names",
                               "Rename '" + MemberName + "' to PascalCase for consistency");
       }
 
-      if (!parseCompositeMethod(memberTypeInfo, MemberName, modifiers, methodKind,
+      if (memberOperator != OverloadableOperator::None) {
+        if ((modifiers.storage & StorageFlag::Static) != StorageFlag::None) {
+          reportCompilerError("Operator overloads must be instance methods");
+          return nullptr;
+        }
+        if (seenOperatorOverloads.contains(memberOperator)) {
+          reportCompilerError("Duplicate overload for operator '" + MemberName +
+                              "' on type '" + compositeName + "'");
+          return nullptr;
+        }
+        seenOperatorOverloads.insert(memberOperator);
+      }
+
+      if (!parseCompositeMethod(memberTypeInfo, MemberName, CanonicalMemberName,
+                                modifiers, methodKind, memberOperator,
+                                memberReturnsByRef,
                                 std::move(methodGenericParams)))
         return nullptr;
     } else {
+      if (memberOperator != OverloadableOperator::None) {
+        reportCompilerError("Operator overload declarations must define a parameter list");
+        return nullptr;
+      }
+      if (memberReturnsByRef) {
+        reportCompilerError("Only methods may declare a leading 'ref' return modifier");
+        return nullptr;
+      }
       if (!methodGenericParams.empty()) {
         reportCompilerError("Only methods may declare generic parameter lists");
         return nullptr;

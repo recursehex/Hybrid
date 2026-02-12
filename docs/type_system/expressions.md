@@ -686,6 +686,46 @@ arr[2] %= 7   // arr[2] becomes 2
 
 All compound assignment operators work with both variables and array elements.
 
+## Operator Overloading
+
+Hybrid supports C++-style operator overloads as instance methods on structs and classes.
+
+Supported overloadable operators:
+
+- Assignment: `=`
+- Compound assignment: `+=`, `-=`, `*=`, `/=`, `%=`
+- Arithmetic: `+`, `-`, `*`, `/`, `%`
+- Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
+- Pointer-related unary operators: `@`, `#`
+- Indexer: `[]`
+
+Example:
+
+```cs
+struct IntBox
+{
+    int value
+
+    IntBox +(const ref IntBox rhs)
+    {
+        return IntBox(this.value + rhs.value)
+    }
+
+    bool ==(const ref IntBox rhs)
+    {
+        return this.value == rhs.value
+    }
+}
+```
+
+Rules:
+
+- Overloads are instance methods only.
+- v1 allows one overload per operator symbol per type.
+- `@` and `#` overload calls still require an `unsafe` context.
+- `[]` may take one or more index arguments. Returning `ref` enables indexed assignment; non-`ref` return is read-only.
+- If no overload exists, builtin operator behavior is used.
+
 ## Variable References
 
 Variables can be used in expressions:

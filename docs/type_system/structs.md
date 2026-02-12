@@ -301,6 +301,33 @@ rect.topLeft.x = 10
 rect.bottomRight.y = 200
 ```
 
+## Operator Overloads
+
+Structs can overload the allowlisted operators by declaring instance methods that use the operator token as the method name.
+
+```cs
+struct Counter
+{
+    int value
+
+    Counter +(const ref Counter rhs)
+    {
+        return Counter(this.value + rhs.value)
+    }
+
+    ref int [](const ref int index)
+    {
+        return ref this.value
+    }
+}
+```
+
+Notes:
+
+- Only the language allowlist is overloadable (`=`, arithmetic/compound arithmetic, comparisons, `@`, `#`, `[]`).
+- `@` and `#` overload calls are still gated by `unsafe`.
+- Return `ref` from `[]` when indexed assignment should be allowed.
+
 ## Structs in Functions
 
 ### Struct Parameters

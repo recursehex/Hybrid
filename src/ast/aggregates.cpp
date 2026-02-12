@@ -31,6 +31,153 @@ private:
   SourceLocation prevLexerLoc{};
 };
 
+static bool isCompositeSelfType(const TypeInfo &typeInfo,
+                                const std::string &typeKey) {
+  TypeInfo bound = applyActiveTypeBindings(typeInfo);
+  finalizeTypeInfoMetadata(bound);
+
+  if (bound.pointerDepth > 0 || bound.isArray)
+    return false;
+
+  std::string rhs = sanitizeCompositeLookupName(typeKey);
+  if (!bound.baseTypeName.empty() && bound.baseTypeName == rhs)
+    return true;
+
+  std::string lhs = sanitizeCompositeLookupName(typeNameFromInfo(bound));
+  return !lhs.empty() && lhs == rhs;
+}
+
+static bool validateConstRefSelfParameter(const Parameter &param,
+                                          const std::string &typeKey,
+                                          std::string_view opSymbol) {
+  if (!param.IsRef) {
+    reportCompilerError("Invalid signature for operator '" +
+                        std::string(opSymbol) + "'",
+                        "Parameter must be declared as 'const ref " + typeKey +
+                            "'.");
+    return false;
+  }
+
+  TypeInfo paramInfo = applyActiveTypeBindings(param.DeclaredType);
+  finalizeTypeInfoMetadata(paramInfo);
+  if (paramInfo.isMutable) {
+    reportCompilerError("Invalid signature for operator '" +
+                            std::string(opSymbol) + "'",
+                        "Parameter must be declared as 'const ref " + typeKey +
+                            "'.");
+    return false;
+  }
+
+  if (!isCompositeSelfType(paramInfo, typeKey)) {
+    reportCompilerError("Invalid signature for operator '" +
+                            std::string(opSymbol) + "'",
+                        "Parameter must be declared as 'const ref " + typeKey +
+                            "'.");
+    return false;
+  }
+
+  return true;
+}
+
+static bool validateOperatorOverloadSignature(const std::string &typeKey,
+                                              const MethodDefinition &methodDef,
+                                              const PrototypeAST &proto) {
+  OverloadableOperator op = methodDef.getOperatorKind();
+  if (op == OverloadableOperator::None)
+    return true;
+
+  if (methodDef.isStatic()) {
+    reportCompilerError("Operator overload '" +
+                        std::string(overloadableOperatorSymbol(op)) +
+                        "' must be an instance method");
+    return false;
+  }
+
+  const std::vector<Parameter> &params = proto.getArgs();
+  const bool returnsByRef = proto.returnsByRef();
+  TypeInfo returnInfo = applyActiveTypeBindings(proto.getReturnTypeInfo());
+  finalizeTypeInfoMetadata(returnInfo);
+
+  auto requireSelfReturn = [&](bool byRef) -> bool {
+    if (returnsByRef != byRef || !isCompositeSelfType(returnInfo, typeKey)) {
+      reportCompilerError(
+          "Invalid signature for operator '" +
+              std::string(overloadableOperatorSymbol(op)) + "'",
+          std::string("Return type must be '") +
+              (byRef ? "ref " : "") + typeKey + "'.");
+      return false;
+    }
+    return true;
+  };
+
+  auto requireBoolReturn = [&]() -> bool {
+    if (returnsByRef || stripNullableAnnotations(typeNameFromInfo(returnInfo)) !=
+                            "bool") {
+      reportCompilerError(
+          "Invalid signature for operator '" +
+              std::string(overloadableOperatorSymbol(op)) + "'",
+          "Return type must be 'bool'.");
+      return false;
+    }
+    return true;
+  };
+
+  auto requireSingleConstRefSelfParam = [&]() -> bool {
+    if (params.size() != 1) {
+      reportCompilerError("Invalid signature for operator '" +
+                              std::string(overloadableOperatorSymbol(op)) + "'",
+                          "Expected exactly one parameter declared as 'const ref " +
+                              typeKey + "'.");
+      return false;
+    }
+    return validateConstRefSelfParameter(params[0], typeKey,
+                                         overloadableOperatorSymbol(op));
+  };
+
+  switch (op) {
+  case OverloadableOperator::Assign:
+    return requireSelfReturn(true) && requireSingleConstRefSelfParam();
+  case OverloadableOperator::AddAssign:
+  case OverloadableOperator::SubAssign:
+  case OverloadableOperator::MulAssign:
+  case OverloadableOperator::DivAssign:
+  case OverloadableOperator::ModAssign:
+  case OverloadableOperator::Add:
+  case OverloadableOperator::Sub:
+  case OverloadableOperator::Mul:
+  case OverloadableOperator::Div:
+  case OverloadableOperator::Mod:
+    return requireSelfReturn(false) && requireSingleConstRefSelfParam();
+  case OverloadableOperator::Equal:
+  case OverloadableOperator::NotEqual:
+  case OverloadableOperator::Less:
+  case OverloadableOperator::Greater:
+  case OverloadableOperator::LessEqual:
+  case OverloadableOperator::GreaterEqual:
+    return requireBoolReturn() && requireSingleConstRefSelfParam();
+  case OverloadableOperator::Dereference:
+  case OverloadableOperator::AddressOf:
+    if (!params.empty()) {
+      reportCompilerError("Invalid signature for operator '" +
+                              std::string(overloadableOperatorSymbol(op)) + "'",
+                          "Unary operator overloads must not declare parameters.");
+      return false;
+    }
+    return true;
+  case OverloadableOperator::Index:
+    if (params.empty()) {
+      reportCompilerError("Invalid signature for operator '[]'",
+                          "Indexer overload must declare at least one parameter.");
+      return false;
+    }
+    return true;
+  case OverloadableOperator::None:
+    break;
+  }
+
+  return true;
+}
+
 static ActiveCompositeContext *currentCompositeContextMutable() {
   if (CG.compositeContextStack.empty())
     return nullptr;
@@ -490,12 +637,16 @@ llvm::Type *StructAST::codegen() {
             lookupCompositeInfo(*metadata.baseClass)) {
       for (const auto &entry : baseInfo->methodInfo)
         metadata.methodInfo.emplace(entry.first, entry.second);
+      for (const auto &entry : baseInfo->operatorMethodNames)
+        metadata.operatorMethodNames.emplace(entry.first, entry.second);
     }
   }
   for (const std::string &ifaceName : metadata.interfaces) {
     if (const CompositeTypeInfo *ifaceInfo = lookupCompositeInfo(ifaceName)) {
       for (const auto &entry : ifaceInfo->methodInfo)
         metadata.methodInfo.emplace(entry.first, entry.second);
+      for (const auto &entry : ifaceInfo->operatorMethodNames)
+        metadata.operatorMethodNames.emplace(entry.first, entry.second);
     }
   }
   if (!validateCompositeHierarchy(typeKey, metadata)) {
@@ -715,6 +866,7 @@ llvm::Type *StructAST::codegen() {
 
     CompositeMemberInfo memberInfo;
     memberInfo.modifiers = MethodDef.getModifiers();
+    memberInfo.overloadedOperator = MethodDef.getOperatorKind();
     memberInfo.signature = Proto->getName();
     memberInfo.dispatchKey =
         makeMethodSignatureKey(MethodDef.getDisplayName(), *Proto, true);
@@ -1060,6 +1212,11 @@ llvm::Type *StructAST::codegen() {
     if (!Proto)
       continue;
 
+    if (MethodDef.isOperatorOverload()) {
+      if (!validateOperatorOverloadSignature(typeKey, MethodDef, *Proto))
+        return nullptr;
+    }
+
     const MemberModifiers &methodMods = MethodDef.getModifiers();
 
     if (metadata.kind == AggregateKind::Interface) {
@@ -1162,6 +1319,7 @@ llvm::Type *StructAST::codegen() {
 
     CompositeMemberInfo memberInfo;
     memberInfo.modifiers = MethodDef.getModifiers();
+    memberInfo.overloadedOperator = MethodDef.getOperatorKind();
     memberInfo.signature = Proto->getName();
     memberInfo.dispatchKey = methodKey;
     memberInfo.overridesSignature = overrideSignature;
@@ -1185,6 +1343,10 @@ llvm::Type *StructAST::codegen() {
     if (methodHasBody && !methodIsGeneric)
       memberInfo.mangledName = Proto->getMangledName();
     metadata.methodInfo[MethodDef.getDisplayName()] = std::move(memberInfo);
+    if (MethodDef.isOperatorOverload()) {
+      metadata.operatorMethodNames[MethodDef.getOperatorKind()] =
+          MethodDef.getDisplayName();
+    }
 
     if (!methodHasBody)
       continue;

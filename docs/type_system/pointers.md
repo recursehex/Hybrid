@@ -51,6 +51,8 @@ unsafe
 }
 ```
 
+Types may also overload `#` as an instance operator method. Those overload calls are still restricted to `unsafe` contexts.
+
 ### Dereference Operator (`@`)
 
 Accesses the value at a pointer address (like `*` in C++):
@@ -64,6 +66,8 @@ unsafe
     @ptr = 100          // x is now 100
 }
 ```
+
+Types may also overload `@` as an instance operator method. Those overload calls are still restricted to `unsafe` contexts.
 
 ### Arrow Operator (`->`)
 

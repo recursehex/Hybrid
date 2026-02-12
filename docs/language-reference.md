@@ -315,6 +315,19 @@ See `docs/memory/arc_best_practices.md` for ownership patterns and common ARC pi
 
 See the [Type System](type-system.md#nullable-types), [Structs](structs.md#nullable-fields), and [Expressions](expressions.md#null-safe-member-access) guides for details.
 
+## Operator Overloading
+
+Hybrid supports C++-style operator overloading on struct/class instance methods with a strict allowlist:
+
+- `=`
+- `+=`, `-=`, `*=`, `/=`, `%=`
+- `+`, `-`, `*`, `/`, `%`
+- `==`, `!=`, `<`, `>`, `<=`, `>=`
+- `@`, `#`
+- `[]`
+
+`@` and `#` overload calls require `unsafe`, and `[]` must return `ref` to support assignment through indexing.
+
 ## Supported Constructs
 
 - Variable declarations with mandatory initialization
