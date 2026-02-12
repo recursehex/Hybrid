@@ -744,6 +744,8 @@ set "emitted_ir_file="
 set run_opts_override_output=0
 set may_need_runtime=0
 set expected_diag_count=0
+if exist "!output_file!" del "!output_file!" >nul 2>&1
+if exist "!runtime_log!" del "!runtime_log!" >nul 2>&1
 if exist "!expected_diag_file!" del "!expected_diag_file!" >nul 2>&1
 if exist "!actual_diag_file!" del "!actual_diag_file!" >nul 2>&1
 if exist "!missing_diag_file!" del "!missing_diag_file!" >nul 2>&1
@@ -843,9 +845,9 @@ for /f %%v in ('powershell -NoProfile -Command "$s=$env:RUN_OPTS; if ($s -match 
 
 if !may_need_runtime! equ 1 if !run_opts_override_output! equ 0 (
     set "emitted_ir_file=%TEMP%\hybrid_test_%RANDOM%.ll"
-    cmd /c ""%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! "!test_file!" -o "!emitted_ir_file!" > "!output_file!" 2>&1"
+    "%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! "!test_file!" -o "!emitted_ir_file!" > "!output_file!" 2>&1
 ) else (
-    cmd /c ""%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! < "%test_file%" > "!output_file!" 2>&1"
+    "%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS% !run_opts! < "!test_file!" > "!output_file!" 2>&1
 )
 set exit_code=%errorlevel%
 
@@ -967,7 +969,7 @@ if !should_check_runtime! equ 1 if defined RUNTIME_LIB (
                 )
 
                 if !errorlevel! equ 0 (
-                    cmd /c ""!temp_bin!"" > "!runtime_log!" 2>&1
+                    "!temp_bin!" > "!runtime_log!" 2>&1
                     set runtime_exit_code=!errorlevel!
                     set runtime_ran=1
                     if not "!runtime_exit_code!"=="0" set runtime_failed=1
@@ -1069,12 +1071,12 @@ if %VERBOSE_MODE% equ 1 if !show_output! equ 1 (
     echo %BLUE%=== Test: !test_name! ===%NC%
     echo File: !test_file!
     echo Content:
-    findstr /n "^" "!test_file!"
+    findstr /n /r /c:".*" "!test_file!"
     echo.
     echo Output:
     type "!output_file!"
     echo.
-    if defined runtime_log (
+    if exist "!runtime_log!" (
         echo Runtime output:
         type "!runtime_log!"
         echo.
@@ -1274,14 +1276,14 @@ for /d %%d in ("test\multi_unit\*") do (
     set "multi_stdout=!multi_temp!.log"
     set "multi_runtime=!multi_temp!.run"
 
-    cmd /c ""%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS%!cmd_files! -o "!multi_output!"" > "!multi_stdout!" 2>&1
+    "%HYBRID_EXEC%"%EXTRA_COMPILER_ARGS%!cmd_files! -o "!multi_output!" > "!multi_stdout!" 2>&1
     set multi_status=!errorlevel!
 
     set runtime_status=0
     if /i "!multi_expect!"=="pass" (
         if !multi_status! equ 0 (
             if exist "!multi_output!" (
-                cmd /c ""!multi_output!"" > "!multi_runtime!" 2>&1
+                "!multi_output!" > "!multi_runtime!" 2>&1
                 set runtime_status=!errorlevel!
             ) else (
                 set runtime_status=1
