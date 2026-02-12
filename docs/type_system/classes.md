@@ -290,6 +290,29 @@ class Ticker
   }
   ```
 
+### Operator overloads
+
+Classes can declare operator overloads as instance methods using the same allowlist as structs (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `@`, `#`, `[]`).
+
+```cs
+class Measure
+{
+    int value
+
+    Measure +(const ref Measure rhs)
+    {
+        return Measure(this.value + rhs.value)
+    }
+
+    bool >=(const ref Measure rhs)
+    {
+        return this.value >= rhs.value
+    }
+}
+```
+
+`@` and `#` overload calls still require `unsafe`. For `[]`, return `ref` to support indexed assignment.
+
 ## Destructors and `free`
 
 - Declare a single destructor per type with `~TypeName() { ... }`; parameters, generics, return types, `static`, and `abstract` are rejected.

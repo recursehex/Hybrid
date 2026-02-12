@@ -40,6 +40,12 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
   }
 
   if (CurTok != tok_identifier) {
+    // Keep malformed generic closers in declaration parsing so diagnostics stay
+    // specific instead of cascading into expression parsing.
+    if (CurTok == tok_gt) {
+      reportCompilerError("Expected identifier after type");
+      return nullptr;
+    }
     currentParser() = parserBackup;
     currentLexer() = lexerBackup;
     return nullptr;
@@ -815,10 +821,14 @@ std::unique_ptr<StmtAST> ParseStatement() {
     if (CurTok == '(') {
       if (auto Decl = ParseVariableDeclaration())
         return Decl;
+      if (currentParser().hadError)
+        return nullptr;
     } else if (IsValidType()) {
       if (currentLexer().lastChar != '.')
         if (auto Decl = ParseVariableDeclaration())
           return Decl;
+      if (currentParser().hadError)
+        return nullptr;
     }
     // Try to parse as an expression statement
     auto Expr = ParseExpression();

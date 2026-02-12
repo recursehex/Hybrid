@@ -72,6 +72,7 @@ struct DelegateTypeInfo {
 
 struct CompositeMemberInfo {
   MemberModifiers modifiers;
+  OverloadableOperator overloadedOperator = OverloadableOperator::None;
   std::string signature;
   std::string mangledName;
   std::string dispatchKey;
@@ -129,6 +130,7 @@ struct CompositeTypeInfo {
   std::vector<TypeInfo> resolvedInterfaceTypeInfos;
   std::map<std::string, std::map<std::string, TypeInfo>> resolvedBaseTypeArgumentBindings;
   std::map<std::string, CompositeMemberInfo> methodInfo;
+  std::map<OverloadableOperator, std::string> operatorMethodNames;
   std::vector<std::string> baseTypes;
   std::vector<std::string> genericParameters;
   std::optional<std::string> baseClass;

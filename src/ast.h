@@ -1303,6 +1303,36 @@ enum class MethodKind : uint8_t {
   Destructor
 };
 
+enum class OverloadableOperator : uint8_t {
+  None,
+  Assign,
+  AddAssign,
+  SubAssign,
+  MulAssign,
+  DivAssign,
+  ModAssign,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Mod,
+  Equal,
+  NotEqual,
+  Less,
+  Greater,
+  LessEqual,
+  GreaterEqual,
+  Dereference,
+  AddressOf,
+  Index
+};
+
+std::optional<OverloadableOperator>
+overloadableOperatorFromSymbol(std::string_view symbol);
+std::string_view overloadableOperatorSymbol(OverloadableOperator op);
+std::string_view overloadableOperatorCanonicalName(OverloadableOperator op);
+bool overloadableOperatorRequiresUnsafe(OverloadableOperator op);
+
 enum class AccessorKind : uint8_t {
   Get,
   Set
@@ -1411,6 +1441,7 @@ struct MethodDefinition {
   std::unique_ptr<PrototypeAST> Prototype;
   MemberModifiers Modifiers;
   MethodKind Kind = MethodKind::Regular;
+  OverloadableOperator Operator = OverloadableOperator::None;
   std::string DisplayName;
   bool HasImplicitThis = false;
   PrototypeAST *PrototypeView = nullptr;
@@ -1441,6 +1472,9 @@ struct MethodDefinition {
   }
   const MemberModifiers &getModifiers() const { return Modifiers; }
   MethodKind getKind() const { return Kind; }
+  OverloadableOperator getOperatorKind() const { return Operator; }
+  void setOperatorKind(OverloadableOperator op) { Operator = op; }
+  bool isOperatorOverload() const { return Operator != OverloadableOperator::None; }
   const std::string &getDisplayName() const { return DisplayName; }
   void markImplicitThisInjected() { HasImplicitThis = true; }
   bool hasImplicitThis() const { return HasImplicitThis; }

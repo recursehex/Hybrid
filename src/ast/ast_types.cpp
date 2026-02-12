@@ -348,6 +348,152 @@ const ActiveCompositeContext *currentCompositeContext() {
   return currentCompositeContextMutable();
 }
 
+std::optional<OverloadableOperator>
+overloadableOperatorFromSymbol(std::string_view symbol) {
+  if (symbol == "=")
+    return OverloadableOperator::Assign;
+  if (symbol == "+=")
+    return OverloadableOperator::AddAssign;
+  if (symbol == "-=")
+    return OverloadableOperator::SubAssign;
+  if (symbol == "*=")
+    return OverloadableOperator::MulAssign;
+  if (symbol == "/=")
+    return OverloadableOperator::DivAssign;
+  if (symbol == "%=")
+    return OverloadableOperator::ModAssign;
+  if (symbol == "+")
+    return OverloadableOperator::Add;
+  if (symbol == "-")
+    return OverloadableOperator::Sub;
+  if (symbol == "*")
+    return OverloadableOperator::Mul;
+  if (symbol == "/")
+    return OverloadableOperator::Div;
+  if (symbol == "%")
+    return OverloadableOperator::Mod;
+  if (symbol == "==")
+    return OverloadableOperator::Equal;
+  if (symbol == "!=")
+    return OverloadableOperator::NotEqual;
+  if (symbol == "<")
+    return OverloadableOperator::Less;
+  if (symbol == ">")
+    return OverloadableOperator::Greater;
+  if (symbol == "<=")
+    return OverloadableOperator::LessEqual;
+  if (symbol == ">=")
+    return OverloadableOperator::GreaterEqual;
+  if (symbol == "@")
+    return OverloadableOperator::Dereference;
+  if (symbol == "#")
+    return OverloadableOperator::AddressOf;
+  if (symbol == "[]")
+    return OverloadableOperator::Index;
+  return std::nullopt;
+}
+
+std::string_view overloadableOperatorSymbol(OverloadableOperator op) {
+  switch (op) {
+  case OverloadableOperator::Assign:
+    return "=";
+  case OverloadableOperator::AddAssign:
+    return "+=";
+  case OverloadableOperator::SubAssign:
+    return "-=";
+  case OverloadableOperator::MulAssign:
+    return "*=";
+  case OverloadableOperator::DivAssign:
+    return "/=";
+  case OverloadableOperator::ModAssign:
+    return "%=";
+  case OverloadableOperator::Add:
+    return "+";
+  case OverloadableOperator::Sub:
+    return "-";
+  case OverloadableOperator::Mul:
+    return "*";
+  case OverloadableOperator::Div:
+    return "/";
+  case OverloadableOperator::Mod:
+    return "%";
+  case OverloadableOperator::Equal:
+    return "==";
+  case OverloadableOperator::NotEqual:
+    return "!=";
+  case OverloadableOperator::Less:
+    return "<";
+  case OverloadableOperator::Greater:
+    return ">";
+  case OverloadableOperator::LessEqual:
+    return "<=";
+  case OverloadableOperator::GreaterEqual:
+    return ">=";
+  case OverloadableOperator::Dereference:
+    return "@";
+  case OverloadableOperator::AddressOf:
+    return "#";
+  case OverloadableOperator::Index:
+    return "[]";
+  case OverloadableOperator::None:
+    break;
+  }
+  return {};
+}
+
+std::string_view overloadableOperatorCanonicalName(OverloadableOperator op) {
+  switch (op) {
+  case OverloadableOperator::Assign:
+    return "__op_assign";
+  case OverloadableOperator::AddAssign:
+    return "__op_add_assign";
+  case OverloadableOperator::SubAssign:
+    return "__op_sub_assign";
+  case OverloadableOperator::MulAssign:
+    return "__op_mul_assign";
+  case OverloadableOperator::DivAssign:
+    return "__op_div_assign";
+  case OverloadableOperator::ModAssign:
+    return "__op_mod_assign";
+  case OverloadableOperator::Add:
+    return "__op_add";
+  case OverloadableOperator::Sub:
+    return "__op_sub";
+  case OverloadableOperator::Mul:
+    return "__op_mul";
+  case OverloadableOperator::Div:
+    return "__op_div";
+  case OverloadableOperator::Mod:
+    return "__op_mod";
+  case OverloadableOperator::Equal:
+    return "__op_eq";
+  case OverloadableOperator::NotEqual:
+    return "__op_ne";
+  case OverloadableOperator::Less:
+    return "__op_lt";
+  case OverloadableOperator::Greater:
+    return "__op_gt";
+  case OverloadableOperator::LessEqual:
+    return "__op_le";
+  case OverloadableOperator::GreaterEqual:
+    return "__op_ge";
+  case OverloadableOperator::Dereference:
+    return "__op_deref";
+  case OverloadableOperator::AddressOf:
+    return "__op_addr";
+  case OverloadableOperator::Index:
+    return "__op_index";
+  case OverloadableOperator::None:
+    break;
+  }
+  return {};
+}
+
+bool overloadableOperatorRequiresUnsafe(OverloadableOperator op) {
+  return op == OverloadableOperator::Dereference ||
+         op == OverloadableOperator::AddressOf;
+}
+
 std::string baseCompositeName(const std::string &typeName) {
   if (typeName.empty())
     return {};
@@ -2365,6 +2511,17 @@ const CompositeTypeInfo *resolveCompositeTypeInfo(const TypeInfo &info) {
           lookupCompositeInfo(typeName, /*countHit=*/false))
     return meta;
   return materializeCompositeInstantiation(bound);
+}
+
+const CompositeMemberInfo *lookupOperatorMember(const CompositeTypeInfo &info,
+                                                OverloadableOperator op) {
+  auto nameIt = info.operatorMethodNames.find(op);
+  if (nameIt == info.operatorMethodNames.end())
+    return nullptr;
+  auto methodIt = info.methodInfo.find(nameIt->second);
+  if (methodIt == info.methodInfo.end())
+    return nullptr;
+  return &methodIt->second;
 }
 
 llvm::Value *emitNullCheckValue(llvm::Value *value,

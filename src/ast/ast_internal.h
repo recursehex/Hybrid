@@ -402,6 +402,8 @@ const DelegateTypeInfo *lookupDelegateInfo(const TypeInfo &info);
 const DelegateTypeInfo *lookupDelegateInfo(llvm::Type *type);
 const CompositeTypeInfo *lookupCompositeInfo(const std::string &name,
                                              bool countHit = true);
+const CompositeMemberInfo *lookupOperatorMember(const CompositeTypeInfo &info,
+                                                OverloadableOperator op);
 const CompositeTypeInfo *
 materializeCompositeInstantiation(const TypeInfo &requestedType);
 const CompositeTypeInfo *resolveSmartPointerMetadata(const TypeInfo &info);
@@ -523,7 +525,8 @@ llvm::Value *emitMemberCallByInfo(const CompositeTypeInfo &info,
                                   llvm::Value *instanceValue,
                                   std::vector<llvm::Value *> argValues,
                                   std::vector<bool> argIsRef,
-                                  ExprAST *typeOwner);
+                                  ExprAST *typeOwner,
+                                  bool preserveRefReturn = false);
 bool isDelegateFunctionReference(const VariableExprAST &var);
 bool isDelegateMethodReference(const MemberAccessExprAST &member);
 bool canBindDelegateReference(const DelegateTypeInfo &delegateInfo,
@@ -549,7 +552,8 @@ llvm::Value *emitResolvedCallInternal(
     const std::vector<std::unique_ptr<ExprAST>> *argExprs = nullptr,
     bool preferGeneric = false, FunctionOverload *forced = nullptr,
     ExprAST *typeOwner = nullptr,
-    std::vector<ProvidedArgument> *providedArgs = nullptr);
+    std::vector<ProvidedArgument> *providedArgs = nullptr,
+    bool preserveRefReturn = false);
 
 bool builderInTopLevelContext();
 void prepareTopLevelStatementContext();

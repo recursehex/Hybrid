@@ -300,7 +300,8 @@ bool IsValidType() {
          currentParser().isGenericParameter(IdentifierStr);
 }
 
-bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
+bool AppendTypeSuffix(std::string &Type, bool &pointerSeen,
+                      bool allowOperatorDisambiguation) {
   while (true) {
     if (CurTok == tok_null_array_access) {
       // Treat '?[' as nullable element type followed by array suffix
@@ -331,6 +332,17 @@ bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
     }
 
     if (CurTok == tok_at && !pointerSeen) {
+      if (allowOperatorDisambiguation) {
+        TokenReplayScope replayScope(true);
+        getNextToken(); // inspect token after '@'
+        SkipNewlines();
+        if (CurTok == '(') {
+          replayScope.rollback();
+          break;
+        }
+        replayScope.rollback();
+      }
+
       if (!isInUnsafeContext()) {
         reportCompilerError(
             "Pointer types can only be used within unsafe blocks or unsafe functions");
@@ -363,6 +375,21 @@ bool AppendTypeSuffix(std::string &Type, bool &pointerSeen) {
     }
 
     if (CurTok == '[') {
+      if (allowOperatorDisambiguation) {
+        TokenReplayScope replayScope(true);
+        getNextToken(); // inspect token after '['
+        SkipNewlines();
+        if (CurTok == ']') {
+          getNextToken(); // inspect token after ']'
+          SkipNewlines();
+          if (CurTok == '(') {
+            replayScope.rollback();
+            break;
+          }
+        }
+        replayScope.rollback();
+      }
+
       std::string segment = "[";
       getNextToken(); // eat '['
 
@@ -520,22 +547,47 @@ bool ParseGenericParameterList(std::vector<std::string> &parameters) {
 }
 
 static bool ParseTypeArgumentListForType(std::string &TypeName,
-                                         std::vector<TypeInfo> &TypeArgs) {
+                                         std::vector<TypeInfo> &TypeArgs,
+                                         bool allowDisambiguation) {
   if (CurTok != tok_lt)
     return true;
 
+  std::string originalTypeName = TypeName;
+  std::vector<TypeInfo> originalTypeArgs = TypeArgs;
+  bool canDisambiguateAsOperator = false;
+  if (allowDisambiguation) {
+    // Only disambiguate '<' as an operator member name when it is directly
+    // followed by a parameter list, e.g. `bool <(...)`.
+    TokenReplayScope probeScope(true);
+    getNextToken(); // inspect token after '<'
+    SkipNewlines();
+    canDisambiguateAsOperator = (CurTok == '(');
+    probeScope.rollback();
+  }
+
+  TokenReplayScope replayScope(canDisambiguateAsOperator);
   TemplateAngleScope angleScope;
   TypeName.push_back('<');
 
   getNextToken(); // eat '<'
   SkipNewlines();
 
+  auto fail = [&](const std::string &message) -> bool {
+    if (canDisambiguateAsOperator) {
+      replayScope.rollback();
+      TypeName = originalTypeName;
+      TypeArgs = originalTypeArgs;
+      return true;
+    }
+    reportCompilerError(message);
+    return false;
+  };
+
   bool expectArgument = true;
   while (true) {
     if (CurTok == tok_gt) {
       if (expectArgument) {
-        reportCompilerError("Expected type argument after '<'");
-        return false;
+        return fail("Expected type argument after '<'");
       }
       TypeName.push_back('>');
       getNextToken();
@@ -543,8 +595,7 @@ static bool ParseTypeArgumentListForType(std::string &TypeName,
     }
 
     if (CurTok == tok_eof) {
-      reportCompilerError("Unterminated generic argument list");
-      return false;
+      return fail("Unterminated generic argument list");
     }
 
     if (!expectArgument) {
@@ -557,19 +608,16 @@ static bool ParseTypeArgumentListForType(std::string &TypeName,
       }
       if (CurTok == tok_gt)
         continue;
-      reportCompilerError("Expected ',' or '>' in generic argument list");
-      return false;
+      return fail("Expected ',' or '>' in generic argument list");
     }
 
     if (!IsValidType() && CurTok != '(') {
-      reportCompilerError("Expected type argument in generic list");
-      return false;
+      return fail("Expected type argument in generic list");
     }
 
     TypeInfo argInfo;
-    if (!ParseCompleteTypeInfo(argInfo, false)) {
-      reportCompilerError("Failed to parse type argument");
-      return false;
+    if (!ParseCompleteTypeInfo(argInfo, false, false)) {
+      return fail("Failed to parse type argument");
     }
 
     TypeArgs.push_back(argInfo);
@@ -578,10 +626,13 @@ static bool ParseTypeArgumentListForType(std::string &TypeName,
     expectArgument = false;
   }
 
+  if (canDisambiguateAsOperator)
+    replayScope.commit();
   return true;
 }
 
-bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef) {
+bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef,
+                           bool allowTypeArgDisambiguation) {
   std::string TypeName;
   std::vector<TypeInfo> parsedTypeArguments;
   std::vector<std::string> tupleElementNames;
@@ -652,14 +703,15 @@ bool ParseCompleteTypeInfo(TypeInfo &outInfo, bool declaredRef) {
     TypeName = IdentifierStr;
     getNextToken(); // eat base type
 
-    if (!ParseTypeArgumentListForType(TypeName, parsedTypeArguments))
+    if (!ParseTypeArgumentListForType(TypeName, parsedTypeArguments,
+                                      allowTypeArgDisambiguation))
       return false;
   }
 
   SkipNewlines();
 
   bool pointerSeen = false;
-  if (!AppendTypeSuffix(TypeName, pointerSeen))
+  if (!AppendTypeSuffix(TypeName, pointerSeen, allowTypeArgDisambiguation))
     return false;
 
   outInfo = buildDeclaredTypeInfo(TypeName, declaredRef);

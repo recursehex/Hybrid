@@ -598,12 +598,139 @@ llvm::Value *BinaryExprAST::codegen() {
   }
 
   llvm::Value *R = nullptr;
+  llvm::Value *precomputedLhsValue = nullptr;
+  bool hasPrecomputedLhsValue = false;
   const bool isCompoundArithmetic =
       (Op == "+=" || Op == "-=" || Op == "*=" || Op == "/=" || Op == "%=");
   const bool isCompoundBitwise =
       (Op == "&=" || Op == "|=" || Op == "^=" || Op == "<<=" || Op == ">>=");
   const bool isAssignmentOp =
       (Op == "=" || isCompoundArithmetic || isCompoundBitwise);
+
+  auto tryEmitOverloadedBinaryOperator =
+      [&]() -> std::optional<llvm::Value *> {
+    auto opKindOpt = overloadableOperatorFromSymbol(Op);
+    if (!opKindOpt)
+      return std::nullopt;
+
+    const OverloadableOperator opKind = *opKindOpt;
+    if (opKind == OverloadableOperator::Dereference ||
+        opKind == OverloadableOperator::AddressOf ||
+        opKind == OverloadableOperator::Index) {
+      return std::nullopt;
+    }
+
+    if (isAssignmentOp) {
+      if (auto *member = dynamic_cast<MemberAccessExprAST *>(getLHS())) {
+        std::string ownerName = resolveCompositeName(member->getObject());
+        if (const CompositeTypeInfo *memberOwner =
+                lookupCompositeInfo(ownerName)) {
+          if (!shouldBypassPropertyAccess(ownerName, member->getMemberName()) &&
+              memberOwner->properties.contains(member->getMemberName())) {
+            return std::nullopt;
+          }
+        }
+      }
+
+      if (auto *index = dynamic_cast<ArrayIndexExprAST *>(getLHS())) {
+        if (auto indexOwnerInfo = resolveExprTypeInfo(index->getArray())) {
+          if (const CompositeTypeInfo *indexOwner =
+                  resolveCompositeTypeInfo(*indexOwnerInfo)) {
+            if (indexOwner->indexer &&
+                !lookupOperatorMember(*indexOwner,
+                                      OverloadableOperator::Index)) {
+              return std::nullopt;
+            }
+          }
+        }
+      }
+    }
+
+    auto lhsInfoOpt = resolveExprTypeInfo(getLHS());
+    if (!lhsInfoOpt) {
+      precomputedLhsValue = getLHS()->codegen();
+      if (!precomputedLhsValue)
+        return std::optional<llvm::Value *>{nullptr};
+      hasPrecomputedLhsValue = true;
+      lhsInfoOpt = resolveExprTypeInfo(getLHS());
+      if (!lhsInfoOpt)
+        return std::nullopt;
+    }
+
+    const CompositeTypeInfo *ownerInfo = resolveCompositeTypeInfo(*lhsInfoOpt);
+    if (!ownerInfo)
+      return std::nullopt;
+
+    const CompositeMemberInfo *operatorInfo =
+        lookupOperatorMember(*ownerInfo, opKind);
+    if (!operatorInfo)
+      return std::nullopt;
+
+    std::string ownerName = stripNullableAnnotations(typeNameFromInfo(*lhsInfoOpt));
+    if (ownerName.empty())
+      ownerName = stripNullableAnnotations(lhsInfoOpt->typeName);
+    if (ownerName.empty())
+      ownerName = "<composite>";
+
+    if (!ensureMemberAccessAllowed(operatorInfo->modifiers, AccessIntent::Call,
+                                   ownerName,
+                                   std::string(overloadableOperatorSymbol(opKind)))) {
+      return std::optional<llvm::Value *>{nullptr};
+    }
+
+    std::vector<llvm::Value *> argValues;
+    std::vector<bool> argIsRef;
+    argValues.reserve(1);
+    argIsRef.reserve(1);
+
+    bool rhsIsRef = false;
+    if (operatorInfo->parameterIsRef.size() > 1)
+      rhsIsRef = operatorInfo->parameterIsRef[1];
+    else
+      rhsIsRef = dynamic_cast<RefExprAST *>(getRHS()) != nullptr;
+    llvm::Value *rhsValue = nullptr;
+    if (rhsIsRef) {
+      if (dynamic_cast<RefExprAST *>(getRHS()) != nullptr) {
+        rhsValue = getRHS()->codegen_ptr();
+        if (!rhsValue)
+          return std::optional<llvm::Value *>{nullptr};
+      } else {
+        llvm::Value *materialized = getRHS()->codegen();
+        if (!materialized)
+          return std::optional<llvm::Value *>{nullptr};
+        llvm::AllocaInst *tmp =
+            Builder->CreateAlloca(materialized->getType(), nullptr,
+                                  "op.ref.arg");
+        Builder->CreateStore(materialized, tmp);
+        rhsValue = tmp;
+      }
+    } else {
+      rhsValue = getRHS()->codegen();
+      if (!rhsValue)
+        return std::optional<llvm::Value *>{nullptr};
+    }
+    argValues.push_back(rhsValue);
+    argIsRef.push_back(rhsIsRef);
+
+    llvm::Value *lhsInstanceValue = nullptr;
+    if (hasPrecomputedLhsValue) {
+      lhsInstanceValue = precomputedLhsValue;
+    } else {
+      lhsInstanceValue = getLHS()->codegen();
+      if (!lhsInstanceValue)
+        return std::optional<llvm::Value *>{nullptr};
+    }
+
+    llvm::Value *callValue = emitMemberCallByInfo(
+        *ownerInfo, *operatorInfo, ownerName, getLHS(), lhsInstanceValue,
+        std::move(argValues), std::move(argIsRef), this);
+    return std::optional<llvm::Value *>{callValue};
+  };
+
+  if (auto overloaded = tryEmitOverloadedBinaryOperator();
+      overloaded.has_value()) {
+    return *overloaded;
+  }
 
   if (isAssignmentOp) {
     const ExprAST *rhsCheckExpr = unwrapRefExpr(getRHS());
@@ -1066,6 +1193,11 @@ llvm::Value *BinaryExprAST::codegen() {
       }
 
       std::string ownerName = arrayDesc.sanitized;
+      if (ownerName.empty()) {
+        if (auto arrayInfoOpt = resolveExprTypeInfo(indexExpr.getArray()))
+          ownerName =
+              sanitizeCompositeLookupName(typeNameFromInfo(*arrayInfoOpt));
+      }
       if (ownerName.empty())
         return std::nullopt;
 
@@ -1221,7 +1353,10 @@ llvm::Value *BinaryExprAST::codegen() {
 
   llvm::Value *L = nullptr;
   if (!isAssignmentOp) {
-    L = getLHS()->codegen();
+    if (hasPrecomputedLhsValue)
+      L = precomputedLhsValue;
+    else
+      L = getLHS()->codegen();
     if (!L)
       return nullptr;
   }
@@ -2654,6 +2789,64 @@ llvm::Value *BinaryExprAST::codegen() {
         return LogErrorV(("Unknown variable name: " + LHSE->getName()).c_str());
       } else if (ArrayIndexExprAST *LHSAI = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
         // Array or tuple element assignment
+        if (auto arrayInfoOpt = resolveExprTypeInfo(LHSAI->getArray())) {
+          if (const CompositeTypeInfo *ownerInfo =
+                  resolveCompositeTypeInfo(*arrayInfoOpt)) {
+            if (lookupOperatorMember(*ownerInfo, OverloadableOperator::Index)) {
+              llvm::Value *elemPtr = LHSAI->codegen_ptr();
+              if (!elemPtr)
+                return nullptr;
+
+              auto elemInfoOpt = resolveExprTypeInfo(LHSAI);
+              if (!elemInfoOpt) {
+                reportCompilerError(
+                    "Unable to determine indexed assignment target type");
+                return nullptr;
+              }
+              TypeInfo elementInfo = *elemInfoOpt;
+              finalizeTypeInfoMetadata(elementInfo);
+
+              if (rhsIsNullable && !typeAllowsNull(elementInfo))
+                return LogErrorV(
+                    "Cannot assign nullable value to non-nullable indexed value");
+
+              llvm::Value *rhsValue = emitAssignmentRHS(&elementInfo);
+              if (!rhsValue)
+                return nullptr;
+
+              const std::string elementTypeName = typeNameFromInfo(elementInfo);
+              llvm::Type *elemType = getTypeFromString(elementTypeName);
+              if (!elemType)
+                return LogErrorV("Invalid indexed assignment target type");
+              if (diagnoseDisallowedImplicitIntegerConversion(
+                      getRHS(), rhsValue, elemType, elementTypeName,
+                      "assignment to indexed value"))
+                return nullptr;
+              rhsValue = castToType(rhsValue, elemType, elementTypeName);
+
+              bool rhsIsTemporary = getRHS() && getRHS()->isTemporary();
+              if (elementInfo.requiresARC() && !elementInfo.isSmartPointer()) {
+                if (rhsIsTemporary) {
+                  llvm::Value *currentVal = Builder->CreateLoad(
+                      elemType, elemPtr,
+                      buildArcOpLabel("index.op", "temp.load.old"));
+                  emitArcRelease(currentVal, elementInfo,
+                                 buildArcOpLabel("index.op",
+                                                 "temp.release.old"));
+                  Builder->CreateStore(rhsValue, elemPtr);
+                } else {
+                  emitManagedStore(elemPtr, rhsValue, elementInfo, "index.op");
+                }
+              } else {
+                Builder->CreateStore(rhsValue, elemPtr);
+              }
+
+              setTypeName("void");
+              return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
+            }
+          }
+        }
+
         std::optional<ArrayElementAccessInfo> accessOpt;
         if (auto tupleInfoOpt = resolveTupleTypeInfo(LHSAI->getArray());
             tupleInfoOpt && tupleInfoOpt->isTupleType()) {
@@ -3600,6 +3793,40 @@ llvm::Value *UnaryExprAST::codegen() {
     return isPrefix ? NextVal : CurVal;
   }
 
+  if (Op == "@" || Op == "#") {
+    auto opKindOpt = overloadableOperatorFromSymbol(Op);
+    if (opKindOpt) {
+      if (auto operandTypeInfo = resolveExprTypeInfo(Operand.get())) {
+        if (const CompositeTypeInfo *ownerInfo =
+                resolveCompositeTypeInfo(*operandTypeInfo)) {
+          if (const CompositeMemberInfo *operatorInfo =
+                  lookupOperatorMember(*ownerInfo, *opKindOpt)) {
+            if (overloadableOperatorRequiresUnsafe(*opKindOpt) && !parsedUnsafe) {
+              return LogErrorV("Operator '" + Op + "' requires unsafe context");
+            }
+
+            std::string ownerName =
+                stripNullableAnnotations(typeNameFromInfo(*operandTypeInfo));
+            if (ownerName.empty())
+              ownerName = "<composite>";
+
+            if (!ensureMemberAccessAllowed(operatorInfo->modifiers,
+                                           AccessIntent::Call, ownerName, Op))
+              return nullptr;
+
+            llvm::Value *operandValue = Operand->codegen();
+            if (!operandValue)
+              return nullptr;
+
+            return emitMemberCallByInfo(*ownerInfo, *operatorInfo, ownerName,
+                                        Operand.get(), operandValue, {}, {},
+                                        this);
+          }
+        }
+      }
+    }
+  }
+
   // Handle other unary operators
   llvm::Value *OperandV = Operand->codegen();
   if (!OperandV)
@@ -3828,6 +4055,40 @@ llvm::Value *UnaryExprAST::codegen() {
 // Generate pointer for unary expressions (for address-of operations)
 llvm::Value *UnaryExprAST::codegen_ptr() {
   if (Op == "@") {
+    if (auto operandTypeInfo = resolveExprTypeInfo(Operand.get())) {
+      if (const CompositeTypeInfo *ownerInfo =
+              resolveCompositeTypeInfo(*operandTypeInfo)) {
+        if (const CompositeMemberInfo *operatorInfo = lookupOperatorMember(
+                *ownerInfo, OverloadableOperator::Dereference)) {
+          if (!wasParsedInUnsafe())
+            return LogErrorV("Operator '@' requires unsafe context");
+          if (!operatorInfo->returnsByRef) {
+            reportCompilerError("Operator '@' on type '" +
+                                stripNullableAnnotations(
+                                    typeNameFromInfo(*operandTypeInfo)) +
+                                "' must return ref to be used as an lvalue");
+            return nullptr;
+          }
+
+          std::string ownerName =
+              stripNullableAnnotations(typeNameFromInfo(*operandTypeInfo));
+          if (ownerName.empty())
+            ownerName = "<composite>";
+          if (!ensureMemberAccessAllowed(operatorInfo->modifiers,
+                                         AccessIntent::Call, ownerName, "@"))
+            return nullptr;
+
+          llvm::Value *operandValue = Operand->codegen();
+          if (!operandValue)
+            return nullptr;
+
+          return emitMemberCallByInfo(*ownerInfo, *operatorInfo, ownerName,
+                                      Operand.get(), operandValue, {}, {}, this,
+                                      true);
+        }
+      }
+    }
+
     TypeInfo operandInfo = makeTypeInfo(Operand->getTypeName());
     finalizeTypeInfoMetadata(operandInfo);
     if (!operandInfo.isSmartPointer()) {

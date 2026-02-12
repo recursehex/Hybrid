@@ -429,7 +429,7 @@ llvm::Value *emitResolvedCallInternal(
     const std::vector<bool> &ArgIsRef,
     const std::vector<std::unique_ptr<ExprAST>> *originalArgs,
     bool preferGeneric, FunctionOverload *forced, ExprAST *typeOwner,
-    std::vector<ProvidedArgument> *providedArgs) {
+    std::vector<ProvidedArgument> *providedArgs, bool preserveRefReturn) {
   struct CandidateCall {
     FunctionOverload *overload = nullptr;
     llvm::Function *function = nullptr;
@@ -1034,7 +1034,7 @@ llvm::Value *emitResolvedCallInternal(
     if (typeOwner)
       typeOwner->setTypeInfo(chosen->returnType);
 
-    if (chosen->returnsByRef) {
+    if (chosen->returnsByRef && !preserveRefReturn) {
       llvm::Type *valueType = getTypeFromString(typeNameFromInfo(chosen->returnType));
       if (!valueType)
         return LogErrorV("Unable to determine ref return type for call");
@@ -1755,7 +1755,8 @@ static llvm::Value *emitDynamicCallRaw(const CompositeMemberInfo &memberInfo,
                                        llvm::Value *fnPtrRaw,
                                        std::vector<llvm::Value *> argValues,
                                        const std::vector<bool> &argIsRef,
-                                       ExprAST *typeOwner) {
+                                       ExprAST *typeOwner,
+                                       bool preserveRefReturn) {
   const size_t paramCount = memberInfo.parameterTypes.size();
   std::vector<llvm::Type *> paramLLVMTypes;
   paramLLVMTypes.reserve(paramCount);
@@ -1823,7 +1824,7 @@ static llvm::Value *emitDynamicCallRaw(const CompositeMemberInfo &memberInfo,
     callValue = Builder->CreateCall(fnType, fnPtr, argValues, "member.dyncall");
     if (typeOwner)
       typeOwner->setTypeInfo(memberInfo.returnType);
-    if (memberInfo.returnsByRef) {
+    if (memberInfo.returnsByRef && !preserveRefReturn) {
       llvm::Type *valueType = getTypeFromString(typeNameFromInfo(memberInfo.returnType));
       if (!valueType)
         return LogErrorV("Unable to determine ref return type for dynamic call");
@@ -1841,7 +1842,8 @@ llvm::Value *emitMemberCallByInfo(const CompositeTypeInfo &info,
                                   llvm::Value *instanceValue,
                                   std::vector<llvm::Value *> argValues,
                                   std::vector<bool> argIsRef,
-                                  ExprAST *typeOwner) {
+                                  ExprAST *typeOwner,
+                                  bool preserveRefReturn) {
   bool isStaticMethod =
       static_cast<uint8_t>(memberInfo.modifiers.storage & StorageFlag::Static) != 0;
 
@@ -1962,7 +1964,7 @@ llvm::Value *emitMemberCallByInfo(const CompositeTypeInfo &info,
         Builder->CreateLoad(voidPtrTy, fnPtrAddr, "hybrid.iface.fn");
 
     return emitDynamicCallRaw(memberInfo, fnPtrRaw, std::move(argValues),
-                              argIsRef, typeOwner);
+                              argIsRef, typeOwner, preserveRefReturn);
   }
 
   bool isBaseQualifier =
@@ -2014,10 +2016,10 @@ llvm::Value *emitMemberCallByInfo(const CompositeTypeInfo &info,
         Builder->CreateLoad(voidPtrTy, fnPtrAddr, "hybrid.vtable.fn");
 
     return emitDynamicCallRaw(memberInfo, fnPtrRaw, std::move(argValues),
-                              argIsRef, typeOwner);
+                              argIsRef, typeOwner, preserveRefReturn);
   }
 
   return emitResolvedCallInternal(memberInfo.signature, std::move(argValues),
                                   argIsRef, nullptr, false, nullptr,
-                                  typeOwner, nullptr);
+                                  typeOwner, nullptr, preserveRefReturn);
 }
