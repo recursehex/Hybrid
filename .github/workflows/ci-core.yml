@@ -1,0 +1,40 @@
+name: Core CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - std-arc
+
+concurrency:
+  group: core-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-core:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_VERSION: "20"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3 libc++-dev libc++abi-dev
+
+      - name: Install LLVM/Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Build compiler
+        run: ./build.sh -c
+
+      - name: Run full test suite
+        run: ./run_tests.sh -j 4
+
+      - name: ARC-off regression smoke
+        run: ./run_tests.sh -a off arc/arc_off
