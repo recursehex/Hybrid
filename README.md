@@ -157,11 +157,11 @@ run_tests.bat -v
 Comprehensive documentation is available in the `docs/` directory:
 
 - [Language Reference](docs/language-reference.md) - Syntax and language basics
-- [Type System](docs/type-system.md) - Types and type safety
-- [Functions](docs/functions.md) - Function definitions and calls
-- [Control Flow](docs/control-flow.md) - Statements and loops
-- [Arrays](docs/arrays.md) - Array types and operations
-- [Expressions](docs/expressions.md) - Operators and expressions
+- [Type System](docs/type_system/README.md) - Types and type safety
+- [Functions](docs/type_system/functions.md) - Function definitions and calls
+- [Control Flow](docs/control_flow/README.md) - Statements and loops
+- [Arrays](docs/type_system/arrays.md) - Array types and operations
+- [Expressions](docs/type_system/expressions.md) - Operators and expressions
 - [Examples](docs/examples.md) - Complete example programs
 - [Architecture](docs/architecture.md) - Compiler design and internals
 - [LLVM Code Generation](docs/llvm-codegen.md) - How code is generated
