@@ -424,6 +424,12 @@ if exist "build\hybrid.exe" (
 )
 
 if not defined HYBRID_EXEC (
+    for /r "build" %%f in (hybrid.exe) do (
+        if not defined HYBRID_EXEC set "HYBRID_EXEC=%%f"
+    )
+)
+
+if not defined HYBRID_EXEC (
     echo %RED%Error: hybrid executable not found.%NC%
     echo %RED%Build the project first using:%NC%
     echo %RED%  cmake -B build ^&^& cmake --build build%NC%

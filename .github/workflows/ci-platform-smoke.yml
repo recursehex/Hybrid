@@ -51,8 +51,14 @@ jobs:
           if exist "build\hybrid.exe" exit /b 0
           if exist "build\Release\hybrid.exe" exit /b 0
           if exist "build\Debug\hybrid.exe" exit /b 0
+          set "FOUND="
+          for /r build %%f in (hybrid.exe) do (
+            echo Found: %%f
+            set "FOUND=1"
+          )
+          if defined FOUND exit /b 0
           echo Missing hybrid.exe after build
-          dir /s /b build\*.exe
+          dir /s /b build\*.exe 2>nul
           exit /b 1
 
       - name: Test smoke set (macOS)

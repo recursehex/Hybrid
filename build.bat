@@ -200,20 +200,29 @@ if errorlevel 1 (
 
 echo.
 echo %GREEN%Build completed successfully!%NC%
+set "FOUND_EXE="
 if defined GENERATOR_ARG (
     if exist "%BUILD_DIR%\hybrid.exe" (
-        echo Executable: %BUILD_DIR%\hybrid.exe
-    ) else (
-        echo Executable: %BUILD_DIR%\hybrid
+        set "FOUND_EXE=%BUILD_DIR%\hybrid.exe"
     )
 ) else (
     if exist "%BUILD_DIR%\%BUILD_TYPE%\hybrid.exe" (
-        echo Executable: %BUILD_DIR%\%BUILD_TYPE%\hybrid.exe
+        set "FOUND_EXE=%BUILD_DIR%\%BUILD_TYPE%\hybrid.exe"
     ) else if exist "%BUILD_DIR%\hybrid.exe" (
-        echo Executable: %BUILD_DIR%\hybrid.exe
-    ) else (
-        echo Executable: %BUILD_DIR%\hybrid
+        set "FOUND_EXE=%BUILD_DIR%\hybrid.exe"
     )
+)
+
+if not defined FOUND_EXE (
+    for /r "%BUILD_DIR%" %%f in (hybrid.exe) do (
+        if not defined FOUND_EXE set "FOUND_EXE=%%f"
+    )
+)
+
+if defined FOUND_EXE (
+    echo Executable: !FOUND_EXE!
+) else (
+    echo Executable: %BUILD_DIR%\hybrid
 )
 
 :: ---------------------------------------------------------------------------
