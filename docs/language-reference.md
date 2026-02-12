@@ -95,7 +95,7 @@ class Box
 - Nullable delegates use `?` and must be checked before calling.
 - Instance method references require a receiver (`counter.Add`, not `Counter.Add`).
 
-See the [Functions guide](functions.md#delegates) for detailed rules and examples.
+See the [Functions guide](type_system/functions.md#delegates) for detailed rules and examples.
 
 ## Keywords
 
@@ -313,7 +313,7 @@ See `docs/memory/arc_best_practices.md` for ownership patterns and common ARC pi
 - Use `??` to supply a fallback when a nullable value is `null`
 - Use `??=` to assign a fallback when a nullable variable is `null`
 
-See the [Type System](type-system.md#nullable-types), [Structs](structs.md#nullable-fields), and [Expressions](expressions.md#null-safe-member-access) guides for details.
+See the [Type System](type_system/types.md#nullable-types), [Structs](type_system/structs.md#nullable-fields), and [Expressions](type_system/expressions.md#null-safe-member-access) guides for details.
 
 ## Operator Overloading
 
@@ -343,11 +343,11 @@ Hybrid supports C++-style operator overloading on struct/class instance methods 
 - Binary and unary expressions
 
 See the individual documentation files for detailed information on each construct:
-- [Type System](type-system.md)
-- [Functions](functions.md)
-- [Control Flow](control-flow.md)
-- [Expressions](expressions.md)
-- [Arrays](arrays.md)
-- [Reference Types](references.md)
-- [Pointers and Memory Safety](pointers-and-memory-safety.md)
-- [Structs](structs.md)
+- [Type System](type_system/README.md)
+- [Functions](type_system/functions.md)
+- [Control Flow](control_flow/README.md)
+- [Expressions](type_system/expressions.md)
+- [Arrays](type_system/arrays.md)
+- [Reference Types](type_system/references.md)
+- [Pointers and Memory Safety](type_system/pointers.md)
+- [Structs](type_system/structs.md)

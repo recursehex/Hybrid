@@ -1,0 +1,72 @@
+name: Docs Check
+
+on:
+  pull_request:
+    paths:
+      - "README.md"
+      - "docs/**"
+  push:
+    branches:
+      - main
+      - std-arc
+    paths:
+      - "README.md"
+      - "docs/**"
+
+concurrency:
+  group: docs-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markdown-links:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate local markdown links
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          root = pathlib.Path(".").resolve()
+          md_files = [root / "README.md"] + sorted((root / "docs").rglob("*.md"))
+          link_re = re.compile(r"(?<!\!)\[[^\]]+\]\(([^)]+)\)")
+          bad = []
+
+          for md in md_files:
+              if not md.exists():
+                  continue
+              text = md.read_text(encoding="utf-8")
+              for raw_target in link_re.findall(text):
+                  target = raw_target.strip()
+                  if not target:
+                      continue
+                  target = target.split(" ", 1)[0].strip("<>")
+                  if target.startswith(("http://", "https://", "mailto:")):
+                      continue
+                  if target.startswith("#"):
+                      continue
+
+                  path_part = target.split("#", 1)[0]
+                  if not path_part:
+                      continue
+
+                  if path_part.startswith("/"):
+                      resolved = root / path_part.lstrip("/")
+                  else:
+                      resolved = (md.parent / path_part).resolve()
+
+                  if not resolved.exists():
+                      bad.append(f"{md.relative_to(root)} -> {target}")
+
+          if bad:
+              print("Broken local markdown links:")
+              for entry in bad:
+                  print(f"  - {entry}")
+              sys.exit(1)
+
+          print(f"Validated local markdown links across {len(md_files)} files.")
+          PY

@@ -22,7 +22,7 @@ Additional conveniences:
 - Integer literals are automatically range-checked during lexing; values that would overflow 64 bits trigger a diagnostic.
 - During code generation a literal adopts the type of its context. For example `0xFF` stored in a `byte` remains 8 bits, while the same literal in a `long` is sign-extended to 64 bits.
 
-See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for how Hybrid narrows or widens literals based on surrounding expressions.
+See [Type System - Literal Type Inference](type_inference.md#context-aware-literal-type-inference) for how Hybrid narrows or widens literals based on surrounding expressions.
 
 ## Operator Precedence
 
@@ -93,7 +93,7 @@ byte result1 = b2 + 5   // Right operand is literal
 byte result2 = 5 + b2   // Left operand is literal
 ```
 
-See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for more details.
+See [Type System - Literal Type Inference](type_inference.md#context-aware-literal-type-inference) for more details.
 
 ### Unary Operators
 
@@ -208,7 +208,7 @@ bool test1 = value == 42    // Literal on right
 bool test2 = 42 == value    // Literal on left
 ```
 
-This eliminates the need for explicit casts like `b == byte: 100` in most cases. See [Type System - Literal Type Inference](type-system.md#context-aware-literal-type-inference) for details.
+This eliminates the need for explicit casts like `b == byte: 100` in most cases. See [Type System - Literal Type Inference](type_inference.md#context-aware-literal-type-inference) for details.
 
 ## Type Check Operators
 
