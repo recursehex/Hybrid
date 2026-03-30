@@ -129,21 +129,26 @@ static inline bool hybrid_refcount_release_strong(
   if (!header)
     return false;
 #ifdef __cplusplus
-  const std::uint32_t previous =
-      header->strongCount.fetch_sub(1, HYBRID_ACQ_REL);
-  if (previous == 0) {
-    header->strongCount.store(0, HYBRID_RELAXED);
-    return false;
+  std::uint32_t expected = header->strongCount.load(HYBRID_RELAXED);
+  while (true) {
+    if (expected == 0)
+      return false;
+    if (header->strongCount.compare_exchange_weak(expected, expected - 1,
+                                                  HYBRID_ACQ_REL,
+                                                  HYBRID_RELAXED))
+      return expected == 1;
   }
-  return previous == 1;
 #else
-  const uint32_t previous =
-      atomic_fetch_sub_explicit(&header->strongCount, 1, HYBRID_ACQ_REL);
-  if (previous == 0) {
-    atomic_store_explicit(&header->strongCount, 0, HYBRID_RELAXED);
-    return false;
+  uint32_t expected = atomic_load_explicit(&header->strongCount, HYBRID_RELAXED);
+  while (1) {
+    if (expected == 0)
+      return 0;
+    if (atomic_compare_exchange_weak_explicit(&header->strongCount,
+                                              &expected, expected - 1,
+                                              HYBRID_ACQ_REL,
+                                              HYBRID_RELAXED))
+      return expected == 1;
   }
-  return previous == 1;
 #endif
 }
 
@@ -163,21 +168,26 @@ static inline bool hybrid_refcount_release_weak(
   if (!header)
     return false;
 #ifdef __cplusplus
-  const std::uint32_t previous =
-      header->weakCount.fetch_sub(1, HYBRID_ACQ_REL);
-  if (previous == 0) {
-    header->weakCount.store(0, HYBRID_RELAXED);
-    return false;
+  std::uint32_t expected = header->weakCount.load(HYBRID_RELAXED);
+  while (true) {
+    if (expected == 0)
+      return false;
+    if (header->weakCount.compare_exchange_weak(expected, expected - 1,
+                                                HYBRID_ACQ_REL,
+                                                HYBRID_RELAXED))
+      return expected == 1;
   }
-  return previous == 1;
 #else
-  const uint32_t previous =
-      atomic_fetch_sub_explicit(&header->weakCount, 1, HYBRID_ACQ_REL);
-  if (previous == 0) {
-    atomic_store_explicit(&header->weakCount, 0, HYBRID_RELAXED);
-    return false;
+  uint32_t expected = atomic_load_explicit(&header->weakCount, HYBRID_RELAXED);
+  while (1) {
+    if (expected == 0)
+      return 0;
+    if (atomic_compare_exchange_weak_explicit(&header->weakCount,
+                                              &expected, expected - 1,
+                                              HYBRID_ACQ_REL,
+                                              HYBRID_RELAXED))
+      return expected == 1;
   }
-  return previous == 1;
 #endif
 }
 
@@ -270,7 +280,7 @@ hybrid_string_t *__hybrid_string_slice(hybrid_string_t *source, size_t start,
 hybrid_string_t *__hybrid_string_append_mut(hybrid_string_t *base,
                                             hybrid_string_t *suffix);
 size_t hybrid_string_size(const hybrid_string_t *str);
-int hybrid_strlen(const hybrid_string_t *str);
+int64_t hybrid_strlen(const hybrid_string_t *str);
 void print_string(hybrid_string_t *str);
 
 hybrid_decimal_t __hybrid_decimal_parse(const char *text, size_t length);
@@ -294,10 +304,18 @@ uint64_t __hybrid_decimal_to_u64(hybrid_decimal_t value);
 hybrid_decimal_t __hybrid_decimal_from_double(double value);
 double __hybrid_decimal_to_double(hybrid_decimal_t value);
 
-extern int hybrid_debug_leaks;
-extern int hybrid_debug_reftrace;
-extern int hybrid_debug_verify;
-extern int hybrid_debug_pool;
+#ifdef __cplusplus
+#include <atomic>
+extern std::atomic<int> hybrid_debug_leaks;
+extern std::atomic<int> hybrid_debug_reftrace;
+extern std::atomic<int> hybrid_debug_verify;
+extern std::atomic<int> hybrid_debug_pool;
+#else
+extern _Atomic int hybrid_debug_leaks;
+extern _Atomic int hybrid_debug_reftrace;
+extern _Atomic int hybrid_debug_verify;
+extern _Atomic int hybrid_debug_pool;
+#endif
 
 void hybrid_arc_set_debug_flags(int leakDetect, int refTrace, int verify,
                                 int poolDebug);

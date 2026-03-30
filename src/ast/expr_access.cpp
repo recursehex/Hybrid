@@ -337,8 +337,9 @@ llvm::Value *VariableExprAST::codegen_ptr() {
                     comp->kind == AggregateKind::Interface;
       }
       if (needsLoad) {
-        llvm::AllocaInst *Alloca = static_cast<llvm::AllocaInst*>(V);
-        return Builder->CreateLoad(Alloca->getAllocatedType(), V, (getName() + "_ptr").c_str());
+        if (auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(V))
+          return Builder->CreateLoad(Alloca->getAllocatedType(), V, (getName() + "_ptr").c_str());
+        return LogErrorV("Internal error: expected alloca for ref variable '" + getName() + "'");
       }
       // For ref value owners we can just return the alloca itself
     }

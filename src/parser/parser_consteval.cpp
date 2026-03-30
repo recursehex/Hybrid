@@ -113,25 +113,30 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result,
 
     if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
       if (isSignedInt(lhs) && isSignedInt(rhs)) {
+        long long a = lhs.intVal, b = rhs.intVal;
         long long arithResult = 0;
+        // Use unsigned arithmetic to avoid signed overflow UB
         if (op == "+") {
-          arithResult = lhs.intVal + rhs.intVal;
+          arithResult = static_cast<long long>(
+              static_cast<unsigned long long>(a) + static_cast<unsigned long long>(b));
         } else if (op == "-") {
-          arithResult = lhs.intVal - rhs.intVal;
+          arithResult = static_cast<long long>(
+              static_cast<unsigned long long>(a) - static_cast<unsigned long long>(b));
         } else if (op == "*") {
-          arithResult = lhs.intVal * rhs.intVal;
+          arithResult = static_cast<long long>(
+              static_cast<unsigned long long>(a) * static_cast<unsigned long long>(b));
         } else if (op == "/") {
-          if (rhs.intVal == 0) {
+          if (b == 0 || (a == std::numeric_limits<long long>::min() && b == -1)) {
             noteFailure(binExpr);
             return false;
           }
-          arithResult = lhs.intVal / rhs.intVal;
+          arithResult = a / b;
         } else if (op == "%") {
-          if (rhs.intVal == 0) {
+          if (b == 0 || (a == std::numeric_limits<long long>::min() && b == -1)) {
             noteFailure(binExpr);
             return false;
           }
-          arithResult = lhs.intVal % rhs.intVal;
+          arithResult = a % b;
         }
         result = ConstantValue(arithResult);
         return true;
@@ -191,14 +196,23 @@ bool EvaluateConstantExpression(const ExprAST* expr, ConstantValue& result,
 
     if (op == "<<" || op == ">>") {
       if (lhs.type == ConstantValue::INTEGER && rhs.type == ConstantValue::INTEGER) {
+        if (rhs.intVal < 0 || rhs.intVal >= 64) {
+          noteFailure(binExpr);
+          return false;
+        }
         if (op == "<<")
-          result = ConstantValue(lhs.intVal << rhs.intVal);
+          result = ConstantValue(static_cast<long long>(
+              static_cast<unsigned long long>(lhs.intVal) << rhs.intVal));
         else
           result = ConstantValue(lhs.intVal >> rhs.intVal);
         return true;
       }
       if (lhs.type == ConstantValue::UNSIGNED_INTEGER &&
           rhs.type == ConstantValue::UNSIGNED_INTEGER) {
+        if (rhs.uintVal >= 64) {
+          noteFailure(binExpr);
+          return false;
+        }
         if (op == "<<")
           result = ConstantValue(lhs.uintVal << rhs.uintVal);
         else

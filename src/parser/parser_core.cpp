@@ -175,9 +175,9 @@ int GetTokPrecedence() {
   // Handle single character operators
   if (isascii(CurTok)) {
     std::string Op(1, (char)CurTok);
-    int TokPrec = BinopPrecedence[Op];
-    if (TokPrec > 0)
-      return TokPrec;
+    auto it = BinopPrecedence.find(Op);
+    if (it != BinopPrecedence.end() && it->second > 0)
+      return it->second;
   }
 
   return -1;

@@ -35,10 +35,10 @@ hybrid_register_type_descriptor(const HybridTypeDescriptor *descriptor) {
 int hybrid_verify_descriptor_layout(void) { return 1; }
 
 // ARC debug stubs
-int hybrid_debug_leaks = 0;
-int hybrid_debug_reftrace = 0;
-int hybrid_debug_verify = 0;
-int hybrid_debug_pool = 0;
+_Atomic int hybrid_debug_leaks = 0;
+_Atomic int hybrid_debug_reftrace = 0;
+_Atomic int hybrid_debug_verify = 0;
+_Atomic int hybrid_debug_pool = 0;
 
 void hybrid_arc_set_debug_flags(int leakDetect, int refTrace, int verify,
                                 int poolDebug) {
@@ -494,8 +494,8 @@ size_t hybrid_string_size(const hybrid_string_t *str) {
   return str->length;
 }
 
-int hybrid_strlen(const hybrid_string_t *str) {
-  return (int)hybrid_string_size(str);
+int64_t hybrid_strlen(const hybrid_string_t *str) {
+  return (int64_t)hybrid_string_size(str);
 }
 
 hybrid_string_t *__hybrid_string_from_utf8(const char *utf8, size_t length) {

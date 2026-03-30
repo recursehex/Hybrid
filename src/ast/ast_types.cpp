@@ -158,6 +158,7 @@ ParsedTypeDescriptor parseTypeString(const std::string &typeName) {
       trimLeadingWhitespace();
       return true;
     };
+    tryConsume("owned") || tryConsume("unowned") || tryConsume("weak");
   };
 
   stripOwnershipQualifier();

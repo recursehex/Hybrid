@@ -597,6 +597,79 @@ llvm::Value *BinaryExprAST::codegen() {
     return codegenNullCoalescingAssign(L);
   }
 
+  // Short-circuit evaluation for logical && and ||.
+  // The RHS must only be evaluated when the LHS doesn't determine the result.
+  if (Op == "&&" || Op == "||") {
+    llvm::Value *L = getLHS()->codegen();
+    if (!L)
+      return nullptr;
+
+    if (getLHS()->getTypeName() != "bool" || getRHS()->getTypeName() != "bool") {
+      // Allow codegen to proceed for type checking — getRHS typeName may
+      // not be set yet if it hasn't been parsed with type info, so fall
+      // through only when both are known and wrong.
+      if (!getLHS()->getTypeName().empty() && getLHS()->getTypeName() != "bool") {
+        std::string opName = (Op == "&&") ? "AND" : "OR";
+        return LogErrorV("Boolean " + opName + " operator '" + Op +
+                         "' can only be used with bool types");
+      }
+    }
+
+    // Convert LHS to i1
+    llvm::Value *LBool = L;
+    if (LBool->getType()->isIntegerTy(8))
+      LBool = Builder->CreateTrunc(LBool, llvm::Type::getInt1Ty(*TheContext), "tobool");
+
+    llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock *LhsBB = Builder->GetInsertBlock();
+    llvm::BasicBlock *RhsBB = llvm::BasicBlock::Create(*TheContext, "sc.rhs", TheFunction);
+    llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "sc.merge", TheFunction);
+
+    if (Op == "&&") {
+      // If LHS is false, short-circuit to false; otherwise evaluate RHS
+      Builder->CreateCondBr(LBool, RhsBB, MergeBB);
+    } else {
+      // If LHS is true, short-circuit to true; otherwise evaluate RHS
+      Builder->CreateCondBr(LBool, MergeBB, RhsBB);
+    }
+
+    // Emit RHS
+    Builder->SetInsertPoint(RhsBB);
+    llvm::Value *R = getRHS()->codegen();
+    if (!R)
+      return nullptr;
+
+    if (getRHS()->getTypeName() != "bool" && !getRHS()->getTypeName().empty()) {
+      std::string opName = (Op == "&&") ? "AND" : "OR";
+      return LogErrorV("Boolean " + opName + " operator '" + Op +
+                       "' can only be used with bool types");
+    }
+
+    llvm::Value *RBool = R;
+    if (RBool->getType()->isIntegerTy(8))
+      RBool = Builder->CreateTrunc(RBool, llvm::Type::getInt1Ty(*TheContext), "tobool");
+
+    // RHS codegen may have changed the current block
+    llvm::BasicBlock *RhsEndBB = Builder->GetInsertBlock();
+    Builder->CreateBr(MergeBB);
+
+    // Merge
+    Builder->SetInsertPoint(MergeBB);
+    llvm::PHINode *Phi = Builder->CreatePHI(llvm::Type::getInt1Ty(*TheContext), 2, "sc.result");
+    if (Op == "&&") {
+      // From LhsBB (short-circuit): LHS was false → result is false
+      Phi->addIncoming(llvm::ConstantInt::getFalse(*TheContext), LhsBB);
+      Phi->addIncoming(RBool, RhsEndBB);
+    } else {
+      // From LhsBB (short-circuit): LHS was true → result is true
+      Phi->addIncoming(llvm::ConstantInt::getTrue(*TheContext), LhsBB);
+      Phi->addIncoming(RBool, RhsEndBB);
+    }
+
+    setTypeName("bool");
+    return Builder->CreateZExt(Phi, llvm::Type::getInt8Ty(*TheContext), "booltmp");
+  }
+
   llvm::Value *R = nullptr;
   llvm::Value *precomputedLhsValue = nullptr;
   bool hasPrecomputedLhsValue = false;
@@ -1985,6 +2058,12 @@ llvm::Value *BinaryExprAST::codegen() {
       }
       }
       
+      // Cast result back to the original element type if needed
+      if (Result->getType() != ElemType) {
+        Result = castToType(Result, ElemType, elementTypeNameForPromotion);
+        if (!Result)
+          return nullptr;
+      }
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
       // Return a void value to indicate this is a statement, not an expression
@@ -3509,6 +3588,13 @@ llvm::Value *BinaryExprAST::codegen() {
         return LogErrorV("Unknown bitwise compound assignment operator");
       }
       
+      // Cast result back to the original storage type if needed
+      if (Result->getType() != ValueType) {
+        std::string castTargetName = !lhsPromoteType.empty() ? lhsPromoteType : LHSE->getTypeName();
+        Result = castToType(Result, ValueType, castTargetName);
+        if (!Result)
+          return nullptr;
+      }
       // Store the result back
       if (isAlias) {
         Builder->CreateStore(Result, StoragePtr);
@@ -3518,7 +3604,7 @@ llvm::Value *BinaryExprAST::codegen() {
       // Return a void value to indicate this is a statement, not an expression
       setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
-      
+
     } else if (ArrayIndexExprAST *LHSE = dynamic_cast<ArrayIndexExprAST*>(getLHS())) {
       // Array element compound assignment: arr[i] &= val
       auto accessOpt = computeArrayElementAccess(LHSE);
@@ -3581,13 +3667,19 @@ llvm::Value *BinaryExprAST::codegen() {
       } else {
         return LogErrorV("Unknown bitwise compound assignment operator");
       }
-      
+
+      // Cast result back to the original element type if needed
+      if (Result->getType() != ElemType) {
+        Result = castToType(Result, ElemType, elementTypeNameForPromotion);
+        if (!Result)
+          return nullptr;
+      }
       // Store the result back
       Builder->CreateStore(Result, ElementPtr);
       // Return a void value to indicate this is a statement, not an expression
       setTypeName("void");
       return llvm::UndefValue::get(llvm::Type::getVoidTy(*TheContext));
-      
+
     } else {
       return LogErrorV("destination of bitwise compound assignment must be a variable or array element");
     }

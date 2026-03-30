@@ -170,7 +170,7 @@ llvm::Value *TernaryExprAST::codegen() {
   if (!ThenV)
     return nullptr;
 
-  Builder->CreateBr(MergeBB);
+  // Don't branch yet — we may need to insert type promotions first.
   // Codegen of 'Then' can change the current block, update ThenBB for the PHI
   ThenBB = Builder->GetInsertBlock();
 
@@ -181,33 +181,38 @@ llvm::Value *TernaryExprAST::codegen() {
   if (!ElseV)
     return nullptr;
 
-  Builder->CreateBr(MergeBB);
   // Codegen of 'Else' can change the current block, update ElseBB for the PHI
   ElseBB = Builder->GetInsertBlock();
-
-  // Emit merge block
-  MergeBB->insertInto(TheFunction);
-  Builder->SetInsertPoint(MergeBB);
 
   // Determine result type and handle type promotion
   llvm::Type *ResultType = ThenV->getType();
   std::string thenTypeName = ThenExprNode ? ThenExprNode->getTypeName() : "";
   std::string elseTypeName = ElseExprNode ? ElseExprNode->getTypeName() : "";
 
-  // Type-cast expressions to match if needed
+  // Type-cast expressions to match if needed.
+  // Promotions must be emitted in the respective then/else blocks so that
+  // the PHI incoming values dominate their predecessor blocks.
   if (ThenV->getType() != ElseV->getType()) {
     // Handle type promotion for numeric types
     if (ThenV->getType()->isDoubleTy() && ElseV->getType()->isIntegerTy(32)) {
+      // ElseV needs promotion — emit in ElseBB (insert point is already there)
       ElseV = Builder->CreateSIToFP(ElseV, ThenV->getType(), "int_to_double");
       ResultType = ThenV->getType();
     } else if (ElseV->getType()->isDoubleTy() && ThenV->getType()->isIntegerTy(32)) {
+      // ThenV needs promotion — switch to ThenBB to emit, then back to ElseBB
+      Builder->SetInsertPoint(ThenBB);
       ThenV = Builder->CreateSIToFP(ThenV, ElseV->getType(), "int_to_double");
+      ThenBB = Builder->GetInsertBlock();
+      Builder->SetInsertPoint(ElseBB);
       ResultType = ElseV->getType();
     } else if (ThenV->getType()->isFloatTy() && ElseV->getType()->isIntegerTy(32)) {
       ElseV = Builder->CreateSIToFP(ElseV, ThenV->getType(), "int_to_float");
       ResultType = ThenV->getType();
     } else if (ElseV->getType()->isFloatTy() && ThenV->getType()->isIntegerTy(32)) {
+      Builder->SetInsertPoint(ThenBB);
       ThenV = Builder->CreateSIToFP(ThenV, ElseV->getType(), "int_to_float");
+      ThenBB = Builder->GetInsertBlock();
+      Builder->SetInsertPoint(ElseBB);
       ResultType = ElseV->getType();
     } else if (ResultType->isStructTy() && ElseV->getType()->isPointerTy() &&
                llvm::isa<llvm::ConstantPointerNull>(ElseV)) {
@@ -221,6 +226,20 @@ llvm::Value *TernaryExprAST::codegen() {
       return LogErrorV("Branches must have compatible types");
     }
   }
+
+  // Now emit branches from both blocks into MergeBB
+  // ElseBB branch — insert point is already at ElseBB
+  ElseBB = Builder->GetInsertBlock();
+  Builder->CreateBr(MergeBB);
+
+  // ThenBB branch
+  Builder->SetInsertPoint(ThenBB);
+  Builder->CreateBr(MergeBB);
+  ThenBB = Builder->GetInsertBlock();
+
+  // Emit merge block
+  MergeBB->insertInto(TheFunction);
+  Builder->SetInsertPoint(MergeBB);
 
   auto pickMeaningfulTypeName = [](const std::string &name) -> std::string {
     if (name.empty() || name == "null" || name == "void")

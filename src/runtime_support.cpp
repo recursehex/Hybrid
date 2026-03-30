@@ -169,8 +169,8 @@ size_t hybrid_string_size(const hybrid_string_t *str) {
   return str->length;
 }
 
-int hybrid_strlen(const hybrid_string_t *str) {
-  return static_cast<int>(hybrid_string_size(str));
+int64_t hybrid_strlen(const hybrid_string_t *str) {
+  return static_cast<int64_t>(hybrid_string_size(str));
 }
 
 hybrid_string_t *__hybrid_string_from_utf8(const char *utf8, size_t length) {
@@ -466,6 +466,10 @@ hybrid_string_t *__hybrid_decimal_to_string(hybrid_decimal_t value,
 hybrid_string_t *__hybrid_string_from_char32(int32_t codepoint) {
   if (codepoint < 0)
     codepoint = 0;
+  uint32_t cp0 = static_cast<uint32_t>(codepoint);
+  // Reject surrogate codepoints and values above U+10FFFF
+  if ((cp0 >= 0xD800 && cp0 <= 0xDFFF) || cp0 > 0x10FFFF)
+    codepoint = 0xFFFD; // replacement character
 
   char buffer[8];
   size_t bytes = 0;

@@ -351,7 +351,7 @@ int gettok() {
   }
 
   // Skip any whitespace except newlines.
-  while (isspace(LastChar) && LastChar != '\n' && LastChar != '\r')
+  while (isspace(static_cast<unsigned char>(LastChar)) && LastChar != '\n' && LastChar != '\r')
     LastChar = lex.consumeChar();
 
   if (lex.inInterpolatedString && !lex.inInterpolatedExpression) {
@@ -385,11 +385,11 @@ int gettok() {
     lex.unconsumeChar(NextChar);
   }
 
-  if (isalpha(LastChar) || LastChar == '_') { // identifier: [a-zA-Z_][a-zA-Z0-9_]*
+  if (isalpha(static_cast<unsigned char>(LastChar)) || LastChar == '_') { // identifier: [a-zA-Z_][a-zA-Z0-9_]*
     SourceLocation start = lex.lastCharLocation();
     lex.setTokenStart(start);
     lex.identifierStr = LastChar;
-    while (isalnum((LastChar = lex.consumeChar())) || LastChar == '_')
+    while (isalnum(static_cast<unsigned char>(LastChar = lex.consumeChar())) || LastChar == '_')
       lex.identifierStr += LastChar;
 
     if (lex.identifierStr == "use")
@@ -521,7 +521,7 @@ int gettok() {
     return tok_identifier;
   }
 
-  if (isdigit(LastChar)) {
+  if (isdigit(static_cast<unsigned char>(LastChar))) {
     SourceLocation start = lex.lastCharLocation();
     lex.setTokenStart(start);
     if (LastChar == '0') {
@@ -590,7 +590,7 @@ int gettok() {
   if (LastChar == '.') {
     SourceLocation start = lex.lastCharLocation();
     int NextChar = lex.consumeChar();
-    if (isdigit(NextChar)) {
+    if (isdigit(static_cast<unsigned char>(NextChar))) {
       std::string literal = ".";
       literal += static_cast<char>(NextChar);
       bool hasExponent = false;
@@ -686,6 +686,9 @@ string_continue:
       LastChar = lex.consumeChar(); // eat closing "
       return tok_string_literal;
     }
+    // Unterminated string literal (hit EOF)
+    reportCompilerError("Unterminated string literal");
+    return tok_error;
   }
 
   if (LastChar == '\'') { // Character literal: '.'

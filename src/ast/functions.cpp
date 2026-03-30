@@ -9,7 +9,7 @@ void PrototypeAST::prependImplicitParameter(Parameter Param) {
 
 //===----------------------------------------------------------------------===//
 
-const std::string &PrototypeAST::getMangledName() const {
+std::string PrototypeAST::getMangledName() const {
   auto buildSignature = [this]() {
     std::string signature;
     signature.reserve(32 + Args.size() * 16);
@@ -147,7 +147,7 @@ llvm::Function *PrototypeAST::codegen() {
 
   llvm::FunctionType *FT = llvm::FunctionType::get(RetType, ParamTypes, false);
 
-  const std::string &Mangled = getMangledName();
+  const std::string Mangled = getMangledName();
 
   llvm::Function *F = TheModule->getFunction(Mangled);
   if (!F) {
@@ -205,7 +205,7 @@ llvm::Function *FunctionAST::codegen() {
                           getProto()->getReturnType() == "void" &&
                           !getProto()->returnsByRef();
 
-  const std::string &MangledName = getProto()->getMangledName();
+  const std::string MangledName = getProto()->getMangledName();
   llvm::Function *TheFunction = TheModule->getFunction(MangledName);
 
   if (!TheFunction)
@@ -336,7 +336,7 @@ llvm::Function *FunctionAST::codegen() {
     if (!functionCodegenSucceeded) {
       if (Builder)
         Builder->ClearInsertionPoint();
-      CG.arcScopeStack.clear();
+      // Note: ArcScopeGuard destructor will clean up arcScopeStack
       TheFunction->eraseFromParent();
       if (overloadEntry)
         overloadEntry->function = nullptr;

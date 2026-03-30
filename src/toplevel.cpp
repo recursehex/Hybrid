@@ -14,7 +14,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
-static bool gInteractiveMode = true;
+static thread_local bool gInteractiveMode = true;
 
 #define CurTok (currentParser().curTok)
 #define StructNames (currentParser().structNames)
@@ -256,32 +256,29 @@ void HandleAbstractComposite() {
   }
 }
 
+namespace {
+struct UnsafeContextGuard {
+  UnsafeContextGuard() { enterUnsafeContext(); }
+  ~UnsafeContextGuard() { exitUnsafeContext(); }
+  UnsafeContextGuard(const UnsafeContextGuard &) = delete;
+  UnsafeContextGuard &operator=(const UnsafeContextGuard &) = delete;
+};
+} // namespace
+
 void HandleUnsafe() {
   getNextToken(); // eat 'unsafe'
 
+  UnsafeContextGuard guard;
   if (CurTok == tok_struct) {
-    // Handle unsafe struct definition
-    enterUnsafeContext();
     HandleStructDefinition();
-    exitUnsafeContext();
   } else if (CurTok == tok_class) {
-    enterUnsafeContext();
     HandleClassDefinition();
-    exitUnsafeContext();
   } else if (CurTok == tok_interface) {
-    enterUnsafeContext();
     HandleInterfaceDefinition();
-    exitUnsafeContext();
   } else if (CurTok == tok_extern) {
-    // Support 'unsafe extern' prototypes.
-    enterUnsafeContext();
     HandleExtern();
-    exitUnsafeContext();
   } else {
-    // Handle unsafe function definition
-    enterUnsafeContext();
     HandleDefinition();
-    exitUnsafeContext();
   }
 }
 

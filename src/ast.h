@@ -1143,7 +1143,7 @@ public:
   void markAsExtern() { IsExtern = true; }
   void prependImplicitParameter(Parameter Param);
 
-  const std::string &getMangledName() const;
+  std::string getMangledName() const;
 
   llvm::Function *codegen();
 };

@@ -56,6 +56,7 @@ std::unique_ptr<VariableDeclarationStmtAST> ParseVariableDeclaration(bool isRef)
 
   if (CurTok == ',') {
     LogError("Expected '=' after variable name. Multiple variable declarations in a single statement are not allowed");
+    return nullptr;
   }
 
   if (CurTok != '=') {

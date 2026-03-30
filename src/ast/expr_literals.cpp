@@ -1693,8 +1693,13 @@ llvm::Value *emitArrayFillValue(const TypeInfo &arrayInfo,
   }
 
   uint64_t totalCount = 1;
-  for (int64_t dim : dimensions)
+  for (int64_t dim : dimensions) {
+    if (dim < 0) {
+      reportCompilerError("Array dimension must be non-negative");
+      return nullptr;
+    }
     totalCount *= static_cast<uint64_t>(dim);
+  }
 
   llvm::Value *arrayDataPtr =
       llvm::ConstantPointerNull::get(pointerType(elementType));

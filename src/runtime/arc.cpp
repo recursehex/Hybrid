@@ -21,10 +21,10 @@
 
 using hybrid::memory::RefCount;
 
-int hybrid_debug_leaks = 0;
-int hybrid_debug_reftrace = 0;
-int hybrid_debug_verify = 0;
-int hybrid_debug_pool = 0;
+std::atomic<int> hybrid_debug_leaks{0};
+std::atomic<int> hybrid_debug_reftrace{0};
+std::atomic<int> hybrid_debug_verify{0};
+std::atomic<int> hybrid_debug_pool{0};
 using ArrayHeader = hybrid_array_header_t;
 static const HybridTypeDescriptor *CachedArrayDescriptor = nullptr;
 static std::once_flag ArrayDescriptorInit;
@@ -636,13 +636,17 @@ void __hybrid_shared_control_release_strong(
     HybridSharedControlBlock *control) {
   if (!control)
     return;
-  std::uint32_t previous =
-      control->strongCount.fetch_sub(1, HYBRID_ACQ_REL);
-  if (previous == 0) {
-    control->strongCount.store(0, HYBRID_RELAXED);
-    return;
+  std::uint32_t expected =
+      control->strongCount.load(HYBRID_RELAXED);
+  while (true) {
+    if (expected == 0)
+      return;
+    if (control->strongCount.compare_exchange_weak(expected, expected - 1,
+                                                   HYBRID_ACQ_REL,
+                                                   HYBRID_RELAXED))
+      break;
   }
-  if (previous == 1) {
+  if (expected == 1) {
     void *payload = control->payload;
     control->payload = nullptr;
     if (payload)
@@ -662,13 +666,17 @@ void __hybrid_shared_control_release_weak(
     HybridSharedControlBlock *control) {
   if (!control)
     return;
-  std::uint32_t previous =
-      control->weakCount.fetch_sub(1, HYBRID_ACQ_REL);
-  if (previous == 0) {
-    control->weakCount.store(0, HYBRID_RELAXED);
-    return;
+  std::uint32_t expected =
+      control->weakCount.load(HYBRID_RELAXED);
+  while (true) {
+    if (expected == 0)
+      return;
+    if (control->weakCount.compare_exchange_weak(expected, expected - 1,
+                                                 HYBRID_ACQ_REL,
+                                                 HYBRID_RELAXED))
+      break;
   }
-  if (previous == 1) {
+  if (expected == 1) {
     std::free(control);
   }
 }

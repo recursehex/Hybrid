@@ -741,7 +741,11 @@ void popGenericTypeBindingScope() {
   ctx.genericTypeBindingsStack.pop_back();
 
   GenericsDiagnostics &diag = ctx.genericsDiagnostics;
-  if (!diag.bindingStack.empty())
+  // Only pop the diagnostic label if the stack depth matches — labels are
+  // only pushed when a non-empty frameLabel was provided, so we must not
+  // pop when the scope being removed had no label.
+  if (!diag.bindingStack.empty() &&
+      diag.bindingStack.size() > ctx.genericTypeBindingsStack.size())
     diag.bindingStack.pop_back();
   if (diag.currentBindingDepth > 0)
     --diag.currentBindingDepth;

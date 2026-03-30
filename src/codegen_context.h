@@ -269,9 +269,9 @@ struct CodegenContext {
 };
 
 inline void CodegenContext::reset() {
-  llvmContext.reset();
-  module.reset();
   builder.reset();
+  module.reset();
+  llvmContext.reset();
   namedValues.clear();
   globalValues.clear();
   globalTypes.clear();

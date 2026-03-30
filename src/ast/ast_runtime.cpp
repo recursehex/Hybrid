@@ -691,7 +691,7 @@ llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
       return LogErrorV(("Internal error: unable to resolve parameter type '" +
                         paramTypeName + "' for dynamic call")
                            .c_str());
-    if (memberInfo.parameterIsRef[idx])
+    if (idx < memberInfo.parameterIsRef.size() && memberInfo.parameterIsRef[idx])
       paramType = llvm::PointerType::get(*TheContext, 0);
     paramLLVMTypes.push_back(paramType);
   }
@@ -919,7 +919,7 @@ llvm::Value *emitDynamicFunctionCall(CallExprAST &callExpr,
     llvm::Value *arg = resolvedArgs[idx];
     llvm::Type *expected = fnType->getParamType(idx);
 
-    if (memberInfo.parameterIsRef[idx]) {
+    if (idx < memberInfo.parameterIsRef.size() && memberInfo.parameterIsRef[idx]) {
       if (expected && expected->isPointerTy() &&
           !arg->getType()->isPointerTy()) {
         llvm::AllocaInst *tmp = Builder->CreateAlloca(

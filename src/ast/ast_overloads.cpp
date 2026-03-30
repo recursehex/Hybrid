@@ -237,6 +237,8 @@ static DefaultArgInfo makeNumericDefault(const ConstantValue &value) {
     break;
   }
   case ConstantValue::BOOLEAN:
+    info.kind = DefaultArgInfo::Kind::Bool;
+    info.boolValue = value.boolVal;
     break;
   }
   return info;
@@ -457,7 +459,7 @@ std::string makeMethodSignatureKey(const std::string &methodName,
   key.push_back('(');
   size_t start = skipFirstParam && !paramTypes.empty() ? 1 : 0;
   for (size_t i = start; i < paramTypes.size(); ++i) {
-    if (i != 0)
+    if (i != start)
       key.push_back(',');
     if (i < paramIsRef.size() && paramIsRef[i])
       key.append("ref ");
